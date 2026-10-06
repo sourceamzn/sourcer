@@ -3,8 +3,9 @@ const lidl = require("./lidl");
 const iherb = require("./iherb");
 const amazon = require("./amazon");
 const keepa = require("./keepa");
+const web = require("./web");
 
-const adapters = { outletpc, lidl, iherb, amazon, keepa };
+const adapters = { outletpc, lidl, iherb, amazon, keepa, web };
 
 function list() {
   return Object.keys(adapters).map((id) => ({

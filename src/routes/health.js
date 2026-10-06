@@ -15,9 +15,9 @@ function health(req, res) {
     sources: {
       amazon: amazonReady(),
       keepa: keepaReady(),
-      outletpc: feedReady("outletpc"),
-      lidl: feedReady("lidl"),
-      iherb: feedReady("iherb"),
+      outletpc: true,
+      lidl: true,
+      iherb: scrapingReady() || feedReady("iherb"),
       scraping: scrapingReady()
     },
     adapters: list()

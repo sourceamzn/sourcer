@@ -33,10 +33,17 @@ test("GET /health responde ok sin claves", async () => {
   assert.ok(Array.isArray(body.adapters));
 });
 
-test("las cinco fuentes estan registradas", async () => {
+test("las seis fuentes estan registradas", async () => {
   const body = await (await fetch(base + "/health")).json();
   const ids = body.adapters.map((a) => a.id).sort();
-  assert.deepEqual(ids, ["amazon", "iherb", "keepa", "lidl", "outletpc"]);
+  assert.deepEqual(ids, ["amazon", "iherb", "keepa", "lidl", "outletpc", "web"]);
+});
+
+test("POST /sourcing/web/ping responde sin claves", async () => {
+  const out = await post("/sourcing/web/ping");
+  assert.equal(out.status, 200);
+  assert.equal(out.body.source, "web");
+  assert.equal(out.body.configured, true);
 });
 
 test("POST /sourcing/amazon/ping avisa de que no esta configurado", async () => {
@@ -70,4 +77,22 @@ test("amazon/listing exige asin", async () => {
   assert.equal(out.status, 200);
   assert.equal(out.body.ok, false);
   assert.equal(out.body.reason, "asin_required");
+});
+
+test("outletpc/search exige consulta", async () => {
+  const out = await post("/sourcing/outletpc/search", {});
+  assert.equal(out.status, 200);
+  assert.equal(out.body.reason, "query_required");
+});
+
+test("lidl/search exige consulta", async () => {
+  const out = await post("/sourcing/lidl/search", {});
+  assert.equal(out.status, 200);
+  assert.equal(out.body.reason, "query_required");
+});
+
+test("iherb/search exige consulta", async () => {
+  const out = await post("/sourcing/iherb/search", {});
+  assert.equal(out.status, 200);
+  assert.equal(out.body.reason, "query_required");
 });
