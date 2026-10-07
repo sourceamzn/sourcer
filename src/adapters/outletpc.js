@@ -28,8 +28,8 @@ const QUERY = [
   "priceRange{minVariantPrice{amount currencyCode} maxVariantPrice{amount currencyCode}}",
   "featuredImage{url}",
   "variants(first:10){edges{node{id title sku barcode price{amount currencyCode} compareAtPrice{amount currencyCode} availableForSale}}}",
-  "}}}}}"
-].join("");
+  "}}}}"
+].join(" ");
 
 let cached = { token: null, version: null, at: 0 };
 const CACHE_MS = 60 * 60 * 1000;
