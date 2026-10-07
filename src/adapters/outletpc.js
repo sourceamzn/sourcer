@@ -38,7 +38,7 @@ async function storefrontSession() {
   if (cached.token && cached.version && Date.now() - cached.at < CACHE_MS) return cached;
   const res = await jsonFetch(HOME, { method: "GET", headers: { "User-Agent": UA, Accept: "text/html" } }, 25000);
   const text = typeof res.data === "string" ? res.data : "";
-  const token = (text.match(/storefrontAccessToken"\s*:\s*"([a-f0-9]{20,})"/i) || [])[1] || null;
+  const token = (text.match(/storefrontAccessToken[^a-f0-9]*([a-f0-9]{20,})/i) || [])[1] || null;
   if (!token) return { error: "token_not_found" };
   cached = { token, version: API_VERSIONS[0], at: Date.now() };
   return cached;

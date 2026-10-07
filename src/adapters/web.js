@@ -18,7 +18,7 @@ function safeUrl(value) {
 async function readOnce(url) {
   const out = await jsonFetch(
     url,
-    { headers: { "User-Agent": "Mozilla/5.0 (compatible; sourcer/0.1; +https://github.com/hannansha/sourcer)" } },
+    { headers: { "User-Agent": "Mozilla/5.0 (compatible; sourcer/0.2; +https://github.com/sourceamzn/sourcer)" } },
     20000
   );
   if (out.ok && typeof out.data === "string" && out.data.replace(/\s/g, "").length > 120) {
