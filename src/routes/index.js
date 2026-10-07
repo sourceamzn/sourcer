@@ -1,0 +1,41 @@
+'use strict';
+
+const health = require('./health.routes');
+const publicRoutes = require('./public.routes');
+const affiliates = require('./affiliates.routes');
+const auth = require('./auth.routes');
+const clients = require('./clients.routes');
+const kyc = require('./kyc.routes');
+const leads = require('./leads.routes');
+const crm = require('./crm.routes');
+const accountTypes = require('./account-types.routes');
+const accountRequests = require('./account-requests.routes');
+const tradingAccounts = require('./trading-accounts.routes');
+const tradingOrders = require('./trading-orders.routes');
+const tradingMoney = require('./trading-money.routes');
+const tradingSummary = require('./trading-summary.routes');
+const cashRequests = require('./cash-requests.routes');
+const supportTickets = require('./support-tickets.routes');
+const crmTasks = require('./crm-tasks.routes');
+const events = require('./events.routes');
+
+module.exports = async function routes(app) {
+  await app.register(health);
+  await app.register(publicRoutes);
+  await app.register(affiliates);
+  await app.register(auth);
+  await app.register(clients);
+  await app.register(kyc);
+  await app.register(leads);
+  await app.register(crm);
+  await app.register(crmTasks);
+  await app.register(accountTypes);
+  await app.register(accountRequests);
+  await app.register(tradingAccounts);
+  await app.register(tradingOrders);
+  await app.register(tradingMoney);
+  await app.register(tradingSummary);
+  await app.register(cashRequests);
+  await app.register(supportTickets);
+  await app.register(events);
+};
