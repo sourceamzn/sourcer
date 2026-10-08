@@ -34,6 +34,7 @@ async function product(body) {
   if (offers) {
     params.offers = String(Math.max(20, Math.min(offers, 100)));
     params["only-live-offers"] = "1";
+    if (body && body.stock) params.stock = "1";
   } else if (body && body.buybox) {
     params.buybox = "1";
   }
