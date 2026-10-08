@@ -10,6 +10,10 @@ let timer = null;
 let running = false;
 let consecutiveTimer = null;
 let last = { at: null, checked: 0, dropped: 0, alerts: 0, errors: 0 };
+let sweepTimer = null;
+let sweepStartup = null;
+let sweeping = false;
+let lastSweep = { at: null, sources: [], items: 0, newItems: 0, drops: 0, alerts: 0, errors: 0 };
 
 function norm(value) {
   return String(value == null ? "" : value)
@@ -151,6 +155,111 @@ async function runOnce(actor) {
   }
 }
 
+/* ---- Barrido de catalogo (paso 1): altas nuevas y bajadas sin palabra clave ---- */
+
+function sweepSources() {
+  return String(config.sweep.sources || "")
+    .split(",")
+    .map(function (s) {
+      return s.trim().toLowerCase();
+    })
+    .filter(function (s) {
+      return s && adapters[s] && adapters[s].actions && typeof adapters[s].actions.browse === "function";
+    });
+}
+
+async function sweepOnce(actor) {
+  if (sweeping) return { ok: false, reason: "already_running" };
+  sweeping = true;
+  const summary = { at: store.nowIso(), actor: actor || "manual", sources: [], items: 0, newItems: 0, drops: 0, alerts: 0, errors: 0, results: [] };
+  try {
+    await store.init();
+    for (const source of sweepSources()) {
+      const entry = { source: source, ok: false, items: 0, newItems: 0, drops: 0, alerts: 0 };
+      try {
+        const baseline = typeof store.catalogHasSource === "function" ? !(await store.catalogHasSource(source)) : false;
+        const r = await adapters[source].actions.browse({ max: config.sweep.max });
+        const data = r && r.ok ? r.data : null;
+        const items = (data && data.items) || [];
+        entry.items = items.length;
+        if (!r || !r.ok || !items.length) {
+          entry.error = (r && r.reason) || "no_items";
+          summary.errors++;
+          summary.results.push(entry);
+          continue;
+        }
+        await store.catalogUpsert(source, items);
+        const existing = await store.listAlerts({ includeDismissed: false, limit: 500 });
+        for (const it of items) {
+          const name = it.name || "Producto de catalogo";
+          const url = it.url || "";
+          const ident = it.reference || it.ean || it.url || name;
+          if (it.isNew && !baseline) {
+            summary.newItems++;
+            entry.newItems++;
+            const key = "catalog_new|" + source + "|" + ident;
+            if (!existing.some((a) => a.detail && a.detail.indexOf(key) !== -1)) {
+              const alert = {
+                id: store.newId("al"),
+                watch_id: null,
+                kind: "catalog_new",
+                title: name,
+                detail: "[" + key + "] Alta nueva en " + source + (it.price ? " · " + round2(it.price) + " €" : "") + (url ? " · " + url : ""),
+                price: it.price != null ? round2(it.price) : null,
+                prev_price: null,
+                pct: null,
+                at: store.nowIso(),
+                dismissed: false
+              };
+              await store.addAlert(alert);
+              existing.push(alert);
+              summary.alerts++;
+              entry.alerts++;
+            }
+          }
+          if (it.dropPct != null && it.dropPct >= config.sweep.dropPct) {
+            summary.drops++;
+            entry.drops++;
+            const key = "catalog_drop|" + source + "|" + ident + "|" + it.dropPct;
+            if (!existing.some((a) => a.detail && a.detail.indexOf(key) !== -1)) {
+              const alert = {
+                id: store.newId("al"),
+                watch_id: null,
+                kind: "catalog_drop",
+                title: name,
+                detail:
+                  "[" + key + "] Bajada del " + it.dropPct + " % en " + source +
+                  (it.dropFrom ? " (" + round2(it.dropFrom) + " € → " + round2(it.price) + " €)" : "") +
+                  (url ? " · " + url : ""),
+                price: it.price != null ? round2(it.price) : null,
+                prev_price: it.dropFrom != null ? round2(it.dropFrom) : null,
+                pct: it.dropPct,
+                at: store.nowIso(),
+                dismissed: false
+              };
+              await store.addAlert(alert);
+              existing.push(alert);
+              summary.alerts++;
+              entry.alerts++;
+            }
+          }
+        }
+        entry.ok = true;
+        summary.items += entry.items;
+      } catch (e) {
+        entry.error = String((e && e.message) || e);
+        summary.errors++;
+      }
+      summary.sources.push(source);
+      summary.results.push(entry);
+    }
+    lastSweep = { at: summary.at, sources: summary.sources, items: summary.items, newItems: summary.newItems, drops: summary.drops, alerts: summary.alerts, errors: summary.errors };
+    return { ok: true, summary: summary };
+  } finally {
+    sweeping = false;
+  }
+}
+
 function start() {
   if (consecutiveTimer || timer) return;
   if (!config.alerts.enabled) {
@@ -170,13 +279,27 @@ function start() {
   if (consecutiveTimer.unref) consecutiveTimer.unref();
   timer = setInterval(() => runOnce("timer").catch(() => {}), ms);
   if (timer.unref) timer.unref();
+  if (config.sweep.enabled && sweepSources().length) {
+    const msSweep = config.sweep.intervalHours * 3600 * 1000;
+    console.log(
+      "[alerts] barrido de catalogo activo · cada " + config.sweep.intervalHours + " h · bajadas >= " + config.sweep.dropPct + " % · fuentes " + sweepSources().join(", ")
+    );
+    sweepStartup = setTimeout(() => sweepOnce("startup").catch(() => {}), 120 * 1000);
+    if (sweepStartup.unref) sweepStartup.unref();
+    sweepTimer = setInterval(() => sweepOnce("timer").catch(() => {}), msSweep);
+    if (sweepTimer.unref) sweepTimer.unref();
+  }
 }
 
 function stop() {
   if (timer) clearInterval(timer);
   if (consecutiveTimer) clearTimeout(consecutiveTimer);
+  if (sweepTimer) clearInterval(sweepTimer);
+  if (sweepStartup) clearTimeout(sweepStartup);
   timer = null;
   consecutiveTimer = null;
+  sweepTimer = null;
+  sweepStartup = null;
 }
 
 function status() {
@@ -185,8 +308,16 @@ function status() {
     running: running,
     intervalHours: config.alerts.intervalHours,
     defaultTargetPct: config.alerts.defaultTargetPct,
-    last: last
+    last: last,
+    sweep: {
+      enabled: config.sweep.enabled,
+      running: sweeping,
+      intervalHours: config.sweep.intervalHours,
+      dropPct: config.sweep.dropPct,
+      sources: sweepSources(),
+      last: lastSweep
+    }
   };
 }
 
-module.exports = { start, stop, runOnce, status };
+module.exports = { start, stop, runOnce, sweepOnce, status };

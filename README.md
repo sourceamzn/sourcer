@@ -64,14 +64,20 @@ Acciones por fuente:
 
 | Fuente    | Acciones |
 |-----------|----------|
-| outletpc  | `ping`, `feed`, `search` |
-| lidl      | `ping`, `feed`, `search` |
+| outletpc  | `ping`, `feed`, `search`, `browse` |
+| lidl      | `ping`, `feed`, `search`, `browse` |
 | iherb     | `ping`, `feed`, `search` |
 | amazon    | `ping`, `catalog`, `item`, `offers`, `pricing`, `fees`, `listing` |
 | keepa     | `ping`, `history`, `product`, `search`, `find` |
 | web       | `ping`, `read`, `search` |
 
 `listing` (Amazon) junta catálogo + ofertas + precio competitivo + fees.
+
+`browse` (Outlet PC, Lidl) es el **barrido sin palabra clave** del paso 1 del
+proceso: recorre el catálogo de la fuente (Outlet PC por novedades, Lidl por
+surtido general) y devuelve los productos con descuento. El servidor compara
+cada barrido con el anterior y marca `isNew` (alta nueva) y `dropPct`
+(bajada de precio) usando la tabla/colección `catalog_seen`.
 
 ## Vigilante de precios (alertas)
 
@@ -81,7 +87,8 @@ producto (5 % por defecto), crea un aviso que la herramienta muestra en la vista
 **Alertas**.
 
 - Almacén: si existe `DATABASE_URL` usa **Postgres** (tablas `watches`,
-  `price_history`, `alerts`); si no, un fichero JSON local (`data/alerts.json`).
+  `price_history`, `alerts`, `catalog_seen`); si no, un fichero JSON local
+  (`data/alerts.json`).
 - Revisión: Outlet PC y Lidl se reconsultan gratis (sin tokens). Con ASIN, el
   precio se toma de Keepa.
 - `POST /alerts/run` fuerza una comprobación inmediata (no hay que esperar las

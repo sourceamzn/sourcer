@@ -95,6 +95,53 @@ async function search(body) {
   };
 }
 
+/* Barrido del catalogo sin palabra clave: q vacio devuelve el surtido general de lidl.es. */
+async function browse(body) {
+  body = body || {};
+  const offset = Math.max(parseInt(body.offset || "0", 10) || 0, 0);
+  const url = buildUrl("", offset);
+  let res = await fetchOnce(url);
+  if (!res.ok || res.status === 401) res = await fetchOnce(url);
+  if (!res.ok) {
+    return {
+      ok: false,
+      reason: res.status === 401 ? "lidl_throttled" : "lidl_http_" + res.status,
+      status: res.status,
+      error: res.error,
+      hint: res.status === 401 ? "Lidl limito la peticion; reintenta en unos segundos." : "Activa un proveedor de scraping si persiste."
+    };
+  }
+  const payload = res.data;
+  if (!payload || !Array.isArray(payload.items)) {
+    return { ok: false, reason: "lidl_unexpected_payload", numFound: payload && payload.numFound };
+  }
+  let items = payload.items
+    .map(function (it) {
+      return (it && it.gridbox && it.gridbox.data) || (it && it.resultClass === "product" ? it : null);
+    })
+    .filter(Boolean)
+    .map(mapLidlItem);
+  items.forEach(function (it) {
+    if (it.oldPrice && it.price && it.oldPrice > it.price) {
+      it.discountPct = Math.round((1 - it.price / it.oldPrice) * 100);
+    }
+  });
+  return {
+    ok: true,
+    data: {
+      source: "lidl",
+      kind: "browse",
+      count: items.length,
+      numFound: payload.numFound || items.length,
+      offset,
+      fetchsize: FETCHSIZE,
+      locale: LOCALE,
+      currency: "EUR",
+      items
+    }
+  };
+}
+
 const lidl = {
   id: "lidl",
   label: "Lidl",
@@ -108,7 +155,8 @@ const lidl = {
       note: "busqueda real via API publica de lidl.es (sin claves)"
     }),
     feed: feedAction("lidl", mapping),
-    search
+    search,
+    browse
   }
 };
 

@@ -20,15 +20,25 @@ const API_VERSIONS = ["2024-10", "2024-07", "2024-04"];
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
-const QUERY = [
-  "query Search($q:String!,$n:Int!){",
-  "products(first:$n,query:$q){",
-  "edges{node{",
+const FIELDS = [
   "id title handle vendor availableForSale totalInventory productType tags",
   "priceRange{minVariantPrice{amount currencyCode} maxVariantPrice{amount currencyCode}}",
+  "compareAtPriceRange{minVariantPrice{amount currencyCode}}",
   "featuredImage{url}",
-  "variants(first:10){edges{node{id title sku barcode price{amount currencyCode} compareAtPrice{amount currencyCode} availableForSale}}}",
-  "}}}}"
+  "variants(first:10){edges{node{id title sku barcode price{amount currencyCode} compareAtPrice{amount currencyCode} availableForSale}}}"
+].join(" ");
+
+const QUERY = ["query Search($q:String!,$n:Int!){", "products(first:$n,query:$q){", "edges{node{", FIELDS, "}", "}", "}"].join(" ");
+
+/* Barrido sin palabra clave: catalogo por novedades (outlet = descuentos continuos). */
+const BROWSE_QUERY = [
+  "query Browse($n:Int!,$q:String,$after:String){",
+  "products(first:$n,sortKey:CREATED_AT,reverse:true,query:$q,after:$after){",
+  "pageInfo{hasNextPage endCursor}",
+  "edges{node{", FIELDS, "}",
+  "}",
+  "}",
+  "}"
 ].join(" ");
 
 let cached = { token: null, version: null, at: 0 };
@@ -105,6 +115,71 @@ async function search(body) {
   };
 }
 
+/* Barrido del catalogo sin palabra clave (paso 1 del proceso: altas nuevas y bajadas). */
+async function browse(body) {
+  body = body || {};
+  const max = Math.min(Math.max(parseInt(body.max || "24", 10) || 24, 1), 60);
+  const after = body.after ? String(body.after) : null;
+  const onlyOffers = body.offers !== false;
+  const filter = String(body.filter || "available_for_sale:true");
+  const session = await storefrontSession();
+  if (session.error) {
+    return { ok: false, reason: session.error, hint: "No se pudo obtener el token publico de la tienda (¿cambio la web?)." };
+  }
+  let last = null;
+  let usedVersion = session.version;
+  for (const version of API_VERSIONS) {
+    const res = await graphql(session.token, version, BROWSE_QUERY, { q: filter, n: max, after });
+    if (res.ok && res.data && res.data.data && res.data.data.products) {
+      usedVersion = version;
+      last = res;
+      break;
+    }
+    if (res.ok && res.data && res.data.errors) {
+      last = res;
+      if (res.data.data && res.data.data.products) break;
+      continue;
+    }
+    last = res;
+  }
+  const payload = last && last.data ? last.data : null;
+  if (!payload || !payload.data || !payload.data.products) {
+    return {
+      ok: false,
+      reason: "outletpc_request_failed",
+      status: last ? last.status : 0,
+      error: last ? last.error : null,
+      hint: "La tienda no devolvio productos; revisa la consulta."
+    };
+  }
+  const conn = payload.data.products;
+  const nodes = (conn.edges || []).map(function (e) {
+    return e.node;
+  });
+  let items = nodes.map(mapOutletProduct);
+  items.forEach(function (it) {
+    if (it.oldPrice && it.price && it.oldPrice > it.price) {
+      it.discountPct = Math.round((1 - it.price / it.oldPrice) * 100);
+    }
+  });
+  if (onlyOffers) items = items.filter(function (it) {
+    return it.discountPct != null || it.oldPrice;
+  });
+  return {
+    ok: true,
+    data: {
+      source: "outletpc",
+      kind: "browse",
+      count: items.length,
+      apiVersion: usedVersion,
+      currency: "EUR",
+      hasNextPage: Boolean(conn.pageInfo && conn.pageInfo.hasNextPage),
+      endCursor: (conn.pageInfo && conn.pageInfo.endCursor) || null,
+      items
+    }
+  };
+}
+
 const outletpc = {
   id: "outletpc",
   label: "Outlet PC",
@@ -121,7 +196,8 @@ const outletpc = {
       };
     },
     feed: feedAction("outletpc", mapping),
-    search
+    search,
+    browse
   }
 };
 

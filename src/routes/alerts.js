@@ -135,6 +135,15 @@ router.post(
   })
 );
 
+/* Forzar el barrido de catalogo ahora mismo (altas nuevas y bajadas). */
+router.post(
+  "/sweep",
+  ah(async (req, res) => {
+    const out = await scheduler.sweepOnce("manual");
+    res.json(out);
+  })
+);
+
 router.get(
   "/stats",
   ah(async (req, res) => {

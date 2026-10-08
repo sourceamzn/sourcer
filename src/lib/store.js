@@ -18,6 +18,12 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+/* Clave estable de un producto de catalogo para detectar altas nuevas y bajadas. */
+function catalogKey(it) {
+  const raw = (it && (it.url || it.reference || it.ean || it.name)) || "";
+  return String(raw).slice(0, 240);
+}
+
 function iso(value) {
   if (value == null) return null;
   if (value instanceof Date) return value.toISOString();
@@ -26,7 +32,7 @@ function iso(value) {
 
 /* ---------------- backend de fichero (fallback) ---------------- */
 function createFileBackend(file) {
-  let state = { watches: [], price_history: [], alerts: [] };
+  let state = { watches: [], price_history: [], alerts: [], catalog: [] };
 
   function load() {
     try {
@@ -35,11 +41,12 @@ function createFileBackend(file) {
         state = {
           watches: Array.isArray(parsed.watches) ? parsed.watches : [],
           price_history: Array.isArray(parsed.price_history) ? parsed.price_history : [],
-          alerts: Array.isArray(parsed.alerts) ? parsed.alerts : []
+          alerts: Array.isArray(parsed.alerts) ? parsed.alerts : [],
+          catalog: Array.isArray(parsed.catalog) ? parsed.catalog : []
         };
       }
     } catch (e) {
-      state = { watches: [], price_history: [], alerts: [] };
+      state = { watches: [], price_history: [], alerts: [], catalog: [] };
     }
   }
 
@@ -123,13 +130,49 @@ function createFileBackend(file) {
       persist();
       return a;
     },
+    async catalogUpsert(source, items) {
+      const now = nowIso();
+      const out = {};
+      (items || []).forEach(function (it) {
+        const skey = catalogKey(it);
+        if (!skey) return;
+        const price = it.price == null || it.price === "" ? null : Number(it.price);
+        const ex = state.catalog.find((c) => c.source === source && c.skey === skey);
+        if (!ex) {
+          state.catalog.push({ source, skey, name: it.name || "", url: it.url || "", price, last_price: price, first_seen: now, last_seen: now });
+          it.isNew = true;
+          it.dropPct = null;
+          out[skey] = { isNew: true, drop: null };
+        } else {
+          let drop = null;
+          if (ex.last_price != null && price != null && price < ex.last_price) {
+            drop = { from: ex.last_price, to: price, pct: Math.round((1 - price / ex.last_price) * 100) };
+          }
+          ex.last_seen = now;
+          ex.name = it.name || ex.name;
+          ex.url = it.url || ex.url;
+          if (price != null) { ex.price = price; ex.last_price = price; }
+          it.isNew = false;
+          it.dropPct = drop ? drop.pct : null;
+          it.dropFrom = drop ? drop.from : null;
+          out[skey] = { isNew: false, drop };
+        }
+      });
+      if (state.catalog.length > 20000) state.catalog = state.catalog.slice(-20000);
+      persist();
+      return out;
+    },
+    async catalogHasSource(source) {
+      return state.catalog.some((c) => c.source === source);
+    },
     async stats() {
       return {
         mode: "file",
         watches: state.watches.length,
         active: state.watches.filter((w) => w.active !== false).length,
         alerts: state.alerts.filter((a) => !a.dismissed).length,
-        history: state.price_history.length
+        history: state.price_history.length,
+        catalog: state.catalog.length
       };
     }
   };
@@ -207,6 +250,12 @@ function createPgBackend(url) {
           "price DOUBLE PRECISION, prev_price DOUBLE PRECISION, pct DOUBLE PRECISION, " +
           "at TIMESTAMPTZ DEFAULT NOW(), dismissed BOOLEAN DEFAULT FALSE)"
       );
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS catalog_seen (" +
+          "source TEXT, skey TEXT, name TEXT, url TEXT, price DOUBLE PRECISION, " +
+          "last_price DOUBLE PRECISION, first_seen TIMESTAMPTZ DEFAULT NOW(), " +
+          "last_seen TIMESTAMPTZ DEFAULT NOW(), PRIMARY KEY (source, skey))"
+      );
       return this;
     },
     async close() {
@@ -280,12 +329,51 @@ function createPgBackend(url) {
       const out = await pool.query("UPDATE alerts SET dismissed=TRUE WHERE id=$1 RETURNING *", [id]);
       return out.rows[0] ? mapAlert(out.rows[0]) : null;
     },
+    async catalogUpsert(source, items) {
+      const now = nowIso();
+      const out = {};
+      for (const it of items || []) {
+        const skey = catalogKey(it);
+        if (!skey) continue;
+        const price = it.price == null || it.price === "" ? null : Number(it.price);
+        const prev = await pool.query("SELECT last_price FROM catalog_seen WHERE source=$1 AND skey=$2", [source, skey]);
+        if (!prev.rows[0]) {
+          await pool.query(
+            "INSERT INTO catalog_seen (source,skey,name,url,price,last_price,first_seen,last_seen) VALUES ($1,$2,$3,$4,$5,$6,$7,$7) ON CONFLICT (source,skey) DO NOTHING",
+            [source, skey, it.name || "", it.url || "", price, price, now]
+          );
+          it.isNew = true;
+          it.dropPct = null;
+          out[skey] = { isNew: true, drop: null };
+        } else {
+          const last = prev.rows[0].last_price;
+          let drop = null;
+          if (last != null && price != null && price < Number(last)) {
+            drop = { from: Number(last), to: price, pct: Math.round((1 - price / Number(last)) * 100) };
+          }
+          await pool.query(
+            "UPDATE catalog_seen SET last_seen=$3, name=$4, url=$5, price=COALESCE($6,price), last_price=COALESCE($6,last_price) WHERE source=$1 AND skey=$2",
+            [source, skey, now, it.name || "", it.url || "", price]
+          );
+          it.isNew = false;
+          it.dropPct = drop ? drop.pct : null;
+          it.dropFrom = drop ? drop.from : null;
+          out[skey] = { isNew: false, drop };
+        }
+      }
+      return out;
+    },
+    async catalogHasSource(source) {
+      const r = await pool.query("SELECT 1 FROM catalog_seen WHERE source=$1 LIMIT 1", [source]);
+      return Boolean(r.rows[0]);
+    },
     async stats() {
       const w = await pool.query("SELECT COUNT(*)::int AS c FROM watches");
       const wa = await pool.query("SELECT COUNT(*)::int AS c FROM watches WHERE active=TRUE");
       const a = await pool.query("SELECT COUNT(*)::int AS c FROM alerts WHERE dismissed=FALSE");
       const h = await pool.query("SELECT COUNT(*)::int AS c FROM price_history");
-      return { mode: "postgres", watches: w.rows[0].c, active: wa.rows[0].c, alerts: a.rows[0].c, history: h.rows[0].c };
+      const c = await pool.query("SELECT COUNT(*)::int AS c FROM catalog_seen");
+      return { mode: "postgres", watches: w.rows[0].c, active: wa.rows[0].c, alerts: a.rows[0].c, history: h.rows[0].c, catalog: c.rows[0].c };
     }
   };
 }
@@ -330,5 +418,7 @@ module.exports = {
   priceHistory: async (id, limit) => (await ready()).priceHistory(id, limit),
   listAlerts: async (opts) => (await ready()).listAlerts(opts),
   addAlert: async (a) => (await ready()).addAlert(a),
-  dismissAlert: async (id) => (await ready()).dismissAlert(id)
+  dismissAlert: async (id) => (await ready()).dismissAlert(id),
+  catalogUpsert: async (source, items) => (await ready()).catalogUpsert(source, items),
+  catalogHasSource: async (source) => (await ready()).catalogHasSource(source)
 };

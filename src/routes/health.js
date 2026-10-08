@@ -27,7 +27,14 @@ function health(req, res) {
       store: store.mode(),
       intervalHours: config.alerts.intervalHours,
       defaultTargetPct: config.alerts.defaultTargetPct,
-      last: scheduler.status().last
+      last: scheduler.status().last,
+      sweep: {
+        enabled: config.sweep.enabled,
+        intervalHours: config.sweep.intervalHours,
+        dropPct: config.sweep.dropPct,
+        sources: config.sweep.sources,
+        last: scheduler.status().sweep.last
+      }
     },
     adapters: list()
   });

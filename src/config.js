@@ -42,6 +42,15 @@ const config = {
     intervalHours: Math.max(1, parseInt(clean(process.env.ALERT_INTERVAL_HOURS) || "12", 10) || 12),
     defaultTargetPct: Math.max(0.5, parseFloat(clean(process.env.ALERT_TARGET_PCT) || "5") || 5),
     dataFile: clean(process.env.ALERTS_DATA_FILE) || path.join(__dirname, "..", "data", "alerts.json")
+  },
+  /* Barrido diario del catalogo (paso 1): recorre el surtido sin palabra clave,
+     detecta altas nuevas y bajadas de precio y las deja como avisos. */
+  sweep: {
+    enabled: clean(process.env.CATALOG_SWEEP_ENABLED) !== "false",
+    intervalHours: Math.max(1, parseInt(clean(process.env.CATALOG_SWEEP_INTERVAL_HOURS) || "24", 10) || 24),
+    dropPct: Math.max(0.5, parseFloat(clean(process.env.CATALOG_SWEEP_DROP_PCT) || "10") || 10),
+    max: Math.min(Math.max(parseInt(clean(process.env.CATALOG_SWEEP_MAX) || "40", 10) || 40, 1), 60),
+    sources: clean(process.env.CATALOG_SWEEP_SOURCES) || "outletpc,lidl"
   }
 };
 

@@ -96,3 +96,16 @@ test("store: historico de precios, aviso y descarte", async () => {
   assert.ok(!(await store.listAlerts({ includeDismissed: false })).some((a) => a.id === "al_test_1"));
   assert.equal(await store.deleteWatch("w_test_1"), true);
 });
+
+test("store: barrido de catalogo marca altas y bajadas", async () => {
+  const store = require("../src/lib/store");
+  await store.init();
+  const first = [{ name: "Cafetera", url: "https://x/1", price: 30 }];
+  await store.catalogUpsert("outletpc", first);
+  assert.equal(first[0].isNew, true);
+  const second = [{ name: "Cafetera", url: "https://x/1", price: 24 }];
+  await store.catalogUpsert("outletpc", second);
+  assert.equal(second[0].isNew, false);
+  assert.equal(second[0].dropPct, 20);
+  assert.equal(second[0].dropFrom, 30);
+});
