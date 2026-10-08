@@ -7,11 +7,17 @@ responde lo suyo.
 Contrato único:
 
 ```
-POST {backend}/sourcing/{fuente}/{accion}
-GET  {backend}/health
+POST   {backend}/sourcing/{fuente}/{accion}
+GET    {backend}/health
+GET    {backend}/alerts
+POST   {backend}/alerts/watch
+POST   {backend}/alerts/watch/:id
+DELETE {backend}/alerts/watch/:id
+POST   {backend}/alerts/dismiss
+POST   {backend}/alerts/run
 ```
 
-Fuentes: `outletpc`, `lidl`, `iherb`, `amazon`, `keepa`.
+Fuentes: `outletpc`, `lidl`, `iherb`, `amazon`, `keepa`, `web`.
 
 ## Arranque local
 
@@ -62,9 +68,24 @@ Acciones por fuente:
 | lidl      | `ping`, `feed`, `search` |
 | iherb     | `ping`, `feed`, `search` |
 | amazon    | `ping`, `catalog`, `item`, `offers`, `pricing`, `fees`, `listing` |
-| keepa     | `ping`, `history`, `product` |
+| keepa     | `ping`, `history`, `product`, `search`, `find` |
+| web       | `ping`, `read`, `search` |
 
 `listing` (Amazon) junta catálogo + ofertas + precio competitivo + fees.
+
+## Vigilante de precios (alertas)
+
+Marca productos en el módulo (**Vigilar**) y el servidor revisa su precio de
+compra **cada 12 h** (configurable). Cuando la bajada supera el umbral del
+producto (5 % por defecto), crea un aviso que la herramienta muestra en la vista
+**Alertas**.
+
+- Almacén: si existe `DATABASE_URL` usa **Postgres** (tablas `watches`,
+  `price_history`, `alerts`); si no, un fichero JSON local (`data/alerts.json`).
+- Revisión: Outlet PC y Lidl se reconsultan gratis (sin tokens). Con ASIN, el
+  precio se toma de Keepa.
+- `POST /alerts/run` fuerza una comprobación inmediata (no hay que esperar las
+  12 h). El correo electrónico queda para una fase posterior.
 
 ## Variables de entorno
 
@@ -84,6 +105,11 @@ Todas opcionales al arrancar. Ver `.env.example`.
 | `KEEPA_API_KEY` | BSR e histórico de precios |
 | `KEEPA_DOMAIN` | ES = `9` |
 | `FEED_OUTLETPC` / `FEED_LIDL` / `FEED_IHERB` | URL de feed CSV de cada fuente |
+| `DATABASE_URL` | Postgres del vigilante (en Railway: servicio Postgres → Variables) |
+| `ALERTS_ENABLED` | `false` desactiva el vigilante |
+| `ALERT_INTERVAL_HOURS` | Horas entre revisiones (por defecto `12`) |
+| `ALERT_TARGET_PCT` | Umbral de bajada por defecto en % (por defecto `5`) |
+| `ALERTS_DATA_FILE` | Ruta del fichero de respaldo sin Postgres |
 
 ## Seguridad
 

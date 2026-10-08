@@ -1,0 +1,334 @@
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const { config } = require("../config");
+
+/* Persistencia del vigilante de precios.
+   - Si existe DATABASE_URL se usa Postgres (Railway) con tres tablas: watches, price_history, alerts.
+   - Si no, se usa un fichero JSON local (backend/data/alerts.json) para que el servicio
+     funcione igual sin configuracion extra. Misma interfaz en ambos casos. */
+
+let backend = null;
+
+function newId(prefix) {
+  return String(prefix || "id") + "_" + crypto.randomBytes(8).toString("hex");
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function iso(value) {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
+/* ---------------- backend de fichero (fallback) ---------------- */
+function createFileBackend(file) {
+  let state = { watches: [], price_history: [], alerts: [] };
+
+  function load() {
+    try {
+      if (fs.existsSync(file)) {
+        const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+        state = {
+          watches: Array.isArray(parsed.watches) ? parsed.watches : [],
+          price_history: Array.isArray(parsed.price_history) ? parsed.price_history : [],
+          alerts: Array.isArray(parsed.alerts) ? parsed.alerts : []
+        };
+      }
+    } catch (e) {
+      state = { watches: [], price_history: [], alerts: [] };
+    }
+  }
+
+  function persist() {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(state, null, 2), "utf8");
+    } catch (e) {
+      /* si el disco no es escribible no rompemos el servicio */
+    }
+  }
+
+  load();
+
+  return {
+    kind: "file",
+    async init() {
+      return this;
+    },
+    async close() {},
+    async listWatches() {
+      return state.watches.slice();
+    },
+    async getWatch(id) {
+      return state.watches.find((w) => w.id === id) || null;
+    },
+    async saveWatch(w) {
+      const i = state.watches.findIndex((x) => x.id === w.id);
+      if (i === -1) state.watches.push(w);
+      else state.watches[i] = w;
+      persist();
+      return w;
+    },
+    async updateWatch(id, patch) {
+      const w = state.watches.find((x) => x.id === id);
+      if (!w) return null;
+      Object.assign(w, patch);
+      persist();
+      return w;
+    },
+    async deleteWatch(id) {
+      const before = state.watches.length;
+      state.watches = state.watches.filter((x) => x.id !== id);
+      state.price_history = state.price_history.filter((x) => x.watch_id !== id);
+      state.alerts = state.alerts.filter((x) => x.watch_id !== id);
+      persist();
+      return state.watches.length < before;
+    },
+    async recordPrice(id, price) {
+      const at = nowIso();
+      const entry = { watch_id: id, price: price, at: at };
+      state.price_history.push(entry);
+      if (state.price_history.length > 5000) state.price_history = state.price_history.slice(-5000);
+      const w = state.watches.find((x) => x.id === id);
+      if (w) {
+        w.last_price = price;
+        w.last_checked = at;
+      }
+      persist();
+      return entry;
+    },
+    async priceHistory(id, limit) {
+      return state.price_history.filter((x) => x.watch_id === id).slice(-(limit || 50));
+    },
+    async listAlerts(opts) {
+      opts = opts || {};
+      let list = state.alerts.slice();
+      if (!opts.includeDismissed) list = list.filter((a) => !a.dismissed);
+      list.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+      return list.slice(0, opts.limit || 100);
+    },
+    async addAlert(a) {
+      state.alerts.push(a);
+      persist();
+      return a;
+    },
+    async dismissAlert(id) {
+      const a = state.alerts.find((x) => x.id === id);
+      if (!a) return null;
+      a.dismissed = true;
+      persist();
+      return a;
+    },
+    async stats() {
+      return {
+        mode: "file",
+        watches: state.watches.length,
+        active: state.watches.filter((w) => w.active !== false).length,
+        alerts: state.alerts.filter((a) => !a.dismissed).length,
+        history: state.price_history.length
+      };
+    }
+  };
+}
+
+/* ---------------- backend Postgres ---------------- */
+function createPgBackend(url) {
+  const { Pool } = require("pg");
+  const needsSsl = !/railway\.internal|localhost|127\.0\.0\.1/.test(url);
+  const pool = new Pool({
+    connectionString: url,
+    ssl: needsSsl ? { rejectUnauthorized: false } : false,
+    max: 5,
+    connectionTimeoutMillis: 10000,
+    idleTimeoutMillis: 30000
+  });
+  pool.on("error", function () {
+    /* una conexion inactiva caida no debe tumbar el servicio */
+  });
+
+  function mapWatch(r) {
+    return {
+      id: r.id,
+      source: r.source,
+      name: r.name,
+      brand: r.brand,
+      model: r.model,
+      reference: r.reference,
+      ean: r.ean,
+      url: r.url,
+      asin: r.asin,
+      image: r.image,
+      key: r.wkey,
+      base_price: r.base_price,
+      last_price: r.last_price,
+      target_pct: r.target_pct,
+      active: r.active,
+      created_at: iso(r.created_at),
+      last_checked: iso(r.last_checked)
+    };
+  }
+
+  function mapAlert(r) {
+    return {
+      id: r.id,
+      watch_id: r.watch_id,
+      kind: r.kind,
+      title: r.title,
+      detail: r.detail,
+      price: r.price,
+      prev_price: r.prev_price,
+      pct: r.pct,
+      at: iso(r.at),
+      dismissed: r.dismissed
+    };
+  }
+
+  return {
+    kind: "postgres",
+    async init() {
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS watches (" +
+          "id TEXT PRIMARY KEY, source TEXT, name TEXT, brand TEXT, model TEXT, reference TEXT, " +
+          "ean TEXT, url TEXT, asin TEXT, image TEXT, wkey TEXT, base_price DOUBLE PRECISION, " +
+          "last_price DOUBLE PRECISION, target_pct DOUBLE PRECISION, active BOOLEAN DEFAULT TRUE, " +
+          "created_at TIMESTAMPTZ DEFAULT NOW(), last_checked TIMESTAMPTZ)"
+      );
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS price_history (" +
+          "id SERIAL PRIMARY KEY, watch_id TEXT, price DOUBLE PRECISION, at TIMESTAMPTZ DEFAULT NOW())"
+      );
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS alerts (" +
+          "id TEXT PRIMARY KEY, watch_id TEXT, kind TEXT, title TEXT, detail TEXT, " +
+          "price DOUBLE PRECISION, prev_price DOUBLE PRECISION, pct DOUBLE PRECISION, " +
+          "at TIMESTAMPTZ DEFAULT NOW(), dismissed BOOLEAN DEFAULT FALSE)"
+      );
+      return this;
+    },
+    async close() {
+      await pool.end();
+    },
+    async listWatches() {
+      const out = await pool.query("SELECT * FROM watches ORDER BY created_at ASC");
+      return out.rows.map(mapWatch);
+    },
+    async getWatch(id) {
+      const out = await pool.query("SELECT * FROM watches WHERE id=$1", [id]);
+      return out.rows[0] ? mapWatch(out.rows[0]) : null;
+    },
+    async saveWatch(w) {
+      await pool.query(
+        "INSERT INTO watches (id,source,name,brand,model,reference,ean,url,asin,image,wkey,base_price,last_price,target_pct,active,created_at,last_checked) " +
+          "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) " +
+          "ON CONFLICT (id) DO UPDATE SET source=$2,name=$3,brand=$4,model=$5,reference=$6,ean=$7,url=$8,asin=$9,image=$10,wkey=$11,base_price=$12,last_price=$13,target_pct=$14,active=$15,last_checked=$17",
+        [w.id, w.source, w.name, w.brand, w.model, w.reference, w.ean, w.url, w.asin, w.image, w.key, w.base_price, w.last_price, w.target_pct, w.active !== false, w.created_at || nowIso(), w.last_checked || null]
+      );
+      return w;
+    },
+    async updateWatch(id, patch) {
+      const allowed = ["name", "brand", "model", "reference", "ean", "url", "asin", "image", "key", "base_price", "last_price", "target_pct", "active", "last_checked"];
+      const cols = { key: "wkey" };
+      const sets = [];
+      const vals = [];
+      let i = 1;
+      Object.keys(patch).forEach((k) => {
+        if (allowed.indexOf(k) === -1) return;
+        sets.push((cols[k] || k) + "=$" + i);
+        vals.push(patch[k]);
+        i++;
+      });
+      if (!sets.length) return this.getWatch(id);
+      vals.push(id);
+      const out = await pool.query("UPDATE watches SET " + sets.join(",") + " WHERE id=$" + i + " RETURNING *", vals);
+      return out.rows[0] ? mapWatch(out.rows[0]) : null;
+    },
+    async deleteWatch(id) {
+      await pool.query("DELETE FROM price_history WHERE watch_id=$1", [id]);
+      await pool.query("DELETE FROM alerts WHERE watch_id=$1", [id]);
+      const out = await pool.query("DELETE FROM watches WHERE id=$1", [id]);
+      return out.rowCount > 0;
+    },
+    async recordPrice(id, price) {
+      const at = nowIso();
+      await pool.query("INSERT INTO price_history (watch_id,price,at) VALUES ($1,$2,$3)", [id, price, at]);
+      await pool.query("UPDATE watches SET last_price=$1, last_checked=$2 WHERE id=$3", [price, at, id]);
+      return { watch_id: id, price: price, at: at };
+    },
+    async priceHistory(id, limit) {
+      const out = await pool.query("SELECT * FROM price_history WHERE watch_id=$1 ORDER BY at ASC", [id]);
+      const rows = out.rows.slice(-(limit || 50));
+      return rows.map((r) => ({ watch_id: r.watch_id, price: r.price, at: iso(r.at) }));
+    },
+    async listAlerts(opts) {
+      opts = opts || {};
+      const where = opts.includeDismissed ? "" : " WHERE dismissed=FALSE";
+      const out = await pool.query("SELECT * FROM alerts" + where + " ORDER BY at DESC LIMIT $1", [opts.limit || 100]);
+      return out.rows.map(mapAlert);
+    },
+    async addAlert(a) {
+      await pool.query(
+        "INSERT INTO alerts (id,watch_id,kind,title,detail,price,prev_price,pct,at,dismissed) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING",
+        [a.id, a.watch_id, a.kind, a.title, a.detail, a.price, a.prev_price, a.pct, a.at || nowIso(), a.dismissed || false]
+      );
+      return a;
+    },
+    async dismissAlert(id) {
+      const out = await pool.query("UPDATE alerts SET dismissed=TRUE WHERE id=$1 RETURNING *", [id]);
+      return out.rows[0] ? mapAlert(out.rows[0]) : null;
+    },
+    async stats() {
+      const w = await pool.query("SELECT COUNT(*)::int AS c FROM watches");
+      const wa = await pool.query("SELECT COUNT(*)::int AS c FROM watches WHERE active=TRUE");
+      const a = await pool.query("SELECT COUNT(*)::int AS c FROM alerts WHERE dismissed=FALSE");
+      const h = await pool.query("SELECT COUNT(*)::int AS c FROM price_history");
+      return { mode: "postgres", watches: w.rows[0].c, active: wa.rows[0].c, alerts: a.rows[0].c, history: h.rows[0].c };
+    }
+  };
+}
+
+async function init() {
+  if (backend) return backend;
+  if (config.databaseUrl) {
+    try {
+      backend = createPgBackend(config.databaseUrl);
+      await backend.init();
+    } catch (e) {
+      console.error("[alerts] Postgres no disponible (" + String((e && e.message) || e) + "); uso almacen en fichero.");
+      backend = createFileBackend(config.alerts.dataFile);
+    }
+  } else {
+    backend = createFileBackend(config.alerts.dataFile);
+  }
+  return backend;
+}
+
+async function ready() {
+  if (!backend) await init();
+  return backend;
+}
+
+module.exports = {
+  newId,
+  nowIso,
+  init,
+  mode: () => (backend ? backend.kind : "uninitialized"),
+  close: async () => {
+    if (backend && typeof backend.close === "function") await backend.close();
+    backend = null;
+  },
+  stats: async () => (await ready()).stats(),
+  listWatches: async () => (await ready()).listWatches(),
+  getWatch: async (id) => (await ready()).getWatch(id),
+  saveWatch: async (w) => (await ready()).saveWatch(w),
+  updateWatch: async (id, patch) => (await ready()).updateWatch(id, patch),
+  deleteWatch: async (id) => (await ready()).deleteWatch(id),
+  recordPrice: async (id, price) => (await ready()).recordPrice(id, price),
+  priceHistory: async (id, limit) => (await ready()).priceHistory(id, limit),
+  listAlerts: async (opts) => (await ready()).listAlerts(opts),
+  addAlert: async (a) => (await ready()).addAlert(a),
+  dismissAlert: async (id) => (await ready()).dismissAlert(id)
+};

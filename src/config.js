@@ -33,6 +33,15 @@ const config = {
   scraping: {
     provider: clean(process.env.SCRAPER_PROVIDER) || "none",
     apiKey: clean(process.env.SCRAPER_API_KEY)
+  },
+  /* Vigilante de precios (alertas). Si DATABASE_URL esta presente se usa Postgres;
+     si no, un fichero JSON local para que el servicio funcione igual. */
+  databaseUrl: clean(process.env.DATABASE_URL),
+  alerts: {
+    enabled: clean(process.env.ALERTS_ENABLED) !== "false",
+    intervalHours: Math.max(1, parseInt(clean(process.env.ALERT_INTERVAL_HOURS) || "12", 10) || 12),
+    defaultTargetPct: Math.max(0.5, parseFloat(clean(process.env.ALERT_TARGET_PCT) || "5") || 5),
+    dataFile: clean(process.env.ALERTS_DATA_FILE) || path.join(__dirname, "..", "data", "alerts.json")
   }
 };
 

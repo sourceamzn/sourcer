@@ -2,6 +2,9 @@ const express = require("express");
 const { config } = require("./config");
 const health = require("./routes/health");
 const sourcing = require("./routes/sourcing");
+const alerts = require("./routes/alerts");
+const scheduler = require("./lib/scheduler");
+const store = require("./lib/store");
 const pkg = require("../package.json");
 
 const app = express();
@@ -18,7 +21,7 @@ app.use(function cors(req, res, next) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -26,7 +29,11 @@ app.use(function cors(req, res, next) {
 
 app.get("/", (req, res) => res.json({ ok: true, service: pkg.name, version: pkg.version, docs: "/health" }));
 app.get("/health", health);
+app.use("/alerts", alerts);
 app.post("/sourcing/:source/:action", sourcing);
+
+/* Inicializa el almacen del vigilante en segundo plano (no bloquea el arranque). */
+store.init().catch(function () {});
 
 app.use((req, res) => res.status(404).json({ ok: false, reason: "not_found", path: req.path }));
 app.use((err, req, res, next) => res.status(500).json({ ok: false, reason: String((err && err.message) || err) }));
@@ -36,6 +43,7 @@ if (require.main === module) {
     console.log(pkg.name + " escuchando en http://localhost:" + config.port);
     console.log("Entorno: " + config.env + " | Marketplace: " + config.market);
   });
+  scheduler.start();
 }
 
 module.exports = app;
