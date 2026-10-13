@@ -170,7 +170,7 @@ function filterByQuery(items, q) {
   });
 }
 
-async function makeAdapter(profile) {
+function makeAdapter(profile) {
   const source = profile.id;
   const baseUrl = profile.home || "";
 
