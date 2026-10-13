@@ -126,6 +126,17 @@ router.post(
   })
 );
 
+/* Vaciar avisos. Con {kind} borra solo ese tipo (catalog_new, catalog_drop, price_drop); sin el, todos. */
+router.post(
+  "/clear",
+  ah(async (req, res) => {
+    await store.init();
+    const kind = str((req.body || {}).kind);
+    const removed = await store.clearAlerts(kind || null);
+    res.json({ ok: true, removed: removed });
+  })
+);
+
 /* Forzar una comprobacion ahora mismo (util para no esperar las 12 h). */
 router.post(
   "/run",

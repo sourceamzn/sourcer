@@ -143,6 +143,12 @@ function createFileBackend(file) {
       persist();
       return a;
     },
+    async clearAlerts(kind) {
+      const before = state.alerts.length;
+      state.alerts = kind ? state.alerts.filter((a) => a.kind !== kind) : [];
+      persist();
+      return before - state.alerts.length;
+    },
     async catalogUpsert(source, items) {
       const now = nowIso();
       const out = {};
@@ -389,6 +395,12 @@ function createPgBackend(url) {
       const out = await pool.query("UPDATE alerts SET dismissed=TRUE WHERE id=$1 RETURNING *", [id]);
       return out.rows[0] ? mapAlert(out.rows[0]) : null;
     },
+    async clearAlerts(kind) {
+      const out = kind
+        ? await pool.query("DELETE FROM alerts WHERE kind=$1", [kind])
+        : await pool.query("DELETE FROM alerts");
+      return out.rowCount || 0;
+    },
     async catalogUpsert(source, items) {
       const now = nowIso();
       const out = {};
@@ -503,6 +515,7 @@ module.exports = {
   listAlerts: async (opts) => (await ready()).listAlerts(opts),
   addAlert: async (a) => (await ready()).addAlert(a),
   dismissAlert: async (id) => (await ready()).dismissAlert(id),
+  clearAlerts: async (kind) => (await ready()).clearAlerts(kind),
   catalogUpsert: async (source, items) => (await ready()).catalogUpsert(source, items),
   catalogHasSource: async (source) => (await ready()).catalogHasSource(source),
   tariffUpsert: async (items, source) => (await ready()).tariffUpsert(items, source),

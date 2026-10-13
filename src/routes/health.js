@@ -18,6 +18,9 @@ function health(req, res) {
     sources: {
       amazon: amazonReady(),
       keepa: keepaReady(),
+      /* Busqueda inversa (Amazon -> proveedor): depende de Keepa para los
+         candidatos de la demanda; los proveedores usan el resto de fuentes. */
+      inverso: keepaReady(),
       outletpc: true,
       lidl: true,
       iherb: scrapingReady() || feedReady("iherb"),

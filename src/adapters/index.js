@@ -4,6 +4,7 @@ const iherb = require("./iherb");
 const amazon = require("./amazon");
 const keepa = require("./keepa");
 const web = require("./web");
+const inverso = require("./inverso");
 const storefronts = require("./storefronts");
 const newsletters = require("./newsletters");
 const { tarifa, liquidaciones } = require("./tarifa");
@@ -14,7 +15,7 @@ const { buildAdapters } = require("./sources/catalog");
    generadas por perfil (outlets y mayoristas/fabricantes), mas los canales
    (storefronts FBA, tarifas, liquidaciones, newsletters). */
 const adapters = Object.assign(
-  { outletpc, lidl, iherb, amazon, keepa, web },
+  { outletpc, lidl, iherb, amazon, keepa, web, inverso },
   buildAdapters(),
   { storefronts, tarifas: tarifa, liquidaciones, newsletters }
 );
