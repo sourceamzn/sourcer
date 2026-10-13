@@ -25,11 +25,10 @@ const config = {
     apiKey: clean(process.env.KEEPA_API_KEY),
     domain: parseInt(clean(process.env.KEEPA_DOMAIN) || "9", 10)
   },
-  feeds: {
-    outletpc: clean(process.env.FEED_OUTLETPC),
-    lidl: clean(process.env.FEED_LIDL),
-    iherb: clean(process.env.FEED_IHERB)
-  },
+  feeds: ["outletpc", "lidl", "iherb", "selectavision", "yesstyle", "corteingles", "gemimarket", "norica", "famosa", "planafabrega", "vallesviasat"].reduce(function (acc, id) {
+    acc[id] = clean(process.env["FEED_" + id.toUpperCase()]);
+    return acc;
+  }, {}),
   scraping: {
     provider: clean(process.env.SCRAPER_PROVIDER) || "none",
     apiKey: clean(process.env.SCRAPER_API_KEY)

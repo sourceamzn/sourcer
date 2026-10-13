@@ -20,7 +20,23 @@ function health(req, res) {
       outletpc: true,
       lidl: true,
       iherb: scrapingReady() || feedReady("iherb"),
-      scraping: scrapingReady()
+      scraping: scrapingReady(),
+      /* Fuentes generadas por perfil (outlets y mayoristas): lectura web del
+         catalogo (JSON-LD / microdata / anclas) sin claves. */
+      selectavision: true,
+      yesstyle: true,
+      corteingles: true,
+      zalandoprive: false,
+      gemimarket: true,
+      norica: true,
+      famosa: true,
+      planafabrega: true,
+      vallesviasat: true,
+      /* Canales del PDF. */
+      storefronts: true,
+      tarifas: true,
+      liquidaciones: true,
+      newsletters: true
     },
     alerts: {
       enabled: config.alerts.enabled,

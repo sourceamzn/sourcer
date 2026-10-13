@@ -24,6 +24,18 @@ function catalogKey(it) {
   return String(raw).slice(0, 240);
 }
 
+/* EAN/UPC normalizado (solo digitos) para cruzar tarifas por codigo de barras. */
+function cleanEan(value) {
+  const digits = String(value == null ? "" : value).replace(/\D/g, "");
+  return digits.length >= 8 ? digits : "";
+}
+
+function numOrNull(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return isFinite(n) ? n : null;
+}
+
 function iso(value) {
   if (value == null) return null;
   if (value instanceof Date) return value.toISOString();
@@ -32,7 +44,7 @@ function iso(value) {
 
 /* ---------------- backend de fichero (fallback) ---------------- */
 function createFileBackend(file) {
-  let state = { watches: [], price_history: [], alerts: [], catalog: [] };
+  let state = { watches: [], price_history: [], alerts: [], catalog: [], tariffs: [] };
 
   function load() {
     try {
@@ -42,11 +54,12 @@ function createFileBackend(file) {
           watches: Array.isArray(parsed.watches) ? parsed.watches : [],
           price_history: Array.isArray(parsed.price_history) ? parsed.price_history : [],
           alerts: Array.isArray(parsed.alerts) ? parsed.alerts : [],
-          catalog: Array.isArray(parsed.catalog) ? parsed.catalog : []
+          catalog: Array.isArray(parsed.catalog) ? parsed.catalog : [],
+          tariffs: Array.isArray(parsed.tariffs) ? parsed.tariffs : []
         };
       }
     } catch (e) {
-      state = { watches: [], price_history: [], alerts: [], catalog: [] };
+      state = { watches: [], price_history: [], alerts: [], catalog: [], tariffs: [] };
     }
   }
 
@@ -165,6 +178,46 @@ function createFileBackend(file) {
     async catalogHasSource(source) {
       return state.catalog.some((c) => c.source === source);
     },
+    async tariffUpsert(items, source) {
+      const now = nowIso();
+      let n = 0;
+      (items || []).forEach(function (it) {
+        const ean = cleanEan(it && it.ean);
+        if (!ean) return;
+        const net = it.net != null ? numOrNull(it.net) : numOrNull(it.price);
+        const row = {
+          source: source || it.source || "tarifas",
+          ean: ean,
+          name: it.name || "",
+          brand: it.brand || "",
+          model: it.model || "",
+          reference: it.reference || "",
+          net: net,
+          price: numOrNull(it.price),
+          url: it.url || "",
+          at: now
+        };
+        const ex = state.tariffs.find((t) => t.source === row.source && t.ean === ean);
+        if (ex) Object.assign(ex, row);
+        else state.tariffs.push(row);
+        n++;
+      });
+      if (state.tariffs.length > 100000) state.tariffs = state.tariffs.slice(-100000);
+      if (n) persist();
+      return n;
+    },
+    async tariffFind(eans) {
+      const want = {};
+      (Array.isArray(eans) ? eans : [eans]).forEach(function (e) {
+        const c = cleanEan(e);
+        if (c) want[c] = true;
+      });
+      const keys = Object.keys(want);
+      if (!keys.length) return [];
+      return state.tariffs
+        .filter((t) => want[t.ean])
+        .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    },
     async stats() {
       return {
         mode: "file",
@@ -172,7 +225,8 @@ function createFileBackend(file) {
         active: state.watches.filter((w) => w.active !== false).length,
         alerts: state.alerts.filter((a) => !a.dismissed).length,
         history: state.price_history.length,
-        catalog: state.catalog.length
+        catalog: state.catalog.length,
+        tariffs: state.tariffs.length
       };
     }
   };
@@ -255,6 +309,12 @@ function createPgBackend(url) {
           "source TEXT, skey TEXT, name TEXT, url TEXT, price DOUBLE PRECISION, " +
           "last_price DOUBLE PRECISION, first_seen TIMESTAMPTZ DEFAULT NOW(), " +
           "last_seen TIMESTAMPTZ DEFAULT NOW(), PRIMARY KEY (source, skey))"
+      );
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS tariff_seen (" +
+          "source TEXT, ean TEXT, name TEXT, brand TEXT, model TEXT, reference TEXT, " +
+          "net DOUBLE PRECISION, price DOUBLE PRECISION, url TEXT, at TIMESTAMPTZ DEFAULT NOW(), " +
+          "PRIMARY KEY (source, ean))"
       );
       return this;
     },
@@ -367,13 +427,37 @@ function createPgBackend(url) {
       const r = await pool.query("SELECT 1 FROM catalog_seen WHERE source=$1 LIMIT 1", [source]);
       return Boolean(r.rows[0]);
     },
+    async tariffUpsert(items, source) {
+      const now = nowIso();
+      let n = 0;
+      for (const it of items || []) {
+        const ean = cleanEan(it && it.ean);
+        if (!ean) continue;
+        const net = it.net != null ? numOrNull(it.net) : numOrNull(it.price);
+        await pool.query(
+          "INSERT INTO tariff_seen (source,ean,name,brand,model,reference,net,price,url,at) " +
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) " +
+            "ON CONFLICT (source,ean) DO UPDATE SET name=$3,brand=$4,model=$5,reference=$6,net=$7,price=$8,url=$9,at=$10",
+          [source || it.source || "tarifas", ean, it.name || "", it.brand || "", it.model || "", it.reference || "", net, numOrNull(it.price), it.url || "", now]
+        );
+        n++;
+      }
+      return n;
+    },
+    async tariffFind(eans) {
+      const want = (Array.isArray(eans) ? eans : [eans]).map(cleanEan).filter(Boolean);
+      if (!want.length) return [];
+      const out = await pool.query("SELECT * FROM tariff_seen WHERE ean = ANY($1) ORDER BY at DESC", [want]);
+      return out.rows;
+    },
     async stats() {
       const w = await pool.query("SELECT COUNT(*)::int AS c FROM watches");
       const wa = await pool.query("SELECT COUNT(*)::int AS c FROM watches WHERE active=TRUE");
       const a = await pool.query("SELECT COUNT(*)::int AS c FROM alerts WHERE dismissed=FALSE");
       const h = await pool.query("SELECT COUNT(*)::int AS c FROM price_history");
       const c = await pool.query("SELECT COUNT(*)::int AS c FROM catalog_seen");
-      return { mode: "postgres", watches: w.rows[0].c, active: wa.rows[0].c, alerts: a.rows[0].c, history: h.rows[0].c, catalog: c.rows[0].c };
+      const t = await pool.query("SELECT COUNT(*)::int AS c FROM tariff_seen");
+      return { mode: "postgres", watches: w.rows[0].c, active: wa.rows[0].c, alerts: a.rows[0].c, history: h.rows[0].c, catalog: c.rows[0].c, tariffs: t.rows[0].c };
     }
   };
 }
@@ -420,5 +504,7 @@ module.exports = {
   addAlert: async (a) => (await ready()).addAlert(a),
   dismissAlert: async (id) => (await ready()).dismissAlert(id),
   catalogUpsert: async (source, items) => (await ready()).catalogUpsert(source, items),
-  catalogHasSource: async (source) => (await ready()).catalogHasSource(source)
+  catalogHasSource: async (source) => (await ready()).catalogHasSource(source),
+  tariffUpsert: async (items, source) => (await ready()).tariffUpsert(items, source),
+  tariffFind: async (eans) => (await ready()).tariffFind(eans)
 };

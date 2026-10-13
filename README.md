@@ -17,7 +17,10 @@ POST   {backend}/alerts/dismiss
 POST   {backend}/alerts/run
 ```
 
-Fuentes: `outletpc`, `lidl`, `iherb`, `amazon`, `keepa`, `web`.
+Fuentes: `outletpc`, `lidl`, `iherb`, `amazon`, `keepa`, `web` y, por perfil de
+lectura web, `selectavision`, `yesstyle`, `corteingles`, `zalandoprive`,
+`gemimarket`, `norica`, `famosa`, `planafabrega`, `vallesviasat`; más los
+canales `storefronts`, `tarifas`, `liquidaciones` y `newsletters`.
 
 ## Arranque local
 
@@ -67,11 +70,43 @@ Acciones por fuente:
 | outletpc  | `ping`, `feed`, `search`, `browse` |
 | lidl      | `ping`, `feed`, `search`, `browse` |
 | iherb     | `ping`, `feed`, `search` |
+| selectavision · yesstyle · corteingles · zalandoprive · gemimarket · norica · famosa · planafabrega · vallesviasat | `ping`, `feed`, `search`, `browse` |
+| storefronts | `ping`, `seller`, `browse`, `reverse` |
+| tarifas · liquidaciones | `ping`, `parse`, `browse`, `search`, `lookup` |
+| newsletters | `ping`, `parse`, `browse`, `search` |
 | amazon    | `ping`, `catalog`, `item`, `offers`, `pricing`, `fees`, `listing` |
 | keepa     | `ping`, `history`, `product`, `search`, `find` |
 | web       | `ping`, `read`, `search` |
 
 `listing` (Amazon) junta catálogo + ofertas + precio competitivo + fees.
+
+## Adaptadores por perfil (outlets y mayoristas)
+
+Los outlet y mayoristas/fabricantes del PDF ya no están "declarados": cada uno
+tiene adaptador en `backend/src/adapters/sources/catalog.js` (perfiles) que se
+generan con `backend/src/adapters/profile.js`. Leen el catálogo de la web por
+**JSON-LD (schema.org), microdata o heurística de anclas** (`lib/parse.js`),
+reutilizando la cascada proveedor → directo → `r.jina.ai`. Sin claves; con
+Cloudflare conviene `SCRAPER_PROVIDER`. `zalandoprive` exige sesión y responde
+`requires_auth`.
+
+## Storefronts FBA (búsqueda inversa)
+
+`storefronts/seller` lee el catálogo público de un vendedor (sellerId o URL) y
+devuelve sus ASINs. `storefronts/reverse` parte de un ASIN y devuelve los
+vendedores que lo ofrecen (SP-API `getItemOffers` cuando hay credenciales) y la
+búsqueda de ese ASIN en cada fuente del PDF. Regla fija: nunca crea ASIN.
+
+## Tarifas, liquidaciones y newsletters (canales)
+
+`tarifa.js` y `newsletters.js` normalizan ficheros/correos al mismo contrato.
+`/parse` acepta `csv`/`tsv`/`text`, `rows` ya parseadas o `feed` (URL): tarifas
+por EAN + precio neto. Al leer un canal de fichero el servidor **indexa cada
+línea por EAN** (tabla/colección `tariff_seen`) y `tarifas/lookup` (o
+`liquidaciones/lookup`) devuelve las que coincidan con uno o varios EAN para
+**cruzar la tarifa contra el proveedor** en el análisis de cada oportunidad.
+`newsletters/parse` extrae productos y precios de un correo EML/HTML/texto
+pegado (Gmail OAuth, fase posterior).
 
 `browse` (Outlet PC, Lidl) es el **barrido sin palabra clave** del paso 1 del
 proceso: recorre el catálogo de la fuente (Outlet PC por novedades, Lidl por
@@ -87,8 +122,8 @@ producto (5 % por defecto), crea un aviso que la herramienta muestra en la vista
 **Alertas**.
 
 - Almacén: si existe `DATABASE_URL` usa **Postgres** (tablas `watches`,
-  `price_history`, `alerts`, `catalog_seen`); si no, un fichero JSON local
-  (`data/alerts.json`).
+  `price_history`, `alerts`, `catalog_seen`, `tariff_seen`); si no, un fichero
+  JSON local (`data/alerts.json`).
 - Revisión: Outlet PC y Lidl se reconsultan gratis (sin tokens). Con ASIN, el
   precio se toma de Keepa.
 - `POST /alerts/run` fuerza una comprobación inmediata (no hay que esperar las
@@ -111,7 +146,7 @@ Todas opcionales al arrancar. Ver `.env.example`.
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Firma SigV4 |
 | `KEEPA_API_KEY` | BSR e histórico de precios |
 | `KEEPA_DOMAIN` | ES = `9` |
-| `FEED_OUTLETPC` / `FEED_LIDL` / `FEED_IHERB` | URL de feed CSV de cada fuente |
+| `FEED_<FUENTE>` | URL de feed CSV de una fuente (`FEED_OUTLETPC`, `FEED_LIDL`, `FEED_IHERB`, `FEED_SELECTAVISION`, `FEED_YESSTYLE`, `FEED_CORTEINGLES`, `FEED_GEMIMARKET`, `FEED_NORICA`, `FEED_FAMOSA`, `FEED_PLANAFABREGA`, `FEED_VALLESVIASAT`) |
 | `DATABASE_URL` | Postgres del vigilante (en Railway: servicio Postgres → Variables) |
 | `ALERTS_ENABLED` | `false` desactiva el vigilante |
 | `ALERT_INTERVAL_HOURS` | Horas entre revisiones (por defecto `12`) |

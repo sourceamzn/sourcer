@@ -4,8 +4,20 @@ const iherb = require("./iherb");
 const amazon = require("./amazon");
 const keepa = require("./keepa");
 const web = require("./web");
+const storefronts = require("./storefronts");
+const newsletters = require("./newsletters");
+const { tarifa, liquidaciones } = require("./tarifa");
+const { buildAdapters } = require("./sources/catalog");
 
-const adapters = { outletpc, lidl, iherb, amazon, keepa, web };
+/* Catalogo completo de fuentes del PDF: tres fuentes "de fabrica" (Outlet PC,
+   Lidl, iHerb), las APIs (Amazon SP-API, Keepa), la lectura web, y las fuentes
+   generadas por perfil (outlets y mayoristas/fabricantes), mas los canales
+   (storefronts FBA, tarifas, liquidaciones, newsletters). */
+const adapters = Object.assign(
+  { outletpc, lidl, iherb, amazon, keepa, web },
+  buildAdapters(),
+  { storefronts, tarifas: tarifa, liquidaciones, newsletters }
+);
 
 function list() {
   return Object.keys(adapters).map((id) => ({

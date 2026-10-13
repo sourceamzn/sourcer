@@ -33,10 +33,11 @@ test("GET /health responde ok sin claves", async () => {
   assert.ok(Array.isArray(body.adapters));
 });
 
-test("las seis fuentes estan registradas", async () => {
+test("las fuentes base y del catalogo del PDF estan registradas", async () => {
   const body = await (await fetch(base + "/health")).json();
-  const ids = body.adapters.map((a) => a.id).sort();
-  assert.deepEqual(ids, ["amazon", "iherb", "keepa", "lidl", "outletpc", "web"]);
+  const ids = body.adapters.map((a) => a.id);
+  ["amazon", "iherb", "keepa", "lidl", "outletpc", "web"].forEach((id) => assert.ok(ids.indexOf(id) !== -1, "falta " + id));
+  ["selectavision", "yesstyle", "corteingles", "zalandoprive", "gemimarket", "norica", "famosa", "planafabrega", "vallesviasat", "storefronts", "tarifas", "liquidaciones", "newsletters"].forEach((id) => assert.ok(ids.indexOf(id) !== -1, "falta " + id));
 });
 
 test("POST /sourcing/web/ping responde sin claves", async () => {
@@ -95,4 +96,22 @@ test("iherb/search exige consulta", async () => {
   const out = await post("/sourcing/iherb/search", {});
   assert.equal(out.status, 200);
   assert.equal(out.body.reason, "query_required");
+});
+
+test("una tarifa importada se indexa y se cruza por EAN", async () => {
+  const csv = "ean,nombre,precio_neto\n8412345678905,Producto demo,12.50\n";
+  const parsed = await post("/sourcing/tarifas/parse", { csv });
+  assert.equal(parsed.status, 200);
+  assert.equal(parsed.body.ok, true);
+  assert.equal(parsed.body.data.count, 1);
+  assert.equal(parsed.body.data.items[0].ean, "8412345678905");
+
+  const found = await post("/sourcing/tarifas/lookup", { ean: "8412345678905" });
+  assert.equal(found.status, 200);
+  assert.equal(found.body.ok, true);
+  assert.ok(found.body.data.count >= 1);
+  assert.equal(found.body.data.items[0].source, "tarifas");
+
+  const missing = await post("/sourcing/tarifas/lookup", { ean: "0000000000000" });
+  assert.equal(missing.body.data.count, 0);
 });
