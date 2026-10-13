@@ -179,7 +179,6 @@ const storefronts = {
         });
         if (ids.length >= limit) break;
       }
-      const root = marketRoot(body || {});
       const sellers = ids.slice(0, limit).map(function (id) {
         return { sellerId: id, storefront: root + "/sp?seller=" + id };
       });
