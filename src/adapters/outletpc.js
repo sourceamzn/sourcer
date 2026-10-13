@@ -71,6 +71,71 @@ async function graphql(token, version, query, variables) {
   );
 }
 
+function normTokens(value) {
+  return String(value == null ? "" : value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(function (t) { return t.length > 2; });
+}
+
+/* Filtro local: cuantos tokens utiles de la busqueda aparecen en el producto.
+   Evita depender de la sintaxis de busqueda del Storefront cuando esta falla. */
+function scoreNode(node, term) {
+  const hay = normTokens((node.title || "") + " " + (node.vendor || "") + " " + (node.productType || ""));
+  const tokens = normTokens(term);
+  if (!tokens.length) return 0;
+  let hits = 0;
+  tokens.forEach(function (t) {
+    if (hay.some(function (w) { return w === t || w.indexOf(t) === 0 || t.indexOf(w) === 0; })) hits++;
+  });
+  return hits / tokens.length;
+}
+
+async function fetchProducts(token, version, query, variables) {
+  const res = await graphql(token, version, query, variables);
+  if (res.ok && res.data && res.data.data && res.data.data.products) return res;
+  if (res.ok && res.data && res.data.errors && res.data.data && res.data.data.products) return res;
+  return res;
+}
+
+/* Plan B de busqueda: si la consulta por palabra clave no devuelve productos,
+   se barre el catalogo disponible y se filtra en local por similitud de titulo. */
+async function searchFallback(token, max, query) {
+  let last = null;
+  for (const version of API_VERSIONS) {
+    const res = await fetchProducts(token, version, BROWSE_QUERY, { q: "available_for_sale:true", n: Math.min(Math.max(max * 3, 60), 250), after: null });
+    const payload = res && res.data ? res.data : null;
+    if (payload && payload.data && payload.data.products) {
+      const nodes = (payload.data.products.edges || []).map(function (e) { return e.node; });
+      const scored = nodes
+        .map(function (node) { return { node: node, s: scoreNode(node, query) }; })
+        .filter(function (x) { return x.s > 0; })
+        .sort(function (a, b) { return b.s - a.s; })
+        .slice(0, max)
+        .map(function (x) { return x.node; });
+      const items = scored.map(mapOutletProduct);
+      items.forEach(function (it) {
+        if (it.oldPrice && it.price && it.oldPrice > it.price) {
+          it.discountPct = Math.round((1 - it.price / it.oldPrice) * 100);
+        }
+      });
+      return { ok: true, data: { source: "outletpc", query, kind: "search", count: items.length, apiVersion: version, currency: "EUR", via: "fallback_local", items } };
+    }
+    last = res;
+  }
+  return {
+    ok: false,
+    reason: "outletpc_request_failed",
+    status: last ? last.status : 0,
+    error: last ? last.error : null,
+    hint: "La tienda no devolvio productos; revisa la consulta."
+  };
+}
+
 async function search(body) {
   const query = String((body && (body.query || body.q)) || "").trim();
   if (!query) return { ok: false, reason: "query_required" };
@@ -97,21 +162,29 @@ async function search(body) {
   }
   const payload = last && last.data ? last.data : null;
   if (!payload || !payload.data || !payload.data.products) {
-    return {
-      ok: false,
-      reason: "outletpc_request_failed",
-      status: last ? last.status : 0,
-      error: last ? last.error : null,
-      hint: "La tienda no devolvio productos; revisa la consulta."
-    };
+    /* La busqueda nativa fallo: se resuelve con barrido + filtro local. */
+    return searchFallback(session.token, max, query);
   }
   const nodes = (payload.data.products.edges || []).map(function (e) {
     return e.node;
   });
-  const items = nodes.map(mapOutletProduct);
+  let items = nodes.map(mapOutletProduct);
+  const native = items.length;
+  if (!native) {
+    /* Sin resultados nativos: se intenta el filtro local antes de rendirse. */
+    const fb = await searchFallback(session.token, max, query);
+    if (fb.ok && fb.data.items.length) return fb;
+  }
+  if (native) {
+    items.forEach(function (it) {
+      if (it.oldPrice && it.price && it.oldPrice > it.price) {
+        it.discountPct = Math.round((1 - it.price / it.oldPrice) * 100);
+      }
+    });
+  }
   return {
     ok: true,
-    data: { source: "outletpc", query, count: items.length, apiVersion: usedVersion, currency: "EUR", items }
+    data: { source: "outletpc", query, kind: "search", count: items.length, apiVersion: usedVersion, currency: "EUR", via: native ? "storefront" : "storefront_vacio", items }
   };
 }
 

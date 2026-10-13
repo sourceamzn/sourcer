@@ -55,10 +55,18 @@ function searchUrlFor(profile, q) {
   return profile.home + (q ? "?s=" + encodeURIComponent(q) : "");
 }
 
-function browseUrlFor(profile) {
-  if (profile.browse && typeof profile.browse.url === "function") return profile.browse.url();
-  if (profile.browse && profile.browse.url) return profile.browse.url;
-  return profile.home;
+/* Objetivos de barrido: la portada NO suele traer catalogo con precio. Se
+   prefieren las paginas de ofertas/outlet declaradas en el perfil, y se admite
+   una URL concreta enviada por el usuario en body.url. */
+function browseTargetsFor(profile, body) {
+  const urls = [];
+  if (body && body.url) urls.push(String(body.url));
+  const b = profile.browse || {};
+  if (typeof b.url === "function") urls.push(b.url());
+  else if (b.url) urls.push(b.url);
+  if (Array.isArray(b.urls)) urls.push.apply(urls, b.urls);
+  if (!urls.length) urls.push(profile.home);
+  return urls.filter(function (u, i) { return u && urls.indexOf(u) === i; });
 }
 
 function toItem(source, p, baseUrl, platform) {
@@ -140,7 +148,29 @@ async function shopifyCatalog(home, max) {
   });
 }
 
-function makeAdapter(profile) {
+function tokensOf(value) {
+  return String(value == null ? "" : value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(function (t) { return t.length > 2; });
+}
+
+function filterByQuery(items, q) {
+  const tokens = tokensOf(q);
+  if (!tokens.length) return items;
+  return items.filter(function (it) {
+    const hay = tokensOf((it.name || "") + " " + (it.brand || ""));
+    return tokens.some(function (t) {
+      return hay.some(function (w) { return w === t || w.indexOf(t) === 0 || t.indexOf(w) === 0; });
+    });
+  });
+}
+
+async function makeAdapter(profile) {
   const source = profile.id;
   const baseUrl = profile.home || "";
 
@@ -168,11 +198,23 @@ function makeAdapter(profile) {
       if (s && s.length) return Object.assign({ ok: true, data: await collect(s, "shopify-suggest", "search") });
     }
     const fetched = await fetchHtml(searchUrlFor(profile, q));
+    if (fetched.ok) {
+      const raw = parse.parseProducts(fetched.html, baseUrl, profile.platform);
+      if (raw.length) return { ok: true, data: await collect(raw, fetched.via, "search") };
+    }
+    /* Sin resultados en el buscador: se barre la categoria/outlet y se filtra
+       en local por similitud de titulo, para no depender del buscador del sitio. */
+    const notes = [];
+    for (const url of browseTargetsFor(profile, body)) {
+      const page = await fetchHtml(url);
+      if (!page.ok) { notes.push(page.reason || "fetch_failed"); continue; }
+      const raw = filterByQuery(parse.parseProducts(page.html, baseUrl, profile.platform), q).slice(0, max);
+      if (raw.length) return { ok: true, data: await collect(raw, page.via, "search") };
+    }
     if (!fetched.ok) {
       return { ok: false, reason: fetched.reason, status: fetched.status, hint: "Activa un proveedor de scraping (SCRAPER_PROVIDER + SCRAPER_API_KEY) si la fuente bloquea." };
     }
-    const raw = parse.parseProducts(fetched.html, baseUrl, profile.platform);
-    return { ok: true, data: await collect(raw, fetched.via, "search") };
+    return { ok: true, data: await collect([], fetched.via, "search") };
   }
 
   async function browse(body) {
@@ -183,12 +225,20 @@ function makeAdapter(profile) {
       const c = await shopifyCatalog(baseUrl, max);
       if (c && c.length) return Object.assign({ ok: true, data: await collect(c, "shopify-catalog", "browse") });
     }
-    const fetched = await fetchHtml(browseUrlFor(profile));
-    if (!fetched.ok) {
-      return { ok: false, reason: fetched.reason, status: fetched.status, hint: "Activa un proveedor de scraping si la fuente bloquea." };
+    const notes = [];
+    let lastVia = "";
+    for (const url of browseTargetsFor(profile, body)) {
+      const fetched = await fetchHtml(url);
+      if (!fetched.ok) { notes.push(fetched.reason || "fetch_failed"); continue; }
+      lastVia = fetched.via;
+      const raw = parse.parseProducts(fetched.html, baseUrl, profile.platform);
+      if (raw.length) return { ok: true, data: await collect(raw, fetched.via, "browse") };
+      notes.push(source + "_sin_productos_en_" + url);
     }
-    const raw = parse.parseProducts(fetched.html, baseUrl, profile.platform);
-    return { ok: true, data: await collect(raw, fetched.via, "browse") };
+    return {
+      ok: true,
+      data: { ok: false, reason: source + "_sin_resultados", via: lastVia || null, mode: "browse", count: 0, items: [], tried: notes }
+    };
   }
 
   return {
@@ -210,6 +260,16 @@ function makeAdapter(profile) {
         };
       },
       feed: feedAction(source, profile.mapping || DEFAULT_MAPPING),
+      meta: async () => ({
+        ok: true,
+        id: source,
+        label: profile.label || source,
+        kind: profile.kind || "scraping",
+        type: profile.type || "",
+        requiresAuth: Boolean(profile.requiresAuth),
+        particularities: profile.particularities || {},
+        home: baseUrl
+      }),
       search,
       browse
     }

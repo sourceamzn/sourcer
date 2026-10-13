@@ -49,7 +49,8 @@ const config = {
     intervalHours: Math.max(1, parseInt(clean(process.env.CATALOG_SWEEP_INTERVAL_HOURS) || "24", 10) || 24),
     dropPct: Math.max(0.5, parseFloat(clean(process.env.CATALOG_SWEEP_DROP_PCT) || "10") || 10),
     max: Math.min(Math.max(parseInt(clean(process.env.CATALOG_SWEEP_MAX) || "40", 10) || 40, 1), 60),
-    sources: clean(process.env.CATALOG_SWEEP_SOURCES) || "outletpc,lidl"
+    /* Barrido diario de TODAS las fuentes del PDF (no solo Outlet PC y Lidl). */
+    sources: clean(process.env.CATALOG_SWEEP_SOURCES) || "outletpc,lidl,iherb,selectavision,yesstyle,corteingles,gemimarket,norica,famosa,planafabrega,vallesviasat"
   }
 };
 

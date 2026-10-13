@@ -22,6 +22,20 @@ const { PROFILES } = require("./sources/catalog");
 
 const MARKET = "https://www.amazon.es";
 
+/* Marketplaces activos del PDF: amazon.es principal, ES/IT/FR secundarios
+   (y DE como mercado amazon.eu adicional). */
+const MARKETS = {
+  "amazon.es": "https://www.amazon.es",
+  "amazon.it": "https://www.amazon.it",
+  "amazon.fr": "https://www.amazon.fr",
+  "amazon.de": "https://www.amazon.de"
+};
+
+function marketRoot(body) {
+  const m = body && (body.market || body.marketplace);
+  return MARKETS[m] || MARKET;
+}
+
 function asinFrom(text) {
   const m = String(text || "").match(/\/(?:dp|gp\/product|gp\/aw\/d|product)\/([A-Z0-9]{10})(?:[/?]|$)/i);
   if (m) return m[1].toUpperCase();
@@ -29,13 +43,15 @@ function asinFrom(text) {
 }
 
 function sellerUrl(body) {
+  const root = marketRoot(body);
   if (body && body.url) return String(body.url);
   const id = body && (body.sellerId || body.seller || body.merchant);
   if (!id) return "";
-  return MARKET + "/sp?seller=" + encodeURIComponent(String(id).trim());
+  return root + "/sp?seller=" + encodeURIComponent(String(id).trim());
 }
 
-function itemsFromStorefront(html, baseUrl, seller) {
+function itemsFromStorefront(html, baseUrl, seller, root) {
+  const market = root || MARKET;
   const items = [];
   const seen = {};
   const re = /data-asin=["']([A-Z0-9]{10})["'][^>]*>([\s\S]{0,1200}?)<\/div>/gi;
@@ -53,7 +69,7 @@ function itemsFromStorefront(html, baseUrl, seller) {
     items.push({
       asin,
       name: title || "ASIN " + asin,
-      url: MARKET + "/dp/" + asin,
+      url: market + "/dp/" + asin,
       image: imgSrc ? parse.absUrl(baseUrl, imgSrc) : "",
       price: priceMatch ? parse.parsePrice(priceMatch[1] || priceMatch[2]) : null,
       currency: "EUR",
@@ -67,7 +83,7 @@ function itemsFromStorefront(html, baseUrl, seller) {
       const asin = asinFrom(m[1]);
       if (!asin || seen2[asin]) continue;
       seen2[asin] = true;
-      items.push({ asin, name: "ASIN " + asin, url: MARKET + "/dp/" + asin, image: "", price: null, currency: "EUR", attrs: { seller: seller || "", asin } });
+      items.push({ asin, name: "ASIN " + asin, url: market + "/dp/" + asin, image: "", price: null, currency: "EUR", attrs: { seller: seller || "", asin } });
     }
   }
   return items;
@@ -147,9 +163,10 @@ const storefronts = {
       if (!query) {
         return { ok: false, reason: "query_required", hint: "Escribe una categoria o palabra clave para descubrir vendedores." };
       }
+      const root = marketRoot(body || {});
       const targets = [
-        MARKET + "/s?k=" + encodeURIComponent(query) + "&i=merchant-items",
-        MARKET + "/s?k=" + encodeURIComponent(query)
+        root + "/s?k=" + encodeURIComponent(query) + "&i=merchant-items",
+        root + "/s?k=" + encodeURIComponent(query)
       ];
       const ids = [], seen = {}, notes = [];
       let via = "";
@@ -162,8 +179,9 @@ const storefronts = {
         });
         if (ids.length >= limit) break;
       }
+      const root = marketRoot(body || {});
       const sellers = ids.slice(0, limit).map(function (id) {
-        return { sellerId: id, storefront: MARKET + "/sp?seller=" + id };
+        return { sellerId: id, storefront: root + "/sp?seller=" + id };
       });
       return {
         ok: sellers.length > 0,
@@ -186,13 +204,14 @@ const storefronts = {
       if (!url) return { ok: false, reason: "seller_required", hint: "Facilita sellerId o la URL del storefront." };
       const fetched = await fetchHtml(url);
       if (!fetched.ok) return { ok: false, reason: fetched.reason, status: fetched.status, url };
-      const items = itemsFromStorefront(fetched.html, url, (body && (body.sellerId || body.seller)) || "");
+      const items = itemsFromStorefront(fetched.html, url, (body && (body.sellerId || body.seller)) || "", marketRoot(body || {}));
       return { ok: items.length > 0, reason: items.length ? null : "storefront_sin_resultados", data: { source: "storefronts", kind: "seller", url, via: fetched.via, count: items.length, items } };
     },
     browse: async (body) => storefronts.actions.seller(body || {}),
     reverse: async (body) => {
       const asin = String((body && (body.asin || body.ASIN)) || "").trim().toUpperCase();
       if (!/^[A-Z0-9]{10}$/.test(asin)) return { ok: false, reason: "asin_required" };
+      const root = marketRoot(body || {});
       let offers = { ok: false, reason: "spapi_unavailable" };
       if (amazonReady()) offers = await spapi.getItemOffers(asin);
       const sellers = sellersFromOffers(offers);
@@ -203,7 +222,7 @@ const storefronts = {
           source: "storefronts",
           kind: "reverse",
           asin,
-          amazonUrl: MARKET + "/dp/" + asin,
+          amazonUrl: root + "/dp/" + asin,
           offersOk: Boolean(offers && offers.ok),
           sellers,
           sources: candidates

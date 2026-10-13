@@ -113,6 +113,27 @@ async function search(body) {
   };
 }
 
+/* Barrido del catalogo/ofertas sin palabra clave (PDF: barrido diario). */
+async function browse(body) {
+  body = body || {};
+  const url = String(body.url || "https://es.iherb.com/");
+  const fetched = await fetchHtml(url);
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      reason: fetched.reason,
+      status: fetched.status,
+      hint: "iHerb esta tras Cloudflare. Configura SCRAPER_PROVIDER (scraperapi, scrapingbee, scrapfly, scrapingant, zenrows) y su clave, o aporta un feed CSV con UPC."
+    };
+  }
+  const raw = parseHtml(fetched.html);
+  const items = raw.map(mapIherbProduct).filter(Boolean);
+  return {
+    ok: true,
+    data: { source: "iherb", kind: "browse", url, count: items.length, via: fetched.via, items }
+  };
+}
+
 const iherb = {
   id: "iherb",
   label: "iHerb",
@@ -126,7 +147,8 @@ const iherb = {
       note: providerReady() ? null : "iHerb usa Cloudflare: la busqueda real necesita proveedor de scraping o feed con UPC."
     }),
     feed: feedAction("iherb", mapping),
-    search
+    search,
+    browse
   }
 };
 

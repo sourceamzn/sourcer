@@ -1,5 +1,6 @@
 const { config, amazonReady, keepaReady, feedReady, scrapingReady } = require("../config");
 const { list } = require("../adapters");
+const { profileMeta } = require("../adapters/sources/catalog");
 const vault = require("../lib/vault");
 const store = require("../lib/store");
 const scheduler = require("../lib/scheduler");
@@ -52,7 +53,10 @@ function health(req, res) {
         last: scheduler.status().sweep.last
       }
     },
-    adapters: list()
+    adapters: list(),
+    /* Catalogo del PDF con las particularidades por proveedor (EAN, stock
+       exacto, limite por cliente, pedido minimo y tramos) que aplica el motor. */
+    catalog: profileMeta()
   });
 }
 

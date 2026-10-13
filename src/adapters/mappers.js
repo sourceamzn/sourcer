@@ -11,6 +11,18 @@ function stripHtml(value) {
     .replace(/&oacute;/gi, "ó")
     .replace(/&uacute;/gi, "ú")
     .replace(/&ntilde;/gi, "ñ")
+    .replace(/\uFFFD/g, "")
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/* Limpia texto plano de origen externo: quita el caracter de reemplazo (mojibake
+   de encoding) y caracteres de control, sin tocar acentos ni simbolos validos. */
+function cleanText(value) {
+  return String(value == null ? "" : value)
+    .replace(/\uFFFD/g, "")
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -52,8 +64,8 @@ function mapOutletProduct(node) {
   });
   return {
     source: "outletpc",
-    name: node.title || "",
-    brand: node.vendor || "",
+    name: cleanText(node.title || ""),
+    brand: cleanText(node.vendor || ""),
     model: "",
     reference: sku ? sku.sku : "",
     ean: ean ? ean.ean : "",
@@ -83,7 +95,7 @@ function mapLidlItem(item) {
   const description = g.keyfacts ? stripHtml(g.keyfacts.description || "") : "";
   return {
     source: "lidl",
-    name: g.fullTitle || g.title || "",
+    name: cleanText(g.fullTitle || g.title || ""),
     brand,
     model: "",
     reference: g.erpNumber ? String(g.erpNumber) : "",
@@ -110,8 +122,8 @@ function mapIherbProduct(raw) {
   if (!raw) return null;
   return {
     source: "iherb",
-    name: raw.name || "",
-    brand: raw.brand || "",
+    name: cleanText(raw.name || ""),
+    brand: cleanText(raw.brand || ""),
     model: "",
     reference: raw.id ? String(raw.id) : "",
     ean: raw.upc || raw.ean || "",
@@ -126,4 +138,4 @@ function mapIherbProduct(raw) {
   };
 }
 
-module.exports = { stripHtml, num, trimBrand, mapOutletProduct, mapLidlItem, mapIherbProduct };
+module.exports = { stripHtml, cleanText, num, trimBrand, mapOutletProduct, mapLidlItem, mapIherbProduct };
