@@ -24,6 +24,7 @@ async function product(body) {
   const code = body && (body.ean || body.upc || body.gtin || body.code);
   if (!asin && !code) return { ok: false, reason: "asin_or_code_required" };
   const params = { stats: "1", history: "1" };
+  if (body && body.buybox) params.buybox = "1";
   if (asin) {
     params.asin = String(asin).trim().toUpperCase();
   } else {
@@ -45,7 +46,14 @@ async function search(body) {
   if (!keepaReady()) return { ok: false, reason: "keepa_not_configured" };
   const term = body && (body.query || body.term || body.q);
   if (!term) return { ok: false, reason: "query_required" };
-  return request("search", { type: "product", term: String(term) });
+  return request("search", { type: "product", term: String(term), stats: "1" });
+}
+
+async function history(body) {
+  if (!keepaReady()) return { ok: false, reason: "keepa_not_configured" };
+  const asin = body && (body.asin || body.ASIN);
+  if (!asin) return { ok: false, reason: "asin_required" };
+  return request("product", { asin: String(asin).trim().toUpperCase(), stats: "1", history: "1", buybox: "1", days: "180" });
 }
 
 const keepa = {
@@ -59,7 +67,7 @@ const keepa = {
       reason: keepaReady() ? null : "keepa_not_configured",
       domain: config.keepa.domain
     }),
-    history: product,
+    history,
     product,
     search,
     find: search
