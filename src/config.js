@@ -63,7 +63,11 @@ const config = {
        detectan las categorias raiz (Keepa Category Lookup) y se toman las
        principales. Con valor = esas categorias concretas (node ids). */
     categories: clean(process.env.TOP20_CATEGORIES),
-    maxCategories: Math.min(Math.max(parseInt(clean(process.env.TOP20_MAX_CATEGORIES) || "6", 10) || 6, 1), 20)
+    maxCategories: Math.min(Math.max(parseInt(clean(process.env.TOP20_MAX_CATEGORIES) || "6", 10) || 6, 1), 20),
+    /* El refresco programado gasta decenas de tokens por pasada. Solo se ejecuta
+       si el saldo de Keepa supera este minimo, para que la cuenta no se vacie
+       sola (con el plan actual, ~1 token/min, un refresco cada 3 h agota el tope). */
+    minTokens: Math.max(0, parseInt(clean(process.env.TOP20_MIN_TOKENS) || "50", 10) || 50)
   }
 };
 

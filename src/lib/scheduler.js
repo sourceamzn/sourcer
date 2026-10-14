@@ -1,6 +1,7 @@
 const { config } = require("../config");
 const store = require("./store");
 const { adapters } = require("../adapters");
+const inverso = require("../adapters/inverso");
 const top20 = require("./top20");
 
 /* Vigilante de precios: cada X horas (12 por defecto) revisa el precio actual de cada
@@ -311,10 +312,32 @@ function startTop20() {
   if (top20Timer.unref) top20Timer.unref();
 }
 
+/* El refresco programado del Top 20 gasta decenas de tokens de Keepa por
+   pasada. Para que la cuenta no se vacie sola (y los tokens puedan recuperarse)
+   solo se ejecuta si el saldo supera TOP20_MIN_TOKENS. */
+async function top20BudgetOk() {
+  const min = config.top20.minTokens || 0;
+  try {
+    const tok = inverso.keepaTokens ? await inverso.keepaTokens() : null;
+    if (!tok || typeof tok.tokensLeft !== "number") return { ok: true };
+    if (tok.tokensLeft < min) {
+      return { ok: false, reason: "keepa_bajo_minimo", tokensLeft: tok.tokensLeft, min: min };
+    }
+    return { ok: true, tokensLeft: tok.tokensLeft };
+  } catch (e) {
+    return { ok: true };
+  }
+}
+
 async function refreshTop20(actor) {
   if (refreshingTop20) return { ok: false, reason: "already_running" };
   refreshingTop20 = true;
   try {
+    const budget = await top20BudgetOk();
+    if (!budget.ok) {
+      console.log("[top20] refresco " + (actor || "manual") + " omitido: Keepa con " + budget.tokensLeft + " tokens (minimo " + budget.min + ")");
+      return { ok: false, reason: budget.reason, tokensLeft: budget.tokensLeft, min: budget.min };
+    }
     const r = await top20.refresh();
     if (r && r.ok) console.log("[top20] refresco " + (actor || "manual") + " · categorias " + r.refreshed.length + " · items " + (r.refreshed.reduce(function (a, x) { return a + (x.count || 0); }, 0)));
     return r;

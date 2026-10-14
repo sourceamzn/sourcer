@@ -148,6 +148,13 @@ async function buildAggregate(opts) {
   const cats = await rootCategories();
   if (!cats.length) return { ok: false, reason: "sin_categorias" };
 
+  /* Tope de tokens: cada ficha que se pide a Keepa cuesta ~1 token. Antes se
+     unian hasta `limit` ASIN por categoria (6 x 20 = 120) y se pedia la ficha
+     de TODOS -> ~100+ tokens por refresco (una cuenta con deposito 60 no podia
+     completarlo y se vaciaba). Ahora se reparte el cupo `limit` entre las
+     categorias, de modo que el refresco cuesta ~`limit` tokens. */
+  const perCat = Math.max(2, Math.ceil(limit / Math.max(1, cats.length)));
+
   const seen = {};
   const asins = [];
   const notes = [];
@@ -155,7 +162,7 @@ async function buildAggregate(opts) {
   for (const cat of cats) {
     const b = await inverso.keepaBestSellers(cat, range);
     if (!b.ok) { errs++; notes.push(cat + ":" + (b.reason || "error")); continue; }
-    (b.asins || []).slice(0, limit).forEach(function (a) {
+    (b.asins || []).slice(0, perCat).forEach(function (a) {
       const k = String(a).toUpperCase();
       if (!k || seen[k]) return;
       seen[k] = 1; asins.push(a);
