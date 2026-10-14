@@ -297,17 +297,14 @@ function start() {
   startTop20();
 }
 
-/* Refresco programado del panel Top 20 (solo si hay categorias configuradas). */
+/* Refresco programado del panel Top 20. Sin TOP20_CATEGORIES refresca el
+   agregado "mas vendidos de Amazon.es"; con categorias, esas. */
 function startTop20() {
   if (top20Timer || top20Startup) return;
   if (!config.top20.enabled) return;
   const cats = top20.configuredCategories();
-  if (!cats.length) {
-    console.log("[top20] sin TOP20_CATEGORIES: el panel se cachea bajo demanda.");
-    return;
-  }
   const ms = config.top20.intervalHours * 3600 * 1000;
-  console.log("[top20] refresco activo · cada " + config.top20.intervalHours + " h · categorias " + cats.join(", "));
+  console.log("[top20] refresco activo · cada " + config.top20.intervalHours + " h · " + (cats.length ? ("categorias " + cats.join(", ")) : "mas vendidos de Amazon.es (agregado)"));
   top20Startup = setTimeout(() => refreshTop20("startup").catch(() => {}), 150 * 1000);
   if (top20Startup.unref) top20Startup.unref();
   top20Timer = setInterval(() => refreshTop20("timer").catch(() => {}), ms);

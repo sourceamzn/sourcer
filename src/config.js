@@ -57,9 +57,13 @@ const config = {
      TOP20_CATEGORIES admite una lista de node ids de categoria raiz. */
   top20: {
     enabled: clean(process.env.TOP20_ENABLED) !== "false",
-    intervalHours: Math.max(1, parseInt(clean(process.env.TOP20_INTERVAL_HOURS) || "6", 10) || 6),
-    limit: Math.min(Math.max(parseInt(clean(process.env.TOP20_LIMIT) || "20", 10) || 20, 1), 50),
-    categories: clean(process.env.TOP20_CATEGORIES)
+    intervalHours: Math.max(1, parseInt(clean(process.env.TOP20_INTERVAL_HOURS) || "3", 10) || 3),
+    limit: Math.min(Math.max(parseInt(clean(process.env.TOP20_LIMIT) || "20", 10) || 20, 1), 100),
+    /* Vacio = agregado automatico de "los mas vendidos de Amazon.es": se
+       detectan las categorias raiz (Keepa Category Lookup) y se toman las
+       principales. Con valor = esas categorias concretas (node ids). */
+    categories: clean(process.env.TOP20_CATEGORIES),
+    maxCategories: Math.min(Math.max(parseInt(clean(process.env.TOP20_MAX_CATEGORIES) || "6", 10) || 6, 1), 20)
   }
 };
 

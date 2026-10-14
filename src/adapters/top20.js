@@ -22,7 +22,7 @@ const adapter = {
       keepa: keepaReady(),
       reason: keepaReady() ? null : "keepa_not_configured",
       note: keepaReady()
-        ? "Top 20 por categoria de Amazon.es con Keepa Best Sellers (precio, BSR y ventas/mes)."
+        ? "Mas vendidos de Amazon.es con Keepa Best Sellers (precio, BSR y ventas/mes). Por defecto agrega las categorias principales, sin obligar a elegir una."
         : "Configura KEEPA_API_KEY para obtener los mas vendidos de Amazon.es."
     }),
 
@@ -42,8 +42,7 @@ const adapter = {
         return {
           ok: false,
           reason: r.reason,
-          hint: r.reason === "category_required" ? "Indica un node id de categoria (usa la accion categories)."
-            : r.reason === "keepa_not_configured" ? "Configura KEEPA_API_KEY en el backend." : null
+          hint: r.reason === "keepa_not_configured" ? "Configura KEEPA_API_KEY en el backend." : null
         };
       }
       return { ok: true, data: r.data, cached: !!r.cached, stale: !!r.stale };

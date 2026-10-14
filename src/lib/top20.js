@@ -21,6 +21,7 @@ const inverso = require("../adapters/inverso");
 
 const RANGES = [0, 30, 90, 180];
 const CATEGORIES_KEY = "__categories__";
+const AGG_KEY = "__all__";
 const DEFAULT_LIMIT = 20;
 
 let last = { at: null, categories: 0, items: 0, errors: 0, actor: null };
@@ -105,13 +106,84 @@ async function buildList(category, opts) {
   };
 }
 
+/* ---------- "mas vendidos de Amazon.es" (agregado, sin elegir categoria) ---------- */
+/* Categorias por defecto cuando no se indica ninguna: las configuradas o, si no,
+   las raices principales de Amazon.es detectadas con Keepa Category Lookup. */
+async function rootCategories() {
+  const cfg = configuredCategories();
+  if (cfg.length) return cfg;
+  const cats = await categories(false);
+  if (!cats.ok) return [];
+  return (cats.categories || []).map(function (c) { return c.id; }).slice(0, config.top20.maxCategories || 6);
+}
+
+/* Une los best sellers de las categorias raiz y ordena por ventas estimadas:
+   es el "top general" de Amazon.es sin obligar a elegir categoria. */
+async function buildAggregate(opts) {
+  opts = opts || {};
+  const limit = clamp(opts.limit, config.top20.limit || DEFAULT_LIMIT, 1, 100);
+  let range = parseInt(opts.range, 10);
+  if (RANGES.indexOf(range) === -1) range = 0;
+
+  const cats = await rootCategories();
+  if (!cats.length) return { ok: false, reason: "sin_categorias" };
+
+  const seen = {};
+  const asins = [];
+  const notes = [];
+  let errs = 0;
+  for (const cat of cats) {
+    const b = await inverso.keepaBestSellers(cat, range);
+    if (!b.ok) { errs++; notes.push(cat + ":" + (b.reason || "error")); continue; }
+    (b.asins || []).slice(0, limit).forEach(function (a) {
+      const k = String(a).toUpperCase();
+      if (!k || seen[k]) return;
+      seen[k] = 1; asins.push(a);
+    });
+  }
+  if (!asins.length) return { ok: false, reason: errs ? "bestsellers_failed" : "sin_asins", notes: notes };
+
+  const r = await inverso.keepaProductsByAsins(asins);
+  const byAsin = {};
+  (r.products || []).forEach(function (p) { if (p && p.asin) byAsin[String(p.asin).toUpperCase()] = p; });
+
+  const items = [];
+  asins.forEach(function (asin) {
+    const prod = byAsin[String(asin).toUpperCase()];
+    if (!prod) return;
+    const m = inverso.metricsFromKeepa(prod);
+    if (!m.asin) return;
+    m.category = (m.categoryTree && m.categoryTree.length) ? m.categoryTree[m.categoryTree.length - 1] : "";
+    m.amazon = m.url || ("https://www.amazon.es/dp/" + m.asin);
+    m.google = "https://www.google.com/search?tbm=shop&q=" + encodeURIComponent(m.asin + " " + (m.title || "")).slice(0, 200);
+    items.push(m);
+  });
+  items.sort(function (a, b) {
+    const d = (b.sales || 0) - (a.sales || 0);
+    if (d) return d;
+    return (a.bsr || 1e12) - (b.bsr || 1e12);
+  });
+  const out = items.slice(0, limit).map(function (m, i) { m.rank = i + 1; return m; });
+
+  return {
+    ok: true,
+    built: store.nowIso(),
+    category: AGG_KEY,
+    range: range,
+    limit: limit,
+    count: out.length,
+    categories: cats,
+    items: out,
+    notes: notes
+  };
+}
+
 /* ---------- leer (con cache) ---------- */
 async function list(category, opts) {
   opts = opts || {};
   if (!keepaReady()) return { ok: false, reason: "keepa_not_configured" };
-  const cat = String(category == null ? "" : category).replace(/\D/g, "");
-  if (!cat) return { ok: false, reason: "category_required" };
-  const key = listKey(cat, opts.range);
+  const raw = String(category == null ? "" : category).replace(/\D/g, "");
+  const key = listKey(raw || AGG_KEY, opts.range);
   const cached = await store.top20Get(key);
   const maxAge = (opts.refresh ? 0 : (config.top20.intervalHours || 6) * 3600 * 1000);
 
@@ -119,7 +191,7 @@ async function list(category, opts) {
     return { ok: true, cached: true, data: cached.data };
   }
 
-  const built = await buildList(cat, opts);
+  const built = raw ? await buildList(raw, opts) : await buildAggregate(opts);
   if (built.ok) {
     await store.top20Set(key, { data: built, at: store.nowIso() });
     return { ok: true, cached: false, data: built };
@@ -140,7 +212,18 @@ async function refresh(category) {
   const cats = category
     ? String(category).split(",").map(function (s) { return s.replace(/\D/g, "").trim(); }).filter(Boolean)
     : configuredCategories();
-  if (!cats.length) return { ok: false, reason: "sin_categorias_configuradas" };
+  if (!cats.length) {
+    /* Sin TOP20_CATEGORIES: el panel "mas vendidos de Amazon.es" se refresca
+       como agregado (no requiere categoria). */
+    const r = await list("", { refresh: true });
+    const items = (r && r.data && r.data.count) || 0;
+    last = {
+      at: store.nowIso(),
+      categories: (r && r.data && r.data.categories && r.data.categories.length) || 0,
+      items: items, errors: r && r.ok ? 0 : 1, actor: "refresh"
+    };
+    return { ok: !!(r && r.ok), aggregate: true, refreshed: [{ category: AGG_KEY, ok: !!(r && r.ok), count: items, reason: (r && r.reason) || null }], at: last.at };
+  }
   const out = [];
   let items = 0, errors = 0;
   for (const c of cats) {
@@ -154,11 +237,14 @@ async function refresh(category) {
 }
 
 function status() {
+  const cats = configuredCategories();
   return {
     enabled: config.top20.enabled,
     intervalHours: config.top20.intervalHours,
     limit: config.top20.limit,
-    categories: configuredCategories(),
+    categories: cats,
+    aggregate: cats.length === 0,
+    maxCategories: config.top20.maxCategories,
     last: last
   };
 }

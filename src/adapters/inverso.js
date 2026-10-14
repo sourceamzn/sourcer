@@ -367,6 +367,18 @@ const inverso = {
           return { ok: false, reason: "parametros_vacios", hint: "Indica una categoria, un categoryId de Keepa o una palabra clave (p. ej. freidoras de aire).", notes: notes };
         }
         if (errors.length && errors.length >= attempted) {
+          /* HTTP 402/429 de Keepa = cuenta sin saldo (no es un fallo del flujo). */
+          const outOfTokens = errors.some(function (x) { return /keepa_http_(402|429)/.test(x); }) || (tok && tok.tokensLeft <= 0);
+          if (outOfTokens) {
+            return {
+              ok: false,
+              reason: "keepa_sin_tokens",
+              hint: "La cuenta de Keepa no tiene tokens disponibles (saldo " + (tok ? tok.tokensLeft : "?") +
+                "). Cada busqueda por palabra clave gasta ~10 tokens y cada ficha ~1; el refresco del Top 20 gasta ~70. " +
+                "Con la recarga actual (~1 token/min) no da para la busqueda inversa: amplia al plan API de Keepa (desde 49 EUR/mes = 20 tokens/min)." + tokHint,
+              notes: notes
+            };
+          }
           const first = errors[0].split(":")[1] || "keepa_error";
           return { ok: false, reason: first, hint: "Keepa no respondio correctamente (" + errors.join(", ") + ")." + tokHint, notes: notes };
         }
