@@ -24,6 +24,25 @@ const CATEGORIES_KEY = "__categories__";
 const AGG_KEY = "__all__";
 const DEFAULT_LIMIT = 20;
 
+/* Departamentos de referencia para "los mas vendidos de Amazon.es".
+   Ordenados por peso de venta general: NO son las primeras categorias por id
+   (esas caen en Libros / CD / Software y dan un top sesgado). Se pueden
+   sobreescribir con TOP20_CATEGORIES. */
+const MAJOR_CATEGORIES = [
+  { id: "599391031", name: "Hogar y cocina" },
+  { id: "599370031", name: "Electronica" },
+  { id: "5512276031", name: "Moda" },
+  { id: "667049031", name: "Informatica" },
+  { id: "6198054031", name: "Belleza" },
+  { id: "2454136031", name: "Deportes y aire libre" },
+  { id: "6198072031", name: "Alimentacion y bebidas" },
+  { id: "599385031", name: "Juguetes y juegos" },
+  { id: "2454133031", name: "Bricolaje y herramientas" },
+  { id: "3677430031", name: "Salud y cuidado personal" },
+  { id: "1951051031", name: "Coche y moto" },
+  { id: "1571259031", name: "Jardin" }
+];
+
 let last = { at: null, categories: 0, items: 0, errors: 0, actor: null };
 
 function clamp(v, def, min, max) {
@@ -112,9 +131,10 @@ async function buildList(category, opts) {
 async function rootCategories() {
   const cfg = configuredCategories();
   if (cfg.length) return cfg;
-  const cats = await categories(false);
-  if (!cats.ok) return [];
-  return (cats.categories || []).map(function (c) { return c.id; }).slice(0, config.top20.maxCategories || 6);
+  /* Sin TOP20_CATEGORIES: departamentos de venta general curados (los primeros
+     maxCategories). Determinista y representativo de "lo mas vendido". */
+  const max = config.top20.maxCategories || 6;
+  return MAJOR_CATEGORIES.slice(0, max).map(function (c) { return c.id; });
 }
 
 /* Une los best sellers de las categorias raiz y ordena por ventas estimadas:
@@ -141,7 +161,10 @@ async function buildAggregate(opts) {
       seen[k] = 1; asins.push(a);
     });
   }
-  if (!asins.length) return { ok: false, reason: errs ? "bestsellers_failed" : "sin_asins", notes: notes };
+  if (!asins.length) {
+    const tok429 = notes.some(function (n) { return /keepa_http_(402|429)/.test(n); });
+    return { ok: false, reason: tok429 ? "keepa_sin_tokens" : (errs ? "bestsellers_failed" : "sin_asins"), notes: notes, categories: cats };
+  }
 
   const r = await inverso.keepaProductsByAsins(asins);
   const byAsin = {};
@@ -164,6 +187,12 @@ async function buildAggregate(opts) {
     return (a.bsr || 1e12) - (b.bsr || 1e12);
   });
   const out = items.slice(0, limit).map(function (m, i) { m.rank = i + 1; return m; });
+  if (!out.length) {
+    /* Se obtuvieron ASIN pero ninguna ficha trajo datos (p. ej. Keepa sin saldo
+       en la llamada de productos): no es un top valido. */
+    const tok429 = notes.some(function (n) { return /keepa_http_(402|429)/.test(n); });
+    return { ok: false, reason: tok429 ? "keepa_sin_tokens" : "sin_productos", notes: notes, categories: cats };
+  }
 
   return {
     ok: true,
@@ -187,16 +216,29 @@ async function list(category, opts) {
   const cached = await store.top20Get(key);
   const maxAge = (opts.refresh ? 0 : (config.top20.intervalHours || 6) * 3600 * 1000);
 
-  if (cached && cached.data && !opts.refresh && fresh(cached.data.built || cached.at, maxAge)) {
+  if (cached && cached.data && cached.data.count && !opts.refresh && fresh(cached.data.built || cached.at, maxAge)) {
     return { ok: true, cached: true, data: cached.data };
   }
 
+  /* No gastar tokens si la cuenta esta a cero: se devuelve el motivo real en
+     lugar de encadenar peticiones que Keepa rechaza con HTTP 429. */
+  let bal = null;
+  try { bal = inverso.keepaTokens ? await inverso.keepaTokens() : null; } catch (e) {}
+  if (bal && typeof bal.tokensLeft === "number" && bal.tokensLeft <= 0) {
+    if (cached && cached.data && cached.data.count) return { ok: true, cached: true, stale: true, data: cached.data };
+    return {
+      ok: false, reason: "keepa_sin_tokens",
+      hint: "La cuenta de Keepa no tiene tokens (saldo " + bal.tokensLeft + (bal.refillMinutes ? (", reposicion en ~" + bal.refillMinutes + " min") : "") +
+        "). El Top 20 une varios departamentos y gasta decenas de tokens por refresco; amplia el plan API de Keepa (desde 49 EUR/mes = 20 tokens/min)."
+    };
+  }
+
   const built = raw ? await buildList(raw, opts) : await buildAggregate(opts);
-  if (built.ok) {
+  if (built.ok && built.count > 0) {
     await store.top20Set(key, { data: built, at: store.nowIso() });
     return { ok: true, cached: false, data: built };
   }
-  if (cached && cached.data) return { ok: true, cached: true, stale: true, data: cached.data, reason: built.reason };
+  if (cached && cached.data && cached.data.count) return { ok: true, cached: true, stale: true, data: cached.data, reason: built.reason };
   return built;
 }
 
@@ -216,13 +258,14 @@ async function refresh(category) {
     /* Sin TOP20_CATEGORIES: el panel "mas vendidos de Amazon.es" se refresca
        como agregado (no requiere categoria). */
     const r = await list("", { refresh: true });
-    const items = (r && r.data && r.data.count) || 0;
+    const okr = !!(r && r.ok);
+    const items = (okr && r.data && r.data.count) || 0;
     last = {
       at: store.nowIso(),
-      categories: (r && r.data && r.data.categories && r.data.categories.length) || 0,
-      items: items, errors: r && r.ok ? 0 : 1, actor: "refresh"
+      categories: (r && r.data && r.data.categories && r.data.categories.length) || MAJOR_CATEGORIES.length,
+      items: items, errors: okr ? 0 : 1, reason: okr ? null : ((r && r.reason) || null), actor: "refresh"
     };
-    return { ok: !!(r && r.ok), aggregate: true, refreshed: [{ category: AGG_KEY, ok: !!(r && r.ok), count: items, reason: (r && r.reason) || null }], at: last.at };
+    return { ok: okr, aggregate: true, refreshed: [{ category: AGG_KEY, ok: okr, count: items, reason: (r && r.reason) || null }], at: last.at };
   }
   const out = [];
   let items = 0, errors = 0;

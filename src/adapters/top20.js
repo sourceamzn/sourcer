@@ -42,7 +42,8 @@ const adapter = {
         return {
           ok: false,
           reason: r.reason,
-          hint: r.reason === "keepa_not_configured" ? "Configura KEEPA_API_KEY en el backend." : null
+          hint: r.hint || (r.reason === "keepa_not_configured" ? "Configura KEEPA_API_KEY en el backend." : null),
+          notes: r.notes || null
         };
       }
       return { ok: true, data: r.data, cached: !!r.cached, stale: !!r.stale };
