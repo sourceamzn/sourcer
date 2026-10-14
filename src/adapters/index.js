@@ -5,17 +5,18 @@ const amazon = require("./amazon");
 const keepa = require("./keepa");
 const web = require("./web");
 const inverso = require("./inverso");
+const top20 = require("./top20");
 const storefronts = require("./storefronts");
 const newsletters = require("./newsletters");
 const { tarifa, liquidaciones } = require("./tarifa");
 const { buildAdapters } = require("./sources/catalog");
 
 /* Catalogo completo de fuentes del PDF: tres fuentes "de fabrica" (Outlet PC,
-   Lidl, iHerb), las APIs (Amazon SP-API, Keepa), la lectura web, y las fuentes
-   generadas por perfil (outlets y mayoristas/fabricantes), mas los canales
-   (storefronts FBA, tarifas, liquidaciones, newsletters). */
+   Lidl, iHerb), las APIs (Amazon SP-API, Keepa), la lectura web, las fuentes
+   generadas por perfil (outlets y mayoristas/fabricantes), los canales
+   (storefronts FBA, tarifas, liquidaciones, newsletters) y el panel Top 20. */
 const adapters = Object.assign(
-  { outletpc, lidl, iherb, amazon, keepa, web, inverso },
+  { outletpc, lidl, iherb, amazon, keepa, web, inverso, top20 },
   buildAdapters(),
   { storefronts, tarifas: tarifa, liquidaciones, newsletters }
 );

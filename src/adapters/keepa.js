@@ -23,7 +23,8 @@ async function product(body) {
   const asin = body && (body.asin || body.ASIN);
   const code = body && (body.ean || body.upc || body.gtin || body.code);
   if (!asin && !code) return { ok: false, reason: "asin_or_code_required" };
-  const params = { stats: "1", history: "1" };
+  const params = { stats: "1" };
+  if (body && body.history) params.history = "1";
   if (body && body.buybox) params.buybox = "1";
   if (asin) {
     params.asin = String(asin).trim().toUpperCase();

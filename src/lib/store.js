@@ -44,7 +44,7 @@ function iso(value) {
 
 /* ---------------- backend de fichero (fallback) ---------------- */
 function createFileBackend(file) {
-  let state = { watches: [], price_history: [], alerts: [], catalog: [], tariffs: [] };
+  let state = { watches: [], price_history: [], alerts: [], catalog: [], tariffs: [], top20: {} };
 
   function load() {
     try {
@@ -55,11 +55,12 @@ function createFileBackend(file) {
           price_history: Array.isArray(parsed.price_history) ? parsed.price_history : [],
           alerts: Array.isArray(parsed.alerts) ? parsed.alerts : [],
           catalog: Array.isArray(parsed.catalog) ? parsed.catalog : [],
-          tariffs: Array.isArray(parsed.tariffs) ? parsed.tariffs : []
+          tariffs: Array.isArray(parsed.tariffs) ? parsed.tariffs : [],
+          top20: parsed.top20 && typeof parsed.top20 === "object" ? parsed.top20 : {}
         };
       }
     } catch (e) {
-      state = { watches: [], price_history: [], alerts: [], catalog: [], tariffs: [] };
+      state = { watches: [], price_history: [], alerts: [], catalog: [], tariffs: [], top20: {} };
     }
   }
 
@@ -224,6 +225,19 @@ function createFileBackend(file) {
         .filter((t) => want[t.ean])
         .sort((a, b) => String(b.at).localeCompare(String(a.at)));
     },
+    async top20Get(key) {
+      return state.top20[key] || null;
+    },
+    async top20Set(key, data) {
+      state.top20[key] = data;
+      const keys = Object.keys(state.top20);
+      if (keys.length > 200) keys.slice(0, keys.length - 200).forEach((k) => delete state.top20[k]);
+      persist();
+      return data;
+    },
+    async top20Keys() {
+      return Object.keys(state.top20);
+    },
     async stats() {
       return {
         mode: "file",
@@ -232,7 +246,8 @@ function createFileBackend(file) {
         alerts: state.alerts.filter((a) => !a.dismissed).length,
         history: state.price_history.length,
         catalog: state.catalog.length,
-        tariffs: state.tariffs.length
+        tariffs: state.tariffs.length,
+        top20: Object.keys(state.top20).length
       };
     }
   };
@@ -321,6 +336,10 @@ function createPgBackend(url) {
           "source TEXT, ean TEXT, name TEXT, brand TEXT, model TEXT, reference TEXT, " +
           "net DOUBLE PRECISION, price DOUBLE PRECISION, url TEXT, at TIMESTAMPTZ DEFAULT NOW(), " +
           "PRIMARY KEY (source, ean))"
+      );
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS top20_cache (" +
+          "ckey TEXT PRIMARY KEY, data JSONB, at TIMESTAMPTZ DEFAULT NOW())"
       );
       return this;
     },
@@ -462,6 +481,21 @@ function createPgBackend(url) {
       const out = await pool.query("SELECT * FROM tariff_seen WHERE ean = ANY($1) ORDER BY at DESC", [want]);
       return out.rows;
     },
+    async top20Get(key) {
+      const out = await pool.query("SELECT data FROM top20_cache WHERE ckey=$1", [key]);
+      return out.rows[0] ? out.rows[0].data : null;
+    },
+    async top20Set(key, data) {
+      await pool.query(
+        "INSERT INTO top20_cache (ckey,data,at) VALUES ($1,$2,$3) ON CONFLICT (ckey) DO UPDATE SET data=$2, at=$3",
+        [key, JSON.stringify(data), nowIso()]
+      );
+      return data;
+    },
+    async top20Keys() {
+      const out = await pool.query("SELECT ckey FROM top20_cache ORDER BY at DESC LIMIT 200");
+      return out.rows.map((r) => r.ckey);
+    },
     async stats() {
       const w = await pool.query("SELECT COUNT(*)::int AS c FROM watches");
       const wa = await pool.query("SELECT COUNT(*)::int AS c FROM watches WHERE active=TRUE");
@@ -469,7 +503,8 @@ function createPgBackend(url) {
       const h = await pool.query("SELECT COUNT(*)::int AS c FROM price_history");
       const c = await pool.query("SELECT COUNT(*)::int AS c FROM catalog_seen");
       const t = await pool.query("SELECT COUNT(*)::int AS c FROM tariff_seen");
-      return { mode: "postgres", watches: w.rows[0].c, active: wa.rows[0].c, alerts: a.rows[0].c, history: h.rows[0].c, catalog: c.rows[0].c, tariffs: t.rows[0].c };
+      const tp = await pool.query("SELECT COUNT(*)::int AS c FROM top20_cache");
+      return { mode: "postgres", watches: w.rows[0].c, active: wa.rows[0].c, alerts: a.rows[0].c, history: h.rows[0].c, catalog: c.rows[0].c, tariffs: t.rows[0].c, top20: tp.rows[0].c };
     }
   };
 }
@@ -519,5 +554,8 @@ module.exports = {
   catalogUpsert: async (source, items) => (await ready()).catalogUpsert(source, items),
   catalogHasSource: async (source) => (await ready()).catalogHasSource(source),
   tariffUpsert: async (items, source) => (await ready()).tariffUpsert(items, source),
-  tariffFind: async (eans) => (await ready()).tariffFind(eans)
+  tariffFind: async (eans) => (await ready()).tariffFind(eans),
+  top20Get: async (key) => (await ready()).top20Get(key),
+  top20Set: async (key, data) => (await ready()).top20Set(key, data),
+  top20Keys: async () => (await ready()).top20Keys()
 };

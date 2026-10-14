@@ -4,6 +4,7 @@ const { profileMeta } = require("../adapters/sources/catalog");
 const vault = require("../lib/vault");
 const store = require("../lib/store");
 const scheduler = require("../lib/scheduler");
+const top20 = require("../lib/top20");
 const pkg = require("../../package.json");
 
 function health(req, res) {
@@ -21,6 +22,8 @@ function health(req, res) {
       /* Busqueda inversa (Amazon -> proveedor): depende de Keepa para los
          candidatos de la demanda; los proveedores usan el resto de fuentes. */
       inverso: keepaReady(),
+      /* Panel Top 20 · mas vendidos amazon.es (Keepa Best Sellers, domain 9). */
+      top20: keepaReady(),
       outletpc: true,
       lidl: true,
       iherb: scrapingReady() || feedReady("iherb"),
@@ -56,6 +59,7 @@ function health(req, res) {
         last: scheduler.status().sweep.last
       }
     },
+    top20: top20.status(),
     adapters: list(),
     /* Catalogo del PDF con las particularidades por proveedor (EAN, stock
        exacto, limite por cliente, pedido minimo y tramos) que aplica el motor. */

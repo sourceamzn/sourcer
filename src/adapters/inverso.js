@@ -35,6 +35,8 @@ function num(v, d) {
   const n = Number(v);
   return isFinite(n) ? n : d == null ? 0 : d;
 }
+/* Keepa devuelve -1/-2 cuando no hay dato: se normaliza a 0. */
+function posNum(v) { const n = num(v); return n > 0 ? n : 0; }
 function round2(n) {
   return Math.round((isFinite(n) ? n : 0) * 100) / 100;
 }
@@ -158,10 +160,11 @@ function metricsFromKeepa(prod) {
   const bsr = keepaCur(prod, 3, false);
   /* Ventas: monthlySold de Amazon si existe; si no, caidas de BSR 30 d (suelo, no se dividen). */
   const sales = num(s.monthlySold) || num(s.salesRankDrops30) || 0;
-  const offersTotal = num(s.offerCount) || num(s.totalOfferCount) || 0;
-  const offersFba = num(s.offerCountFBA) || 0;
+  /* Keepa usa centinelas negativos (-1/-2) para "sin dato": nunca deben contar. */
+  const offersTotal = posNum(s.offerCount) || posNum(s.totalOfferCount) || 0;
+  const offersFba = posNum(s.offerCountFBA);
   const amazonSells = keepaCur(prod, 0, true) > 0 || num(s.outOfStockPercentage90) < 0;
-  const thirdParty = Math.max(0, offersTotal - (amazonSells ? 1 : 0)) || offersFba;
+  const thirdParty = offersTotal > 0 ? Math.max(0, offersTotal - (amazonSells ? 1 : 0)) : offersFba;
   const ean = (prod && prod.eanList && prod.eanList[0]) || (prod && prod.upcList && prod.upcList[0]) || "";
   return {
     asin: String((prod && prod.asin) || "").toUpperCase(),
@@ -202,12 +205,44 @@ async function keepaSearchProducts(term) {
   if (!r.ok) return { ok: false, reason: r.reason, error: r.error };
   return { ok: true, products: (r.data && r.data.products) || [] };
 }
-async function keepaBestSellers(categoryId) {
-  const r = await keepaRequest("bestsellers", { category: String(categoryId) });
+async function keepaBestSellers(categoryId, range) {
+  const params = { category: String(categoryId) };
+  if (range != null && String(range) !== "" && String(range) !== "0") params.range = String(range);
+  const r = await keepaRequest("bestsellers", params);
   if (!r.ok) return { ok: false, reason: r.reason };
   const d = r.data || {};
   const asins = (d.bestSellersList && d.bestSellersList.asinList) || d.asinList || d.asins || [];
-  return { ok: true, asins: Array.isArray(asins) ? asins : [] };
+  return { ok: true, asins: Array.isArray(asins) ? asins : [], lastUpdate: d.lastUpdate || null, categoryId: d.categoryId || categoryId };
+}
+async function keepaCategories(categoryId) {
+  /* Category Lookup: con category=0 devuelve todas las categorias raiz del
+     marketplace. 1 token por llamada (cualquier numero de ids hasta 10). */
+  const r = await keepaRequest("category", { category: String(categoryId == null ? 0 : categoryId), parents: "1" });
+  if (!r.ok) return { ok: false, reason: r.reason };
+  const d = r.data || {};
+  const cats = d.categories || {};
+  const out = Object.keys(cats).map(function (k) {
+    const c = cats[k] || {};
+    return { id: String(c.catId || k), name: c.name || "", parent: c.parent == null ? null : c.parent, isBrowseNode: c.isBrowseNode !== false };
+  }).filter(function (c) { return c.id && c.name; });
+  return { ok: true, categories: out, tokensConsumed: 1 };
+}
+/* Saldo de tokens de Keepa. Es una llamada de 0 tokens: sirve para explicar
+   por que una busqueda no devuelve datos (cuenta sin saldo) en vez de dejarlo
+   como un misterioso "sin_candidatos". */
+async function keepaTokens() {
+  try {
+    const query = new URLSearchParams({ key: config.keepa.apiKey });
+    const res = await jsonFetch(KEEPA + "token?" + query.toString(), { method: "GET" }, 15000);
+    if (!res.ok) return null;
+    const d = res.data || {};
+    const refillMs = num(d.refillIn) || null;
+    return {
+      tokensLeft: num(d.tokensLeft),
+      refillMinutes: refillMs ? Math.max(1, Math.round(refillMs / 60000)) : null,
+      refillRate: num(d.refillRate)
+    };
+  } catch (e) { return null; }
 }
 async function keepaFinder(body) {
   /* Keepa Product Finder (POST /query). Se envia el cuerpo de seleccion tal cual
@@ -298,28 +333,52 @@ const inverso = {
       if (!keepaReady()) return { ok: false, reason: "keepa_not_configured", hint: "La busqueda inversa parte de la demanda en Amazon: configura KEEPA_API_KEY." };
       const p = planParams(body);
       const limit = clampInt(body && body.limit, 10, 1, 50);
-      const query = String((body && (body.query || body.category || body.q)) || "").trim();
-      const categoryId = body && (body.categoryId || body.category);
-      let products = [], via = "", notes = [];
+      let query = String((body && (body.query || body.q)) || "").trim();
+      const rawCategory = body && (body.categoryId || body.category);
+      const categoryDigits = digits(rawCategory);
+      /* Si escriben un texto (no un node id) en el campo de categoria, se usa
+         tambien como palabra clave en vez de descartar la busqueda. */
+      if (!query && !categoryDigits && String(rawCategory || "").trim()) query = String(rawCategory).trim();
+      let products = [], via = "", notes = [], errors = [];
 
       /* Fuentes del PDF, por orden: Product Finder, best sellers por categoria, busqueda por palabra clave. */
-      if (body && body.finder && (body.selection || true)) {
+      if (body && body.finder) {
         const f = await keepaFinder(body);
         if (f.ok && f.asins.length) { const r = await keepaProductsByAsins(f.asins.slice(0, limit)); products = r.products; via = "product_finder"; }
-        else notes.push("Product Finder: " + (f.reason || "sin resultados"));
+        else { if (f.ok) notes.push("Product Finder sin resultados"); else errors.push("finder:" + (f.reason || "error")); }
       }
-      if (!products.length && categoryId && String(categoryId).replace(/\D/g, "")) {
-        const b = await keepaBestSellers(String(categoryId).replace(/\D/g, ""));
+      if (!products.length && categoryDigits) {
+        const b = await keepaBestSellers(categoryDigits);
         if (b.ok && b.asins.length) { const r = await keepaProductsByAsins(b.asins.slice(0, limit)); products = r.products; via = "bestsellers"; }
-        else notes.push("Best sellers: " + (b.reason || "sin resultados"));
+        else { if (b.ok) notes.push("Best sellers sin resultados"); else errors.push("bestsellers:" + (b.reason || "error")); }
       }
       if (!products.length && query) {
         const s = await keepaSearchProducts(query);
-        if (s.ok) { products = s.products; via = via || "search"; }
-        else notes.push("Busqueda: " + (s.reason || "sin resultados"));
+        if (s.ok) { products = s.products; via = via || "search"; notes.push("Busqueda '" + query + "': " + products.length + " resultado(s)"); }
+        else errors.push("search:" + (s.reason || "error"));
       }
       if (!products.length) {
-        return { ok: false, reason: "sin_candidatos", hint: "Indica una categoria, un categoryId de Keepa o una palabra clave (p. ej. freidoras de aire).", notes: notes };
+        /* Distinguir "Keepa fallo" de "no hay resultados": si todas las fuentes
+           consultadas fallaron, el motivo real es el error, no la falta de datos. */
+        const attempted = (body && body.finder ? 1 : 0) + (categoryDigits ? 1 : 0) + (query ? 1 : 0);
+        const tok = await keepaTokens();
+        const tokHint = tok ? (" Tokens Keepa disponibles: " + tok.tokensLeft + (tok.refillMinutes ? (", reposicion en ~" + tok.refillMinutes + " min") : "") + ".") : "";
+        if (!attempted) {
+          return { ok: false, reason: "parametros_vacios", hint: "Indica una categoria, un categoryId de Keepa o una palabra clave (p. ej. freidoras de aire).", notes: notes };
+        }
+        if (errors.length && errors.length >= attempted) {
+          const first = errors[0].split(":")[1] || "keepa_error";
+          return { ok: false, reason: first, hint: "Keepa no respondio correctamente (" + errors.join(", ") + ")." + tokHint, notes: notes };
+        }
+        const noData = tok && tok.tokensLeft <= 0;
+        return {
+          ok: false,
+          reason: noData ? "keepa_sin_tokens" : "sin_candidatos",
+          hint: noData
+            ? ("La cuenta de Keepa se quedo sin tokens." + tokHint + " Reintenta cuando se reponga el saldo.")
+            : ("Keepa no devolvio productos para " + (query ? ("'" + query + "'") : "esa categoria") + ". Prueba otra palabra clave o un node id de categoria." + tokHint),
+          notes: notes
+        };
       }
 
       const cands = products
@@ -388,3 +447,8 @@ const inverso = {
 module.exports = inverso;
 module.exports.planFor = planFor;
 module.exports.metricsFromKeepa = metricsFromKeepa;
+module.exports.keepaBestSellers = keepaBestSellers;
+module.exports.keepaProductsByAsins = keepaProductsByAsins;
+module.exports.keepaCategories = keepaCategories;
+module.exports.keepaTokens = keepaTokens;
+module.exports.keepaReady = keepaReady;

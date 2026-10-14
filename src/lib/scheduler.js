@@ -1,6 +1,7 @@
 const { config } = require("../config");
 const store = require("./store");
 const { adapters } = require("../adapters");
+const top20 = require("./top20");
 
 /* Vigilante de precios: cada X horas (12 por defecto) revisa el precio actual de cada
    producto vigilado, lo guarda en el historico y crea un aviso cuando la bajada
@@ -14,6 +15,9 @@ let sweepTimer = null;
 let sweepStartup = null;
 let sweeping = false;
 let lastSweep = { at: null, sources: [], items: 0, newItems: 0, drops: 0, alerts: 0, errors: 0 };
+let top20Timer = null;
+let top20Startup = null;
+let refreshingTop20 = false;
 
 function norm(value) {
   return String(value == null ? "" : value)
@@ -264,6 +268,7 @@ function start() {
   if (consecutiveTimer || timer) return;
   if (!config.alerts.enabled) {
     console.log("[alerts] desactivado (ALERTS_ENABLED=false)");
+    startTop20();
     return;
   }
   const ms = config.alerts.intervalHours * 3600 * 1000;
@@ -289,6 +294,36 @@ function start() {
     sweepTimer = setInterval(() => sweepOnce("timer").catch(() => {}), msSweep);
     if (sweepTimer.unref) sweepTimer.unref();
   }
+  startTop20();
+}
+
+/* Refresco programado del panel Top 20 (solo si hay categorias configuradas). */
+function startTop20() {
+  if (top20Timer || top20Startup) return;
+  if (!config.top20.enabled) return;
+  const cats = top20.configuredCategories();
+  if (!cats.length) {
+    console.log("[top20] sin TOP20_CATEGORIES: el panel se cachea bajo demanda.");
+    return;
+  }
+  const ms = config.top20.intervalHours * 3600 * 1000;
+  console.log("[top20] refresco activo · cada " + config.top20.intervalHours + " h · categorias " + cats.join(", "));
+  top20Startup = setTimeout(() => refreshTop20("startup").catch(() => {}), 150 * 1000);
+  if (top20Startup.unref) top20Startup.unref();
+  top20Timer = setInterval(() => refreshTop20("timer").catch(() => {}), ms);
+  if (top20Timer.unref) top20Timer.unref();
+}
+
+async function refreshTop20(actor) {
+  if (refreshingTop20) return { ok: false, reason: "already_running" };
+  refreshingTop20 = true;
+  try {
+    const r = await top20.refresh();
+    if (r && r.ok) console.log("[top20] refresco " + (actor || "manual") + " · categorias " + r.refreshed.length + " · items " + (r.refreshed.reduce(function (a, x) { return a + (x.count || 0); }, 0)));
+    return r;
+  } finally {
+    refreshingTop20 = false;
+  }
 }
 
 function stop() {
@@ -296,10 +331,14 @@ function stop() {
   if (consecutiveTimer) clearTimeout(consecutiveTimer);
   if (sweepTimer) clearInterval(sweepTimer);
   if (sweepStartup) clearTimeout(sweepStartup);
+  if (top20Timer) clearInterval(top20Timer);
+  if (top20Startup) clearTimeout(top20Startup);
   timer = null;
   consecutiveTimer = null;
   sweepTimer = null;
   sweepStartup = null;
+  top20Timer = null;
+  top20Startup = null;
 }
 
 function status() {
@@ -316,8 +355,9 @@ function status() {
       dropPct: config.sweep.dropPct,
       sources: sweepSources(),
       last: lastSweep
-    }
+    },
+    top20: top20.status()
   };
 }
 
-module.exports = { start, stop, runOnce, sweepOnce, status };
+module.exports = { start, stop, runOnce, sweepOnce, status, refreshTop20 };

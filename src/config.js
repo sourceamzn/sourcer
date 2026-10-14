@@ -51,6 +51,15 @@ const config = {
     max: Math.min(Math.max(parseInt(clean(process.env.CATALOG_SWEEP_MAX) || "40", 10) || 40, 1), 60),
     /* Barrido diario de TODAS las fuentes del PDF (no solo Outlet PC y Lidl). */
     sources: clean(process.env.CATALOG_SWEEP_SOURCES) || "outletpc,lidl,iherb,selectavision,yesstyle,corteingles,gemimarket,norica,famosa,planafabrega,vallesviasat"
+  },
+  /* Top 20 · Mas vendidos de amazon.es (guia). Fuente Keepa Best Sellers
+     (domain 9). El panel lee de cache y se refresca de forma programada;
+     TOP20_CATEGORIES admite una lista de node ids de categoria raiz. */
+  top20: {
+    enabled: clean(process.env.TOP20_ENABLED) !== "false",
+    intervalHours: Math.max(1, parseInt(clean(process.env.TOP20_INTERVAL_HOURS) || "6", 10) || 6),
+    limit: Math.min(Math.max(parseInt(clean(process.env.TOP20_LIMIT) || "20", 10) || 20, 1), 50),
+    categories: clean(process.env.TOP20_CATEGORIES)
   }
 };
 
