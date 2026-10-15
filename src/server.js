@@ -2,6 +2,7 @@ const express = require("express");
 const { config } = require("./config");
 const health = require("./routes/health");
 const sourcing = require("./routes/sourcing");
+const coverage = require("./routes/coverage");
 const alerts = require("./routes/alerts");
 const scheduler = require("./lib/scheduler");
 const store = require("./lib/store");
@@ -29,6 +30,7 @@ app.use(function cors(req, res, next) {
 
 app.get("/", (req, res) => res.json({ ok: true, service: pkg.name, version: pkg.version, docs: "/health" }));
 app.get("/health", health);
+app.get("/coverage", coverage);
 app.use("/alerts", alerts);
 app.post("/sourcing/:source/:action", sourcing);
 
