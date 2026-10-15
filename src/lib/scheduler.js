@@ -316,7 +316,10 @@ function startTop20() {
    pasada. Para que la cuenta no se vacie sola (y los tokens puedan recuperarse)
    solo se ejecuta si el saldo supera TOP20_MIN_TOKENS. */
 async function top20BudgetOk() {
-  const min = config.top20.minTokens || 0;
+  /* El coste dominante son las listas de Best Sellers (50 tokens cada una): el
+     minimo efectivo es el coste estimado del refresco, no un valor fijo bajo. */
+  const estimate = top20.estimateRefreshTokens ? top20.estimateRefreshTokens() : 0;
+  const min = Math.max(config.top20.minTokens || 0, estimate);
   try {
     const tok = inverso.keepaTokens ? await inverso.keepaTokens() : null;
     if (!tok || typeof tok.tokensLeft !== "number") return { ok: true };

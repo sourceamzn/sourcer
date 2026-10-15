@@ -24,6 +24,15 @@ const CATEGORIES_KEY = "__categories__";
 const AGG_KEY = "__all__";
 const DEFAULT_LIMIT = 20;
 
+/* Coste real en tokens de Keepa (docs oficiales). Lo que desangraba la cuenta
+   NO eran las fichas (1 token/ASIN) sino las listas de Best Sellers, que
+   cuestan 50 tokens FIJOS por cada llamada. Un "top" de 6 categorias = 6 x 50
+   = 300 tokens por refresco; con la recarga anterior (~1/min) era imposible.
+   Estos valores se usan para comprobar el saldo ANTES de gastar. */
+const TOK_BESTSELLERS = 50;
+const TOK_PRODUCT = 1;
+const TOK_CATEGORY = 1;
+
 /* Departamentos de referencia para "los mas vendidos de Amazon.es".
    Ordenados por peso de venta general: NO son las primeras categorias por id
    (esas caen en Libros / CD / Software y dan un top sesgado). Se pueden
@@ -63,6 +72,24 @@ function fresh(iso, maxAgeMs) {
 
 function listKey(category, range) {
   return "list|" + String(category) + "|" + String(range || 0);
+}
+
+/* Coste estimado del refresco: 50 tokens por lista de best sellers + 1 por
+   ficha + 1 de Category Lookup. */
+function estimateBuildTokens(catsCount, limit) {
+  const n = Math.max(1, parseInt(catsCount, 10) || 1);
+  const lim = Math.max(1, parseInt(limit, 10) || DEFAULT_LIMIT);
+  return n * TOK_BESTSELLERS + lim * TOK_PRODUCT + TOK_CATEGORY;
+}
+/* Coste de un refresco programado del panel (agregado o categorias concretas). */
+function estimateRefreshTokens() {
+  const cfg = configuredCategories();
+  const n = cfg.length ? cfg.length : Math.min(config.top20.maxCategories || 6, MAJOR_CATEGORIES.length);
+  return estimateBuildTokens(n, config.top20.limit || DEFAULT_LIMIT);
+}
+/* Saldo de tokens de Keepa (llamada de 0 tokens). */
+async function balance() {
+  try { return inverso.keepaTokens ? await inverso.keepaTokens() : null; } catch (e) { return null; }
 }
 
 /* ---------- categorias raiz ---------- */
@@ -227,16 +254,36 @@ async function list(category, opts) {
     return { ok: true, cached: true, data: cached.data };
   }
 
-  /* No gastar tokens si la cuenta esta a cero: se devuelve el motivo real en
-     lugar de encadenar peticiones que Keepa rechaza con HTTP 429. */
-  let bal = null;
-  try { bal = inverso.keepaTokens ? await inverso.keepaTokens() : null; } catch (e) {}
-  if (bal && typeof bal.tokensLeft === "number" && bal.tokensLeft <= 0) {
+  /* Modo "solo cache": el panel pide datos SIN permiso de gastar tokens (al
+     abrir). Se sirve lo ultimo guardado; si no hay nada, no se construye. */
+  if (opts.cache) {
+    if (cached && cached.data && cached.data.count) return { ok: true, cached: true, stale: true, data: cached.data };
+    return { ok: false, reason: "sin_cache", hint: "Todavia no hay Top 20 guardado. Pulsa «Actualizar» (consume tokens de Keepa)." };
+  }
+
+  /* Refresco automatico desactivado (TOP20_ENABLED=false): no se construye nada
+     salvo que se pida expresamente (refresh manual). */
+  if (!config.top20.enabled && !opts.refresh) {
+    if (cached && cached.data && cached.data.count) return { ok: true, cached: true, stale: true, data: cached.data };
+    return { ok: false, reason: "top20_auto_off", hint: "El Top 20 automatico esta desactivado (TOP20_ENABLED=false). Pulsa «Actualizar» para construirlo bajo demanda." };
+  }
+
+  /* TOPE DE GASTO: se calcula el coste en tokens y solo se construye si el
+     saldo lo cubre entero. Best Sellers de Keepa cuesta 50 tokens por lista;
+     sin este control el saldo caia en negativo cada vez que arrancaba. */
+  const catsCount = raw ? 1 : (await rootCategories()).length;
+  const need = Math.max(config.top20.minTokens || 0, estimateBuildTokens(catsCount, opts.limit || config.top20.limit || DEFAULT_LIMIT));
+  const bal = await balance();
+  const left = bal && typeof bal.tokensLeft === "number" ? bal.tokensLeft : null;
+  if (left != null && left < need) {
     if (cached && cached.data && cached.data.count) return { ok: true, cached: true, stale: true, data: cached.data };
     return {
-      ok: false, reason: "keepa_sin_tokens",
-      hint: "La cuenta de Keepa no tiene tokens (saldo " + bal.tokensLeft + (bal.refillMinutes ? (", reposicion en ~" + bal.refillMinutes + " min") : "") +
-        "). El Top 20 une varios departamentos y gasta decenas de tokens por refresco; amplia el plan API de Keepa (desde 49 EUR/mes = 20 tokens/min)."
+      ok: false,
+      reason: left <= 0 ? "keepa_sin_tokens" : "keepa_pocos_tokens",
+      tokensLeft: left,
+      need: need,
+      hint: "No se construye el Top 20 para no vaciar el saldo: este refresco necesita ~" + need +
+        " tokens de Keepa (Best Sellers = 50 tokens por categoria) y quedan " + left + ". Reintenta cuando se repongan."
     };
   }
 
@@ -299,4 +346,4 @@ function status() {
   };
 }
 
-module.exports = { categories, list, refresh, status, configuredCategories };
+module.exports = { categories, list, refresh, status, configuredCategories, estimateRefreshTokens, estimateBuildTokens };

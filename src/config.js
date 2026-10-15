@@ -57,17 +57,18 @@ const config = {
      TOP20_CATEGORIES admite una lista de node ids de categoria raiz. */
   top20: {
     enabled: clean(process.env.TOP20_ENABLED) !== "false",
-    intervalHours: Math.max(1, parseInt(clean(process.env.TOP20_INTERVAL_HOURS) || "3", 10) || 3),
+    intervalHours: Math.max(1, parseInt(clean(process.env.TOP20_INTERVAL_HOURS) || "6", 10) || 6),
     limit: Math.min(Math.max(parseInt(clean(process.env.TOP20_LIMIT) || "20", 10) || 20, 1), 100),
     /* Vacio = agregado automatico de "los mas vendidos de Amazon.es": se
        detectan las categorias raiz (Keepa Category Lookup) y se toman las
        principales. Con valor = esas categorias concretas (node ids). */
     categories: clean(process.env.TOP20_CATEGORIES),
-    maxCategories: Math.min(Math.max(parseInt(clean(process.env.TOP20_MAX_CATEGORIES) || "6", 10) || 6, 1), 20),
-    /* El refresco programado gasta decenas de tokens por pasada. Solo se ejecuta
-       si el saldo de Keepa supera este minimo, para que la cuenta no se vacie
-       sola (con el plan actual, ~1 token/min, un refresco cada 3 h agota el tope). */
-    minTokens: Math.max(0, parseInt(clean(process.env.TOP20_MIN_TOKENS) || "50", 10) || 50)
+    maxCategories: Math.min(Math.max(parseInt(clean(process.env.TOP20_MAX_CATEGORIES) || "3", 10) || 3, 1), 20),
+    /* Best Sellers de Keepa cuesta 50 tokens por lista: un refresco del Top 20
+       gasta ~50 x nº de categorias. Antes que gastar sin control, ningun
+       refresco (programado NI manual) se ejecuta si el saldo no cubre el coste
+       estimado; este minimo es solo un suelo adicional. */
+    minTokens: Math.max(0, parseInt(clean(process.env.TOP20_MIN_TOKENS) || "0", 10) || 0)
   }
 };
 

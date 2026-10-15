@@ -36,14 +36,17 @@ const adapter = {
       const r = await top20.list(body && (body.category || body.categoryId), {
         range: body && body.range,
         limit: body && body.limit,
-        refresh: !!(body && body.refresh)
+        refresh: !!(body && body.refresh),
+        cache: !!(body && body.cache)
       });
       if (!r.ok) {
         return {
           ok: false,
           reason: r.reason,
           hint: r.hint || (r.reason === "keepa_not_configured" ? "Configura KEEPA_API_KEY en el backend." : null),
-          notes: r.notes || null
+          notes: r.notes || null,
+          tokensLeft: r.tokensLeft,
+          need: r.need
         };
       }
       return { ok: true, data: r.data, cached: !!r.cached, stale: !!r.stale };
