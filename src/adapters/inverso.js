@@ -59,7 +59,7 @@ const TIERS = [
 ];
 const PLAN_DEFAULT = {
   vat: 21, recargo: 5.2, referral: 15, fbaFee: 3.5, storage: 0, digital: 0, inbound: 0.30,
-  minBB: 30, minSales: 10, minHistory: 90, minThirdParty: 0,
+  minBB: 30, minSales: 10, minHistory: 90, minThirdParty: 0, minFba: 2,
   maxDiscount: 0, nearPct: 8, tiers: TIERS
 };
 function planParams(body) {
@@ -106,10 +106,15 @@ function planFor(m, p) {
   const reasons = [];
   const thirdParty = num(m.thirdParty, 0);
   const historyDays = m.historyDays == null ? null : num(m.historyDays);
+  const fbaKnown = m.offersFba != null && m.offersFba !== "";
+  const fba = num(m.offersFba, 0);
+  const lowFba = fbaKnown && fba < num(p.minFba);
+  const privateLabel = !!m.privateLabel || (fbaKnown && num(m.thirdParty, 0) <= 1 && fba <= 1);
   const hardDrop = costMax <= 0;
-  if (hardDrop) {
-    reasons.push("Con las tarifas reales no queda coste maximo positivo: no hay beneficio neto.");
-  } else {
+  if (costMax <= 0) reasons.push("Con las tarifas reales no queda coste maximo positivo: no hay beneficio neto.");
+  if (lowFba) reasons.push("Solo " + fba + " vendedor(es) FBA (minimo " + p.minFba + "): EN REVISION, no apto.");
+  if (privateLabel) reasons.push("Marca privada con exclusividad probable (un unico vendedor): EN REVISION, no apto.");
+  if (!hardDrop) {
     if (pvp > 0 && pvp < num(p.minBB)) reasons.push("Precio Buy Box " + round2(pvp) + " € por debajo del minimo (" + p.minBB + " €): el descuento necesario puede no conseguirse.");
     if (sales < num(p.minSales)) reasons.push("Ventas/mes " + round2(sales) + " por debajo del minimo (" + p.minSales + "): poca rotacion.");
     if (num(p.minThirdParty) > 0 && thirdParty < num(p.minThirdParty)) reasons.push("Solo " + thirdParty + " vendedor(es) tercero(s): si solo vende la marca, es marca privada.");
@@ -354,6 +359,21 @@ async function searchSuppliers(body, priceMax, hooks) {
   const eanQ = digits(body && body.ean);
   const q = sq.q;
   const srcId = identity.identityOf(body || {});
+  /* Puerta de tipo de producto: palabras que dicen QUE es (telefonillo, teclado...),
+     sin marca, modelo, medidas ni colores. La oferta debe compartir al menos una. */
+  const brandToks = tokensOf(body && body.brand);
+  const NOISE = { negro: 1, blanco: 1, rojo: 1, azul: 1, verde: 1, gris: 1, black: 1, white: 1, red: 1, blue: 1, nuevo: 1, original: 1, oferta: 1, envio: 1, gratis: 1, new: 1, free: 1, shipping: 1, cm: 1, mm: 1, kg: 1, ml: 1, uds: 1, ud: 1, pcs: 1, compatible: 1, incluye: 1, with: 1 };
+  const typeToks = tokensOf((body && body.name) || (body && body.title) || "").filter(function (t) {
+    return t.length >= 4 && !/\d/.test(t) && !NOISE[t] && brandToks.indexOf(t) === -1;
+  }).slice(0, 8);
+  function typeGate(name) {
+    if (!typeToks.length) return true;
+    const have = tokensOf(name);
+    const hits = typeToks.filter(function (t) {
+      return have.some(function (w) { return w === t || (w.length >= 5 && t.length >= 5 && (w.indexOf(t.slice(0, 5)) === 0)); });
+    }).length;
+    return hits >= Math.max(1, Math.ceil(typeToks.length * 0.34));
+  }
   const rejected = [];
   const matches = [], above = [], searched = [];
   if (!q) return { q: "", via: "", matches: matches, searched: searched };
@@ -393,12 +413,15 @@ async function searchSuppliers(body, priceMax, hooks) {
          (Facebook, "Finalizar compra", categorias) que no tienen que ver con
          el producto. Se descartan salvo coincidencia exacta por EAN. */
       const open = adapters[id].kind === "discovery" || adapters[id].kind === "supplier_market";
-      if (!open) {
-        items = items.filter(function (it) {
-          if (eanQ.length >= 8 && it.ean && String(it.ean).indexOf(eanQ) !== -1) return true;
-          return relevance(it.name, qTokens) >= 0.4;
-        });
-      }
+      items = items.filter(function (it) {
+        if (eanQ.length >= 8 && it.ean && String(it.ean).indexOf(eanQ) !== -1) return true;
+        const nm = String(it.name || "");
+        /* Nombres sin alfabeto latino (1688, etc.): no se pueden comparar, se conservan como candidatos. */
+        if (open && !/[a-z]{3}/i.test(nm.normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) return true;
+        const ok = relevance(nm, qTokens) >= (open ? 0.34 : 0.4) && typeGate(nm);
+        if (!ok) rejected.push({ source: id, name: nm.slice(0, 80), reason: "No es el mismo tipo de producto." });
+        return ok;
+      });
       entry.count = items.length;
       entry.ok = items.length > 0;
       if (!items.length) entry.reason = rawCount ? "sin_coincidencias_relevantes" : ((r && r.reason) || "sin_resultados");
