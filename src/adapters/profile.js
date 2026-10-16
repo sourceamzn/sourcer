@@ -121,8 +121,8 @@ async function shopifySuggest(home, q, max) {
   });
 }
 
-async function shopifyCatalog(home, max) {
-  const url = home.replace(/\/+$/, "") + "/products.json?limit=" + max;
+async function shopifyCatalog(home, max, page) {
+  const url = home.replace(/\/+$/, "") + "/products.json?limit=" + max + (page && page > 1 ? "&page=" + page : "");
   const res = await jsonFetch(url, { method: "GET", headers: { "User-Agent": UA, Accept: "application/json" } }, 20000);
   const products = res.ok && res.data && res.data.products;
   if (!products) return null;
@@ -203,14 +203,20 @@ function makeAdapter(profile) {
       if (raw.length) return { ok: true, data: await collect(raw, fetched.via, "search") };
     }
     /* Sin resultados en el buscador: se barre la categoria/outlet y se filtra
-       en local por similitud de titulo, para no depender del buscador del sitio. */
+       en local por similitud de titulo, para no depender del buscador del sitio.
+       Se fusionan TODAS las URLs declaradas (no solo la primera), sin duplicar. */
     const notes = [];
+    const seen = {};
+    const merged = [];
     for (const url of browseTargetsFor(profile, body)) {
       const page = await fetchHtml(url);
       if (!page.ok) { notes.push(page.reason || "fetch_failed"); continue; }
-      const raw = filterByQuery(parse.parseProducts(page.html, baseUrl, profile.platform), q).slice(0, max);
-      if (raw.length) return { ok: true, data: await collect(raw, page.via, "search") };
+      filterByQuery(parse.parseProducts(page.html, baseUrl, profile.platform), q).forEach(function (p) {
+        const k = p.url || p.name; if (k && !seen[k]) { seen[k] = 1; merged.push(p); }
+      });
+      if (merged.length >= max) break;
     }
+    if (merged.length) return { ok: true, data: await collect(merged.slice(0, max), "categoria", "search") };
     if (!fetched.ok) {
       return { ok: false, reason: fetched.reason, status: fetched.status, hint: "Activa un proveedor de scraping (SCRAPER_PROVIDER + SCRAPER_API_KEY) si la fuente bloquea." };
     }
@@ -222,19 +228,31 @@ function makeAdapter(profile) {
     if (profile.requiresAuth) return { ok: false, reason: "requires_auth", hint: profile.authHint || "Requiere sesion autenticada." };
     const max = Math.min(Math.max(parseInt(body.max || "24", 10) || 24, 1), 60);
     if (profile.platform === "shopify") {
-      const c = await shopifyCatalog(baseUrl, max);
-      if (c && c.length) return Object.assign({ ok: true, data: await collect(c, "shopify-catalog", "browse") });
+      /* Paginacion acotada (hasta 3 paginas) con dedup por URL. */
+      const all = [];
+      const seenS = {};
+      for (let pg = 1; pg <= 3 && all.length < max; pg++) {
+        const c = await shopifyCatalog(baseUrl, max, pg);
+        if (!c || !c.length) break;
+        c.forEach(function (p) { const k = p.url || p.name; if (k && !seenS[k]) { seenS[k] = 1; all.push(p); } });
+        if (c.length < max) break;
+      }
+      if (all.length) return Object.assign({ ok: true, data: await collect(all.slice(0, max), "shopify-catalog", "browse") });
     }
     const notes = [];
     let lastVia = "";
+    const seen = {};
+    const merged = [];
     for (const url of browseTargetsFor(profile, body)) {
       const fetched = await fetchHtml(url);
       if (!fetched.ok) { notes.push(fetched.reason || "fetch_failed"); continue; }
       lastVia = fetched.via;
-      const raw = parse.parseProducts(fetched.html, baseUrl, profile.platform);
-      if (raw.length) return { ok: true, data: await collect(raw, fetched.via, "browse") };
-      notes.push(source + "_sin_productos_en_" + url);
+      parse.parseProducts(fetched.html, baseUrl, profile.platform).forEach(function (p) {
+        const k = p.url || p.name; if (k && !seen[k]) { seen[k] = 1; merged.push(p); }
+      });
+      if (merged.length >= max) break;
     }
+    if (merged.length) return { ok: true, data: await collect(merged.slice(0, max), lastVia, "browse") };
     return {
       ok: true,
       data: { ok: false, reason: source + "_sin_resultados", via: lastVia || null, mode: "browse", count: 0, items: [], tried: notes }
