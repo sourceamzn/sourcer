@@ -8,6 +8,10 @@ const inverso = require("./inverso");
 const top20 = require("./top20");
 const storefronts = require("./storefronts");
 const newsletters = require("./newsletters");
+const discovery = require("./discovery");
+const bigbuy = require("./bigbuy");
+const aliexpress = require("./aliexpress");
+const cjdropshipping = require("./cjdropshipping");
 const { tarifa, liquidaciones } = require("./tarifa");
 const { buildAdapters } = require("./sources/catalog");
 
@@ -16,7 +20,7 @@ const { buildAdapters } = require("./sources/catalog");
    generadas por perfil (outlets y mayoristas/fabricantes), los canales
    (storefronts FBA, tarifas, liquidaciones, newsletters) y el panel Top 20. */
 const adapters = Object.assign(
-  { outletpc, lidl, iherb, amazon, keepa, web, inverso, top20 },
+  { outletpc, lidl, iherb, amazon, keepa, web, inverso, top20, discovery, bigbuy, aliexpress, cjdropshipping },
   buildAdapters(),
   { storefronts, tarifas: tarifa, liquidaciones, newsletters }
 );

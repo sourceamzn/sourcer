@@ -303,7 +303,15 @@ async function searchSuppliers(body, priceMax) {
     if (Date.now() > deadline) { entry.reason = "tiempo_agotado"; searched.push(entry); return; }
     try {
       const r = await withTimeout(
-        adapters[id].actions.search({ query: q, max: max, market: (body && body.market) || undefined }),
+        adapters[id].actions.search({
+          query: q,
+          max: max,
+          market: (body && body.market) || undefined,
+          ean: (body && body.ean) || "",
+          brand: (body && body.brand) || "",
+          model: (body && body.model) || "",
+          name: (body && body.name) || ""
+        }),
         Math.max(5000, deadline - Date.now())
       );
       const data = r && r.ok ? r.data : null;

@@ -33,6 +33,37 @@ const config = {
     provider: clean(process.env.SCRAPER_PROVIDER) || "none",
     apiKey: clean(process.env.SCRAPER_API_KEY)
   },
+  /* --- Descubrimiento de proveedores por buscador (Brave Search API) ---
+     La pieza que rompe la dependencia de 12 webs fijas: dado un EAN o
+     marca+modelo, devuelve paginas de mayoristas/distribuidores reales. */
+  discovery: {
+    provider: clean(process.env.DISCOVERY_PROVIDER) || "brave",
+    apiKey: clean(process.env.BRAVE_API_KEY),
+    country: clean(process.env.DISCOVERY_COUNTRY) || "es",
+    lang: clean(process.env.DISCOVERY_LANG) || "es"
+  },
+  /* --- Proveedores/marketplaces con API (clave por tienda) --- */
+  bigbuy: {
+    apiKey: clean(process.env.BIGBUY_API_KEY),
+    base: clean(process.env.BIGBUY_BASE) || "https://api.bigbuy.eu",
+    iso: clean(process.env.BIGBUY_ISO) || "es"
+  },
+  aliexpress: {
+    appKey: clean(process.env.ALIEXPRESS_APP_KEY),
+    appSecret: clean(process.env.ALIEXPRESS_APP_SECRET),
+    session: clean(process.env.ALIEXPRESS_SESSION),
+    trackingId: clean(process.env.ALIEXPRESS_TRACKING_ID),
+    base: clean(process.env.ALIEXPRESS_BASE) || "https://api-sg.aliexpress.com/sync"
+  },
+  cj: {
+    apiKey: clean(process.env.CJ_API_KEY),
+    base: clean(process.env.CJ_BASE) || "https://developers.cjdropshipping.com/api2.0/v1"
+  },
+  /* --- Identificador EAN/UPC -> producto (nombre/marca) --- */
+  barcode: {
+    provider: clean(process.env.BARCODE_PROVIDER) || "upcitemdb",
+    apiKey: clean(process.env.UPCITEMDB_API_KEY)
+  },
   /* Vigilante de precios (alertas). Si DATABASE_URL esta presente se usa Postgres;
      si no, un fichero JSON local para que el servicio funcione igual. */
   databaseUrl: clean(process.env.DATABASE_URL),
@@ -94,4 +125,30 @@ function scrapingReady() {
   return config.scraping.provider !== "none" && Boolean(config.scraping.apiKey);
 }
 
-module.exports = { config, amazonReady, keepaReady, feedReady, scrapingReady };
+function discoveryReady() {
+  return Boolean(config.discovery.apiKey);
+}
+
+function bigbuyReady() {
+  return Boolean(config.bigbuy.apiKey);
+}
+
+function aliexpressReady() {
+  return Boolean(config.aliexpress.appKey && config.aliexpress.appSecret);
+}
+
+function cjReady() {
+  return Boolean(config.cj.apiKey);
+}
+
+module.exports = {
+  config,
+  amazonReady,
+  keepaReady,
+  feedReady,
+  scrapingReady,
+  discoveryReady,
+  bigbuyReady,
+  aliexpressReady,
+  cjReady
+};
