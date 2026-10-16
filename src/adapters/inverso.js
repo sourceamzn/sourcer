@@ -268,6 +268,16 @@ function supplierQuery(body) {
   const parts = [body && body.brand, body && body.model, body && body.name].map(function (x) { return String(x == null ? "" : x).trim(); }).filter(Boolean);
   return { q: parts.join(" ").trim(), via: "titulo" };
 }
+/* Resuelve la promesa o devuelve {ok:false,reason:"timeout"} si tarda demasiado,
+   sin dejar timers colgando. */
+function withTimeout(promise, ms) {
+  let t;
+  const timeout = new Promise(function (res) { t = setTimeout(function () { res({ ok: false, reason: "timeout" }); }, ms); });
+  return Promise.race([promise, timeout]).then(
+    function (v) { clearTimeout(t); return v; },
+    function (e) { clearTimeout(t); throw e; }
+  );
+}
 async function searchSuppliers(body, priceMax) {
   const { adapters } = require("./index"); /* lazy: evita el ciclo index<->inverso */
   const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1 };
@@ -275,41 +285,75 @@ async function searchSuppliers(body, priceMax) {
     const a = adapters[id];
     return !skip[id] && a && a.actions && typeof a.actions.search === "function";
   });
-  const { q } = supplierQuery(body);
-  const matches = [], searched = [];
+  const sq = supplierQuery(body);
+  const q = sq.q;
+  const matches = [], above = [], searched = [];
   if (!q) return { q: "", via: "", matches: matches, searched: searched };
   const max = clampInt(body && body.max, 12, 3, 24);
-  for (let i = 0; i < candidates.length; i++) {
-    const id = candidates[i];
+  /* Presupuesto global y concurrencia: antes se consultaba fuente a fuente en
+     serie y la peticion entera superaba el timeout del frontend (70 s) → la
+     busqueda "no encontraba nada". Ahora van en paralelo con tope de tiempo. */
+  const budgetMs = clampInt(body && body.budgetMs, 55000, 15000, 90000);
+  const deadline = Date.now() + budgetMs;
+  const concurrency = Math.max(2, Math.min(clampInt(body && body.concurrency, 6, 1, 12), candidates.length || 1));
+  let cursor = 0;
+
+  async function runOne(id) {
     const entry = { source: id, ok: false, count: 0 };
+    if (Date.now() > deadline) { entry.reason = "tiempo_agotado"; searched.push(entry); return; }
     try {
-      const r = await adapters[id].actions.search({ query: q, max: max, market: (body && body.market) || undefined });
+      const r = await withTimeout(
+        adapters[id].actions.search({ query: q, max: max, market: (body && body.market) || undefined }),
+        Math.max(5000, deadline - Date.now())
+      );
       const data = r && r.ok ? r.data : null;
       const items = (data && data.items) || [];
       entry.count = items.length;
       entry.ok = items.length > 0;
       if (!items.length) entry.reason = (r && r.reason) || "sin_resultados";
+      const label = adapters[id].label || id;
       items.forEach(function (it) {
         const price = num(it.price);
-        if (price > 0 && priceMax > 0 && price > priceMax) return; /* por encima del precio maximo: fuera */
-        const src = adapters[id].label || id;
-        matches.push({
-          source: id, sourceLabel: src,
+        const rec = {
+          source: id, sourceLabel: label,
           name: it.name || "", brand: it.brand || "", ean: it.ean || "",
           price: price || null, oldPrice: num(it.oldPrice) || null,
           shipping: num(it.shipping) || null, stock: it.stock == null ? null : num(it.stock),
           limit: it.limit == null ? null : num(it.limit),
           url: it.url || "", image: it.image || "",
           under: price > 0 && priceMax > 0 && price <= priceMax
-        });
+        };
+        if (price <= 0) { matches.push(rec); return; }
+        if (priceMax > 0 && price > priceMax) { above.push(rec); return; }
+        matches.push(rec);
       });
     } catch (e) {
       entry.reason = String((e && e.message) || e);
     }
     searched.push(entry);
   }
+
+  const workers = [];
+  for (let w = 0; w < concurrency; w++) {
+    workers.push((async function () {
+      while (cursor < candidates.length) {
+        const id = candidates[cursor++];
+        await runOne(id);
+      }
+    })());
+  }
+  await Promise.all(workers);
+
   matches.sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); });
-  return { q: q, via: supplierQuery(body).via, matches: matches, searched: searched };
+  /* Si tras filtrar por precio no queda nada, mostramos las ofertas mas baratas
+     por encima del maximo (marcadas «> max.») para que el usuario vea precios
+     reales en vez de un "sin resultados" que parece un fallo del boton. */
+  let extra = [];
+  if (!matches.length && priceMax > 0 && above.length) {
+    above.sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); });
+    extra = above.slice(0, 8).map(function (x) { return Object.assign({}, x, { over: true }); });
+  }
+  return { q: q, via: sq.via, priceMax: round2(priceMax), matches: matches.concat(extra), searched: searched };
 }
 
 /* ---------- adaptador ---------- */
