@@ -59,8 +59,8 @@ const TIERS = [
 ];
 const PLAN_DEFAULT = {
   vat: 21, recargo: 5.2, referral: 15, fbaFee: 3.5, storage: 0, digital: 0, inbound: 0.30,
-  minBB: 30, minSales: 10, minHistory: 90, minThirdParty: 2,
-  maxDiscount: 60, nearPct: 8, tiers: TIERS
+  minBB: 30, minSales: 10, minHistory: 90, minThirdParty: 0,
+  maxDiscount: 0, nearPct: 8, tiers: TIERS
 };
 function planParams(body) {
   const src = (body && (body.params || body.filters)) || {};
@@ -112,9 +112,9 @@ function planFor(m, p) {
   } else {
     if (pvp > 0 && pvp < num(p.minBB)) reasons.push("Precio Buy Box " + round2(pvp) + " € por debajo del minimo (" + p.minBB + " €): el descuento necesario puede no conseguirse.");
     if (sales < num(p.minSales)) reasons.push("Ventas/mes " + round2(sales) + " por debajo del minimo (" + p.minSales + "): poca rotacion.");
-    if (thirdParty < num(p.minThirdParty)) reasons.push("Solo " + thirdParty + " vendedor(es) tercero(s): si solo vende la marca, es marca privada.");
+    if (num(p.minThirdParty) > 0 && thirdParty < num(p.minThirdParty)) reasons.push("Solo " + thirdParty + " vendedor(es) tercero(s): si solo vende la marca, es marca privada.");
     if (historyDays != null && historyDays < num(p.minHistory)) reasons.push("Historial en Keepa de " + historyDays + " dias (minimo " + p.minHistory + "): listing nuevo, a revisar.");
-    if (discPct > num(p.maxDiscount)) reasons.push("Descuento necesario " + discPct + " % supera el tope " + p.maxDiscount + " %: dificil de conseguir.");
+    if (num(p.maxDiscount) > 0 && discPct > num(p.maxDiscount)) reasons.push("Descuento necesario " + discPct + " % supera el tope " + p.maxDiscount + " %: dificil de conseguir.");
     if (m.brandRestricted) reasons.push("Marca restringida: se puede solicitar en Seller Central (solo aviso).");
     if (m.hazmat) reasons.push("Posible hazmat: se vende por FBM (solo aviso).");
     if (m.amazonOnly) reasons.push("Amazon es el unico otro vendedor: dificilmente cede la Buy Box.");
