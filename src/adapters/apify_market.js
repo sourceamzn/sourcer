@@ -1,14 +1,16 @@
 /* Fuentes de PROVEEDOR/FABRICANTE vía Apify (una sola clave: APIFY_TOKEN).
 
    1688, Alibaba, Made-in-China, Google Shopping y busqueda por foto.
-   Los actores son de la comunidad y su esquema de entrada/salida puede variar:
-   el mapeo es tolerante (varios nombres de campo) y los IDs son configurables
-   (APIFY_*_ACTOR). Todo resultado de 1688/Alibaba/Made-in-China/foto es un
-   CANDIDATO: hay que validar modelo y variante, nunca es coincidencia exacta.
+   Cada actor tiene su propio esquema de entrada (verificado en su ficha de
+   Apify); la salida se mapea de forma tolerante. Todo resultado de 1688 /
+   Alibaba / Made-in-China / foto es un CANDIDATO: hay que validar modelo y
+   variante. Los precios que NO estan en EUR no se convierten (no se inventan
+   cambios): se devuelven como texto (priceText) y price = null.
    Amazon no se rasca nunca (solo Keepa). */
 
 const { config, apifyReady } = require("../config");
 const apify = require("../lib/apify");
+const { marketQuery } = require("../lib/translate");
 
 function first(o, keys) {
   for (let i = 0; i < keys.length; i++) {
@@ -28,30 +30,57 @@ function priceOf(v) {
   return n > 0 ? n : null;
 }
 
+/* "10,000 wp" -> 10000 (cantidad minima de pedido). */
+function moqOf(v) {
+  if (v == null) return null;
+  if (typeof v === "number") return v > 0 ? v : null;
+  const m = String(v).replace(/[,\s]/g, "").match(/\d+/);
+  return m ? parseInt(m[0], 10) : null;
+}
+
 function imageOf(o) {
-  const v = first(o, ["image", "imageUrl", "img", "mainImage", "thumbnail", "picUrl", "pic", "images"]);
-  if (Array.isArray(v)) return String(v[0] && (v[0].url || v[0]) || "");
+  const v = first(o, ["image", "imageUrl", "image_url", "img", "mainImage", "thumbnail", "picUrl", "pic", "images"]);
+  if (Array.isArray(v)) return String((v[0] && (v[0].url || v[0])) || "");
   return v ? String(v.url || v) : "";
 }
 
+function currencyOf(o) {
+  return String(first(o, ["currency_code", "currency", "currencyCode"]) || "").trim();
+}
+
+function isEur(cur, id) {
+  if (id === "gshopping") return true; /* se pide country=es */
+  return /€|eur/i.test(cur);
+}
+
 function toItem(o, id, label, candidate) {
-  const url = String(first(o, ["url", "link", "productUrl", "detailUrl", "itemUrl", "href"]) || "");
-  const supplier = String(first(o, ["supplier", "supplierName", "companyName", "shopName", "seller", "store", "merchant", "source"]) || label);
-  const cur = String(first(o, ["currency", "currencyCode"]) || "");
-  const moq = first(o, ["moq", "minOrder", "minimumOrder", "minOrderQuantity"]);
+  const url = String(first(o, ["product_url", "url", "link", "productUrl", "detailUrl", "itemUrl", "href"]) || "");
+  const supplier = String(first(o, ["company_name", "shop_name", "supplier", "supplierName", "companyName", "seller", "merchant", "store", "source"]) || label);
+  const cur = currencyOf(o);
+  const lo = priceOf(first(o, ["priceNumeric", "min_price", "price_min", "price", "priceMin", "minPrice", "unitPrice", "salePrice", "extractedPrice", "priceRange"]));
+  const hi = priceOf(first(o, ["max_price", "price_max", "priceMax", "maxPrice"]));
+  const eur = isEur(cur, id);
+  let priceText = "";
+  if (lo && !eur) {
+    const sym = cur || "";
+    priceText = (sym ? sym + " " : "") + lo + (hi && hi !== lo ? "–" + hi : "");
+  }
+  const moq = moqOf(first(o, ["moq", "min_order", "minOrder", "minimumOrder", "minOrderQuantity", "minOrderQuantity"]));
+  const platform = String(first(o, ["provider", "platform", "marketplace"]) || id);
   return {
     source: id,
-    name: String(first(o, ["title", "name", "subject", "productName", "productTitle"]) || "").slice(0, 180),
+    name: String(first(o, ["title", "product_name", "name", "subject", "productName", "productTitle"]) || "").slice(0, 180),
     brand: "",
     model: "",
     reference: "",
     ean: "",
-    price: priceOf(first(o, ["price", "priceMin", "minPrice", "unitPrice", "salePrice", "extractedPrice", "priceRange"])),
+    price: eur ? lo : null,
+    priceText: priceText,
     oldPrice: null,
     stock: null,
     available: true,
     limit: null,
-    minOrder: moq != null ? priceOf(moq) : null,
+    minOrder: moq,
     url: url,
     image: imageOf(o),
     supplier: supplier,
@@ -59,7 +88,8 @@ function toItem(o, id, label, candidate) {
     candidate: Boolean(candidate),
     attrs: {
       currency: cur,
-      platform: id,
+      platform: platform,
+      factory: /manufactur|factory|fabric/i.test(String(first(o, ["business_type", "seller_type"]) || "")) || o.is_factory === true,
       note: candidate ? "Candidato: validar modelo y variante antes de comprar." : ""
     },
     capturedAt: new Date().toISOString()
@@ -81,15 +111,14 @@ function queryOf(body) {
   return String(b.query || parts.join(" ") || "").trim();
 }
 
-/* Entradas por actor: se envian varias claves habituales; los actores ignoran
-   las que no conocen. */
+/* Entradas EXACTAS por actor (esquema de su ficha en Apify). */
 const BUILDERS = {
-  a1688: function (q, max) { return { keyword: q, keywords: [q], query: q, searchQuery: q, maxItems: max, maxResults: max, limit: max }; },
-  alibaba: function (q, max) { return { keyword: q, keywords: [q], query: q, searchQuery: q, searchTerms: [q], maxItems: max, maxResults: max, limit: max }; },
-  mic: function (q, max) { return { keyword: q, keywords: [q], query: q, searchQuery: q, searchTerms: [q], maxItems: max, maxResults: max, limit: max }; },
-  aliexpress: function (q, max) { return { keyword: q, query: q, searchQuery: q, maxItems: max, maxResults: max, limit: max }; },
+  a1688: function (q) { return { keyword: q, maxPages: 1, proxy: { useApifyProxy: false } }; },
+  alibaba: function (q, max) { return { searchQueries: [q], maxProductsPerQuery: max, maxConcurrency: 3, proxyConfig: { useApifyProxy: true }, timeoutSecs: 90 }; },
+  mic: function (q, max) { return { searchMode: "keyword", keyword: q, maxResults: max }; },
+  aliexpress: function (q, max) { return { keyword: q, query: q, maxItems: max }; },
   shopping: function (q, max) {
-    return { queries: [q], query: q, searchQuery: q, country: config.apify.country, countryCode: config.apify.country, languageCode: "es", maxItems: max, maxResults: max, limit: max };
+    return { queries: [q], maxResults: Math.max(max, 20), country: String(config.apify.country || "es").toLowerCase(), language: "es", sortBy: "price_low" };
   }
 };
 
@@ -98,13 +127,19 @@ function makeAdapter(def) {
   function actorId() { return config.apify.actors[def.actor]; }
 
   async function search(body) {
-    const q = queryOf(body);
+    let q = queryOf(body);
     if (!q) return { ok: false, reason: "query_required" };
+    /* Mercados chinos: sin marca y en su idioma (1688=zh, Alibaba/MIC=en). */
+    if (def.lang) {
+      if (/^\d{8,14}$/.test(q) && !(body && (body.name || body.model))) return { ok: false, reason: "sin_resultados", detail: "EAN no sirve en este mercado" };
+      const adapted = await marketQuery(body && (body.name || body.model || body.brand) ? body : { name: q }, def.lang);
+      if (adapted) q = adapted;
+    }
     if (!apifyReady()) return { ok: false, reason: "apify_sin_token" };
     if (!actorId()) return { ok: false, reason: "actor_no_configurado" };
     const max = Math.min(Math.max(parseInt((body && body.max) || "12", 10) || 12, 3), 30);
     const op = (body && body.__op) || apify.newOp();
-    const r = await apify.runActor(actorId(), BUILDERS[def.actor](q, max), { op: op, estCost: def.estCost || 0.03, limit: max });
+    const r = await apify.runActor(actorId(), BUILDERS[def.actor](q, max), { op: op, estCost: def.estCost || 0.03, timeoutSec: def.timeoutSec || 40 });
     if (!r.ok) return { ok: false, reason: r.reason, detail: r.detail };
     const items = dedupe(r.items.map(function (o) { return toItem(o, id, def.label, def.candidate); }), max);
     return {
@@ -146,16 +181,11 @@ async function searchByImage(body) {
   const max = Math.min(Math.max(parseInt(b.max || "20", 10) || 20, 3), 40);
   const r = await apify.runActor(
     actor,
-    { imageUrl: image, imageUrls: [image], image: image, startUrls: [{ url: image }], maxItems: max, maxResults: max, limit: max },
-    { estCost: 0.10, limit: max, op: apify.newOp() }
+    { imageUrls: [image], targets: ["1688", "alibaba", "aliexpress", "made-in-china", "chinagoods", "yiwugo"], maxProducts: max },
+    { estCost: 0.10, timeoutSec: 90, op: apify.newOp() }
   );
   if (!r.ok) return { ok: false, reason: r.reason, detail: r.detail };
-  const items = dedupe(r.items.map(function (o) {
-    const it = toItem(o, "foto", "Búsqueda por foto", true);
-    const plat = first(o, ["platform", "marketplace", "site", "source"]);
-    if (plat) it.attrs.platform = String(plat);
-    return it;
-  }), max);
+  const items = dedupe(r.items.map(function (o) { return toItem(o, "foto", "Búsqueda por foto", true); }), max);
   return {
     ok: items.length > 0,
     reason: items.length ? null : "sin_resultados",
@@ -163,10 +193,10 @@ async function searchByImage(body) {
   };
 }
 
-const a1688 = makeAdapter({ id: "a1688", actor: "a1688", label: "1688 (Apify)", candidate: true, estCost: 0.03 });
-const alibaba = makeAdapter({ id: "alibaba", actor: "alibaba", label: "Alibaba (Apify)", candidate: true, estCost: 0.03 });
-const madeinchina = makeAdapter({ id: "madeinchina", actor: "mic", label: "Made-in-China (Apify)", candidate: true, estCost: 0.03 });
-const gshopping = makeAdapter({ id: "gshopping", actor: "shopping", label: "Google Shopping (Apify)", candidate: false, estCost: 0.02 });
+const a1688 = makeAdapter({ id: "a1688", actor: "a1688", label: "1688 (Apify)", lang: "zh", candidate: true, estCost: 0.03, timeoutSec: 45 });
+const alibaba = makeAdapter({ id: "alibaba", actor: "alibaba", label: "Alibaba (Apify)", lang: "en", candidate: true, estCost: 0.03, timeoutSec: 60 });
+const madeinchina = makeAdapter({ id: "madeinchina", actor: "mic", label: "Made-in-China (Apify)", lang: "en", candidate: true, estCost: 0.03, timeoutSec: 45 });
+const gshopping = makeAdapter({ id: "gshopping", actor: "shopping", label: "Google Shopping (Apify)", candidate: false, estCost: 0.02, timeoutSec: 45 });
 const aliexpressApify = makeAdapter({ id: "aliexpress_apify", actor: "aliexpress", label: "AliExpress texto (Apify)", candidate: true, estCost: 0.03 });
 
 const foto = {

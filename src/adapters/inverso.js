@@ -265,8 +265,31 @@ const MARKET = "https://www.amazon.es";
 function supplierQuery(body) {
   const ean = digits(body && body.ean);
   if (ean.length >= 8) return { q: ean, via: "ean" };
-  const parts = [body && body.brand, body && body.model, body && body.name].map(function (x) { return String(x == null ? "" : x).trim(); }).filter(Boolean);
-  return { q: parts.join(" ").trim(), via: "titulo" };
+  const raw = [body && body.brand, body && body.model, body && body.name].map(function (x) { return String(x == null ? "" : x).trim(); }).filter(Boolean);
+  /* Sin repetir: si el titulo ya contiene la marca/modelo no se antepone otra vez. */
+  const parts = [];
+  raw.forEach(function (p) {
+    const low = p.toLowerCase();
+    if (!parts.some(function (x) { return x.toLowerCase().indexOf(low) !== -1; })) parts.push(p);
+  });
+  /* Un titulo de Amazon suele traer 150+ caracteres: se recorta a lo util. */
+  return { q: parts.join(" ").replace(/\s+/g, " ").trim().slice(0, 110), via: "titulo" };
+}
+const STOPWORDS = { para: 1, con: 1, the: 1, and: 1, por: 1, una: 1, uno: 1, los: 1, las: 1, del: 1, que: 1, set: 1, pack: 1, sin: 1, de: 1, la: 1, el: 1, en: 1, y: 1, a: 1 };
+function tokensOf(s) {
+  return String(s == null ? "" : s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ").trim().split(" ")
+    .filter(function (t) { return t.length >= 2 && !STOPWORDS[t]; });
+}
+/* Fraccion de palabras de la busqueda que aparecen en el nombre del resultado. */
+function relevance(name, qTokens) {
+  if (!qTokens.length) return 1;
+  const have = tokensOf(name);
+  let hits = 0;
+  qTokens.forEach(function (t) {
+    if (have.some(function (w) { return w === t || (t.length >= 4 && w.length >= 4 && (w.indexOf(t) === 0 || t.indexOf(w) === 0)); })) hits++;
+  });
+  return hits / qTokens.length;
 }
 /* Resuelve la promesa o devuelve {ok:false,reason:"timeout"} si tarda demasiado,
    sin dejar timers colgando. */
@@ -281,11 +304,21 @@ function withTimeout(promise, ms) {
 async function searchSuppliers(body, priceMax) {
   const { adapters } = require("./index"); /* lazy: evita el ciclo index<->inverso */
   const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1 };
+  /* Primero las fuentes que buscan en toda la red (buscador, 1688, Alibaba,
+     Google Shopping...) y las API de mayoristas: son las lentas y las que mas
+     valen; las webs de catalogo fijo van detras. */
+  const rank = { discovery: 0, supplier_market: 1, wholesale: 2, marketplace: 2 };
   const candidates = Object.keys(adapters).filter(function (id) {
     const a = adapters[id];
     return !skip[id] && a && a.actions && typeof a.actions.search === "function";
+  }).sort(function (x, y) {
+    const rx = rank[adapters[x].kind] != null ? rank[adapters[x].kind] : 5;
+    const ry = rank[adapters[y].kind] != null ? rank[adapters[y].kind] : 5;
+    return rx - ry;
   });
   const sq = supplierQuery(body);
+  const qTokens = tokensOf([body && body.brand, body && body.model, body && body.name].filter(Boolean).join(" ") || sq.q);
+  const eanQ = digits(body && body.ean);
   const q = sq.q;
   const matches = [], above = [], searched = [];
   if (!q) return { q: "", via: "", matches: matches, searched: searched };
@@ -295,7 +328,7 @@ async function searchSuppliers(body, priceMax) {
      busqueda "no encontraba nada". Ahora van en paralelo con tope de tiempo. */
   const budgetMs = clampInt(body && body.budgetMs, 55000, 15000, 90000);
   const deadline = Date.now() + budgetMs;
-  const concurrency = Math.max(2, Math.min(clampInt(body && body.concurrency, 6, 1, 12), candidates.length || 1));
+  const concurrency = Math.max(2, Math.min(clampInt(body && body.concurrency, 12, 1, 16), candidates.length || 1));
   let cursor = 0;
 
   async function runOne(id) {
@@ -312,13 +345,26 @@ async function searchSuppliers(body, priceMax) {
           model: (body && body.model) || "",
           name: (body && body.name) || ""
         }),
-        Math.max(5000, deadline - Date.now())
+        /* Las webs de catalogo fijo se cortan a 20 s; las que buscan en toda la red, al presupuesto. */
+        Math.min(Math.max(5000, deadline - Date.now()), rank[adapters[id].kind] != null ? 55000 : 20000)
       );
       const data = r && r.ok ? r.data : null;
-      const items = (data && data.items) || [];
+      let items = (data && data.items) || [];
+      const rawCount = items.length;
+      /* Filtro de relevancia: las webs de catalogo devuelven enlaces de menu
+         (Facebook, "Finalizar compra", categorias) que no tienen que ver con
+         el producto. Se descartan salvo coincidencia exacta por EAN. */
+      const open = adapters[id].kind === "discovery" || adapters[id].kind === "supplier_market";
+      if (!open) {
+        items = items.filter(function (it) {
+          if (eanQ.length >= 8 && it.ean && String(it.ean).indexOf(eanQ) !== -1) return true;
+          return relevance(it.name, qTokens) >= 0.4;
+        });
+      }
       entry.count = items.length;
       entry.ok = items.length > 0;
-      if (!items.length) entry.reason = (r && r.reason) || "sin_resultados";
+      if (!items.length) entry.reason = rawCount ? "sin_coincidencias_relevantes" : ((r && r.reason) || "sin_resultados");
+      if (r && r.detail && !items.length) entry.detail = String(r.detail).slice(0, 140);
       const label = adapters[id].label || id;
       items.forEach(function (it) {
         const price = num(it.price);
@@ -329,6 +375,9 @@ async function searchSuppliers(body, priceMax) {
           shipping: num(it.shipping) || null, stock: it.stock == null ? null : num(it.stock),
           limit: it.limit == null ? null : num(it.limit),
           url: it.url || "", image: it.image || "", candidate: Boolean(it.candidate),
+          priceText: it.priceText || "", minOrder: it.minOrder || null,
+          supplier: it.supplier || "", factory: Boolean(it.attrs && it.attrs.factory),
+          rel: Math.round(relevance(it.name, qTokens) * 100) / 100,
           under: price > 0 && priceMax > 0 && price <= priceMax
         };
         if (price <= 0) { matches.push(rec); return; }
@@ -352,7 +401,15 @@ async function searchSuppliers(body, priceMax) {
   }
   await Promise.all(workers);
 
-  matches.sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); });
+  /* Con precio en EUR: de mas barato a mas caro. Sin precio (enlaces de
+     fabricante/mayorista, candidatos en USD/CNY): por relevancia, detras. */
+  matches.sort(function (a, b) {
+    const pa = a.price > 0, pb = b.price > 0;
+    if (pa && pb) return a.price - b.price;
+    if (pa) return -1;
+    if (pb) return 1;
+    return (b.rel || 0) - (a.rel || 0);
+  });
   /* Si tras filtrar por precio no queda nada, mostramos las ofertas mas baratas
      por encima del maximo (marcadas «> max.») para que el usuario vea precios
      reales en vez de un "sin resultados" que parece un fallo del boton. */

@@ -21,8 +21,24 @@ function base() {
   return config.bigbuy.base.replace(/\/+$/, "");
 }
 
+function apiKey() {
+  // tolera comillas, saltos de linea y un "Bearer " pegado por error en Railway
+  return String(config.bigbuy.apiKey || "")
+    .replace(/[\r\n\t]+/g, "")
+    .replace(/^["'\s]+|["'\s]+$/g, "")
+    .replace(/^Bearer\s+/i, "")
+    .trim();
+}
+
 function headers() {
-  return { Authorization: "Bearer " + config.bigbuy.apiKey, Accept: "application/json", "User-Agent": "sourcer/0.6" };
+  return { Authorization: "Bearer " + apiKey(), Accept: "application/json", "User-Agent": "sourcer/0.7" };
+}
+
+function bodyHint(res) {
+  const d = res && res.data;
+  if (!d) return res && res.error ? String(res.error) : "";
+  if (typeof d === "string") return d.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 200);
+  return String(d.message || d.error || d.code || JSON.stringify(d)).slice(0, 200);
 }
 
 async function bbGet(path, timeout) {
@@ -93,7 +109,18 @@ async function snapshot() {
     const qs = "?isoCode=" + encodeURIComponent(config.bigbuy.iso) + "&page=" + page + "&pageSize=" + PAGE_SIZE;
     const productsRes = await bbGet("/rest/catalog/products.json" + qs);
     if (!productsRes.ok) {
-      if (!fetchedAny) return { ok: false, reason: "bigbuy_http_" + productsRes.status, status: productsRes.status, error: productsRes.error };
+      if (!fetchedAny) {
+        const st = productsRes.status;
+        const hint =
+          st === 401 || st === 403
+            ? "BigBuy rechaza la clave (" + st + "). Revisa que BIGBUY_API_KEY sea solo la clave (sin comillas ni 'Bearer'), que sea de PRODUCCION y que BIGBUY_BASE no este definida como sandbox. Respuesta: " + bodyHint(productsRes)
+            : st === 429
+              ? "Limite de BigBuy superado (products: 10 peticiones/hora). Se reintentara con la cache."
+              : st === 409
+                ? "BigBuy aun no tiene el catalogo en cache para tu cuenta (409). Reintenta mas tarde."
+                : bodyHint(productsRes);
+        return { ok: false, reason: "bigbuy_http_" + st, status: st, error: productsRes.error, hint: hint };
+      }
       break;
     }
     const products = Array.isArray(productsRes.data) ? productsRes.data : (productsRes.data && productsRes.data.products) || [];
@@ -161,6 +188,9 @@ const bigbuy = {
       configured: bigbuyReady(),
       reason: bigbuyReady() ? null : "bigbuy_not_configured",
       mode: bigbuyReady() ? "api_mayorista" : "sin_clave",
+      base: base(),
+      keyLength: apiKey().length,
+      keyCleaned: apiKey() !== String(config.bigbuy.apiKey || ""),
       note: bigbuyReady()
         ? "Catalogo mayorista (precio neto sin IVA, EAN, stock, imagenes)."
         : "Sin BIGBUY_API_KEY: el proveedor esta apagado."
