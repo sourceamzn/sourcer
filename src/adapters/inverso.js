@@ -99,30 +99,27 @@ function planFor(m, p) {
   const discount = pvp > 0 ? 1 - priceMax / pvp : 0;
   const discPct = round2(discount * 100);
 
-  /* Filtros del PDF (marca privada -> descartar; hazmat/marca restringida SOLO marcar). */
+  /* Única regla dura del motor: beneficio neto. Sin coste maximo positivo la
+     operacion pierde dinero -> descarte. El resto de criterios del PDF (Buy Box
+     minima, ventas, vendedores terceros, historial, descuento necesario) pasa a
+     AVISOS configurables: informan, no descartan. */
   const reasons = [];
-  let estado = "apt";
   const thirdParty = num(m.thirdParty, 0);
   const historyDays = m.historyDays == null ? null : num(m.historyDays);
-  if (pvp > 0 && pvp < num(p.minBB)) { estado = "descarte"; reasons.push("Precio Buy Box " + round2(pvp) + " € por debajo del minimo (" + p.minBB + " €): casi nunca se consigue el descuento necesario."); }
-  if (sales < num(p.minSales)) { estado = "descarte"; reasons.push("Ventas/mes " + round2(sales) + " por debajo del minimo (" + p.minSales + ")."); }
-  if (thirdParty < num(p.minThirdParty)) { estado = "descarte"; reasons.push("Solo " + thirdParty + " vendedor(es) tercero(s): si solo vende la marca, es marca privada -> descartar."); }
-  if (costMax <= 0) { estado = "descarte"; reasons.push("Con las tarifas reales no queda coste maximo positivo: no hay margen posible."); }
-  if (historyDays != null && historyDays < num(p.minHistory)) { if (estado === "apt") estado = "casi"; reasons.push("Historial en Keepa de " + historyDays + " dias (minimo " + p.minHistory + "): listing nuevo, a revisar."); }
-  if (estado !== "descarte") {
-    if (discPct <= num(p.maxDiscount)) {
-      if (estado !== "casi") { estado = "apt"; reasons.push("Descuento necesario " + discPct + " % <= tope " + p.maxDiscount + " %: pasa el filtro de precio, buscar proveedor."); }
-    } else if (discPct <= num(p.maxDiscount) + num(p.nearPct)) {
-      estado = "casi";
-      reasons.push("Descuento necesario " + discPct + " % ligeramente por encima del tope (" + p.maxDiscount + " %): casi pasa, guardar en vigilancia.");
-    } else {
-      estado = "descarte";
-      reasons.push("Descuento necesario " + discPct + " % supera el tope " + p.maxDiscount + " %: descartado antes de buscar proveedor.");
-    }
+  const hardDrop = costMax <= 0;
+  if (hardDrop) {
+    reasons.push("Con las tarifas reales no queda coste maximo positivo: no hay beneficio neto.");
+  } else {
+    if (pvp > 0 && pvp < num(p.minBB)) reasons.push("Precio Buy Box " + round2(pvp) + " € por debajo del minimo (" + p.minBB + " €): el descuento necesario puede no conseguirse.");
+    if (sales < num(p.minSales)) reasons.push("Ventas/mes " + round2(sales) + " por debajo del minimo (" + p.minSales + "): poca rotacion.");
+    if (thirdParty < num(p.minThirdParty)) reasons.push("Solo " + thirdParty + " vendedor(es) tercero(s): si solo vende la marca, es marca privada.");
+    if (historyDays != null && historyDays < num(p.minHistory)) reasons.push("Historial en Keepa de " + historyDays + " dias (minimo " + p.minHistory + "): listing nuevo, a revisar.");
+    if (discPct > num(p.maxDiscount)) reasons.push("Descuento necesario " + discPct + " % supera el tope " + p.maxDiscount + " %: dificil de conseguir.");
+    if (m.brandRestricted) reasons.push("Marca restringida: se puede solicitar en Seller Central (solo aviso).");
+    if (m.hazmat) reasons.push("Posible hazmat: se vende por FBM (solo aviso).");
+    if (m.amazonOnly) reasons.push("Amazon es el unico otro vendedor: dificilmente cede la Buy Box.");
   }
-  if (m.brandRestricted) reasons.push("Marca restringida: se puede solicitar en Seller Central (no descarta, solo marca).");
-  if (m.hazmat) reasons.push("Posible hazmat: se vende por FBM (no descarta, solo marca).");
-  if (m.amazonOnly) reasons.push("Amazon es el unico otro vendedor: dificilmente cede la Buy Box.");
+  const estado = hardDrop ? "descarte" : (reasons.length ? "casi" : "apt");
 
   return {
     pvp: round2(pvp), pvNet: round2(PV), tier: { margin: tier.margin, roi: tier.roi, label: tier.label },
