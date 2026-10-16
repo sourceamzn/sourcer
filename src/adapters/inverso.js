@@ -275,6 +275,7 @@ async function keepaFinder(body) {
 }
 
 /* ---------- Fase 2 · buscar proveedor por debajo del precio maximo ---------- */
+const identity = require("../lib/identity");
 const MARKET = "https://www.amazon.es";
 function supplierQuery(body) {
   const ean = digits(body && body.ean);
@@ -306,8 +307,9 @@ function relevance(name, qTokens) {
   return hits / qTokens.length;
 }
 /* Oferta mas barata entre las que tienen precio en EUR y coinciden (exacto/probable). */
-function cheapestVerified(matches) {
-  const c = (matches || []).filter(function (m) { return m.price > 0 && !m.over && (m.match === "exacto" || m.match === "probable") && (!m.currency || m.currency === "EUR"); });
+function cheapestVerified(matches, kinds) {
+  kinds = kinds || ["exacto"];
+  const c = (matches || []).filter(function (m) { return m.price > 0 && !m.over && kinds.indexOf(m.match) !== -1 && (!m.currency || m.currency === "EUR"); });
   c.sort(function (a, b) { return a.price - b.price; });
   return c[0] || null;
 }
@@ -351,6 +353,8 @@ async function searchSuppliers(body, priceMax, hooks) {
   const qTokens = tokensOf([body && body.brand, body && body.model, body && body.name].filter(Boolean).join(" ") || sq.q);
   const eanQ = digits(body && body.ean);
   const q = sq.q;
+  const srcId = identity.identityOf(body || {});
+  const rejected = [];
   const matches = [], above = [], searched = [];
   if (!q) return { q: "", via: "", matches: matches, searched: searched };
   const max = clampInt(body && body.max, 12, 3, 24);
@@ -418,7 +422,11 @@ async function searchSuppliers(body, priceMax, hooks) {
           checkedAt: new Date().toISOString()
         };
         rec.role = roleOf(adapters[id], rec);
-        rec.match = (eanQ.length >= 8 && it.ean && String(it.ean).indexOf(eanQ) !== -1) ? "exacto" : (rec.rel >= 0.75 ? "probable" : "equivalente");
+        const cmp = identity.compare(srcId, { name: it.name, brand: it.brand, ean: it.ean });
+        rec.match = cmp.verdict === "exacto" ? "exacto" : cmp.verdict === "probable" ? "probable" : cmp.verdict === "variante" ? "variante" : "equivalente";
+        if (cmp.verdict === "equivalente" && rec.rel >= 0.75 && !it.ean) rec.match = "equivalente";
+        rec.identity = { verdict: cmp.verdict, reason: cmp.reason, checks: cmp.checks };
+        if (cmp.verdict === "distinto") { rejected.push({ source: id, name: String(it.name || "").slice(0, 80), reason: cmp.reason }); return; }
         rec.imageOk = /^https?:\/\//i.test(String(rec.image || ""));
         recsOut.push(rec);
         if (price <= 0) { matches.push(rec); return; }
@@ -461,7 +469,7 @@ async function searchSuppliers(body, priceMax, hooks) {
     above.sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); });
     extra = above.slice(0, 8).map(function (x) { return Object.assign({}, x, { over: true }); });
   }
-  return { q: q, via: sq.via, priceMax: round2(priceMax), matches: matches.concat(extra), searched: searched };
+  return { q: q, via: sq.via, priceMax: round2(priceMax), matches: matches.concat(extra), searched: searched, identity: srcId, rejected: rejected.slice(0, 40) };
 }
 
 /* ---------- adaptador ---------- */
@@ -602,7 +610,7 @@ const inverso = {
           source: "inverso", kind: "sources", query: out.q, via: out.via,
           priceMax: round2(priceMax), matches: out.matches, searched: out.searched,
           amazon: amazon, googleShopping: google, wholesaleDraft: wholesaleDraft,
-          cheapestVerified: cheapestVerified(out.matches), scope: { sourcesQueried: (out.searched || []).length, sourcesWithData: (out.searched || []).filter(function (x) { return x.ok; }).length, note: "Solo las fuentes listadas en searched; no equivale a todo Internet." }
+          cheapestVerified: cheapestVerified(out.matches), cheapestProbable: cheapestVerified(out.matches, ["probable"]), identity: out.identity, rejected: out.rejected, scope: { sourcesQueried: (out.searched || []).length, sourcesWithData: (out.searched || []).filter(function (x) { return x.ok; }).length, note: "Solo las fuentes listadas en searched; no equivale a todo Internet." }
         }
       };
     }
