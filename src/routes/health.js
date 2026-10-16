@@ -1,4 +1,4 @@
-const { config, amazonReady, keepaReady, feedReady, scrapingReady } = require("../config");
+const { config, amazonReady, keepaReady, feedReady, scrapingReady, apifyReady } = require("../config");
 const { list } = require("../adapters");
 const { profileMeta } = require("../adapters/sources/catalog");
 const vault = require("../lib/vault");
@@ -19,6 +19,14 @@ function health(req, res) {
     sources: {
       amazon: amazonReady(),
       keepa: keepaReady(),
+      /* Apify (clave unica): descubrimiento, 1688, Alibaba, Made-in-China,
+         Google Shopping y busqueda por foto. */
+      apify: apifyReady(),
+      a1688: apifyReady() && Boolean(config.apify.actors.a1688),
+      alibaba: apifyReady() && Boolean(config.apify.actors.alibaba),
+      madeinchina: apifyReady() && Boolean(config.apify.actors.mic),
+      gshopping: apifyReady() && Boolean(config.apify.actors.shopping),
+      foto: apifyReady() && Boolean(config.apify.actors.image),
       /* Busqueda inversa (Amazon -> proveedor): depende de Keepa para los
          candidatos de la demanda; los proveedores usan el resto de fuentes. */
       inverso: keepaReady(),

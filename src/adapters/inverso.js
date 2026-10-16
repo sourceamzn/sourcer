@@ -328,7 +328,7 @@ async function searchSuppliers(body, priceMax) {
           price: price || null, oldPrice: num(it.oldPrice) || null,
           shipping: num(it.shipping) || null, stock: it.stock == null ? null : num(it.stock),
           limit: it.limit == null ? null : num(it.limit),
-          url: it.url || "", image: it.image || "",
+          url: it.url || "", image: it.image || "", candidate: Boolean(it.candidate),
           under: price > 0 && priceMax > 0 && price <= priceMax
         };
         if (price <= 0) { matches.push(rec); return; }

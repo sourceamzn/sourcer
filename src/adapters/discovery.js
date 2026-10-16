@@ -9,7 +9,8 @@
    Es una fuente de PROVEEDOR: devuelve enlaces (sin precio). Se integra igual
    que las demas en la Fase 2 de la busqueda inversa y en "Proveedores". */
 
-const { config, discoveryReady } = require("../config");
+const { config, discoveryReady, apifyReady } = require("../config");
+const apify = require("../lib/apify");
 const { jsonFetch } = require("../lib/http");
 const eanLib = require("../lib/ean");
 
@@ -98,6 +99,34 @@ async function braveSearch(q, count) {
   return { ok: true, results: results };
 }
 
+/* Motor principal: Google Search Scraper de Apify. Devuelve el mismo formato
+   {title,url,description} que Brave para compartir el resto del flujo. */
+async function apifySearch(q, count) {
+  const queries = [q, q + " mayorista", q + " distribuidor fabricante"].join("\n");
+  const r = await apify.runActor(
+    config.apify.actors.search,
+    {
+      queries: queries,
+      countryCode: config.apify.country,
+      languageCode: config.discovery.lang,
+      resultsPerPage: Math.min(Math.max(count, 10), 20),
+      maxPagesPerQuery: 1,
+      mobileResults: false,
+      saveHtml: false,
+      saveHtmlToKeyValueStore: false
+    },
+    { estCost: 0.01 }
+  );
+  if (!r.ok) return { ok: false, reason: r.reason, status: r.status };
+  const results = [];
+  r.items.forEach(function (page) {
+    ((page && page.organicResults) || []).forEach(function (o) {
+      if (o && o.url) results.push({ title: o.title, url: o.url, description: o.description });
+    });
+  });
+  return results.length ? { ok: true, results: results } : { ok: false, reason: "sin_resultados" };
+}
+
 async function search(body) {
   body = body || {};
   const built = buildQuery(body);
@@ -106,7 +135,7 @@ async function search(body) {
     return {
       ok: false,
       reason: "discovery_not_configured",
-      hint: "Configura BRAVE_API_KEY (Brave Search API, ~5 EUR / 1000 busquedas, 5 EUR gratis al mes) para descubrir paginas de proveedor."
+      hint: "Configura APIFY_TOKEN (recomendado) o BRAVE_API_KEY para descubrir paginas de proveedor."
     };
   }
   const max = Math.min(Math.max(parseInt((body && body.max) || "12", 10) || 12, 3), 20);
@@ -121,7 +150,16 @@ async function search(body) {
       if (extra) q = q + " " + extra;
     }
   }
-  const r = await braveSearch(q, Math.min(max * 2, 20));
+  let r = { ok: false, reason: "sin_motor" };
+  let engine = "";
+  if (apifyReady()) {
+    r = await apifySearch(q, Math.min(max * 2, 20));
+    engine = "apify";
+  }
+  if (!r.ok && config.discovery.apiKey) {
+    r = await braveSearch(q, Math.min(max * 2, 20));
+    engine = "brave";
+  }
   if (!r.ok) return { ok: false, reason: r.reason, status: r.status };
   const seen = {};
   const items = (r.results || [])
@@ -137,7 +175,7 @@ async function search(body) {
   return {
     ok: items.length > 0,
     reason: items.length ? null : "discovery_sin_resultados",
-    data: { source: "discovery", query: q, via: via, count: items.length, items: items }
+    data: { source: "discovery", engine: engine, query: q, via: via, count: items.length, items: items }
   };
 }
 
@@ -150,11 +188,11 @@ const discovery = {
     ping: async () => ({
       ok: discoveryReady(),
       configured: discoveryReady(),
-      reason: discoveryReady() ? null : "brave_not_configured",
-      mode: discoveryReady() ? "brave_search" : "sin_clave",
+      reason: discoveryReady() ? null : "apify_not_configured",
+      mode: apifyReady() ? "apify_google_search" : discoveryReady() ? "brave_search" : "sin_clave",
       note: discoveryReady()
         ? "Descubre paginas de proveedor por EAN o marca + modelo."
-        : "Sin BRAVE_API_KEY: el descubrimiento esta apagado."
+        : "Sin APIFY_TOKEN ni BRAVE_API_KEY: el descubrimiento esta apagado."
     }),
     lookup: async (body) => await eanLib.lookup(body && body.ean),
     search

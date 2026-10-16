@@ -12,6 +12,7 @@ const discovery = require("./discovery");
 const bigbuy = require("./bigbuy");
 const aliexpress = require("./aliexpress");
 const cjdropshipping = require("./cjdropshipping");
+const apifyMarket = require("./apify_market");
 const { tarifa, liquidaciones } = require("./tarifa");
 const { buildAdapters } = require("./sources/catalog");
 
@@ -21,6 +22,7 @@ const { buildAdapters } = require("./sources/catalog");
    (storefronts FBA, tarifas, liquidaciones, newsletters) y el panel Top 20. */
 const adapters = Object.assign(
   { outletpc, lidl, iherb, amazon, keepa, web, inverso, top20, discovery, bigbuy, aliexpress, cjdropshipping },
+  { a1688: apifyMarket.a1688, alibaba: apifyMarket.alibaba, madeinchina: apifyMarket.madeinchina, gshopping: apifyMarket.gshopping, foto: apifyMarket.foto },
   buildAdapters(),
   { storefronts, tarifas: tarifa, liquidaciones, newsletters }
 );

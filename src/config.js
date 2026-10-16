@@ -42,6 +42,27 @@ const config = {
     country: clean(process.env.DISCOVERY_COUNTRY) || "es",
     lang: clean(process.env.DISCOVERY_LANG) || "es"
   },
+  /* --- Apify: una sola clave (APIFY_TOKEN) para buscador, lectura web,
+     1688, Alibaba, Made-in-China, Google Shopping y busqueda por foto.
+     Los actores se llaman por ID y se pueden cambiar sin tocar codigo. --- */
+  apify: {
+    token: clean(process.env.APIFY_TOKEN),
+    base: clean(process.env.APIFY_BASE) || "https://api.apify.com",
+    country: clean(process.env.APIFY_COUNTRY) || "es",
+    cacheMin: Math.max(0, parseInt(clean(process.env.APIFY_CACHE_MIN) || "720", 10) || 0),
+    maxCostPerOp: Math.max(0, parseFloat(clean(process.env.APIFY_MAX_COST_PER_OP) || "0.50") || 0),
+    timeoutSec: Math.min(Math.max(parseInt(clean(process.env.APIFY_TIMEOUT_SEC) || "50", 10) || 50, 10), 300),
+    actors: {
+      search: clean(process.env.APIFY_SEARCH_ACTOR) || "apify/google-search-scraper",
+      crawl: clean(process.env.APIFY_CRAWL_ACTOR) || "apify/website-content-crawler",
+      image: clean(process.env.APIFY_IMAGE_ACTOR) || "devcake/scraper-by-image",
+      a1688: clean(process.env.APIFY_1688_ACTOR) || "songd/1688-search-scraper",
+      alibaba: clean(process.env.APIFY_ALIBABA_ACTOR) || "happitap/alibaba-product-scraper",
+      mic: clean(process.env.APIFY_MIC_ACTOR) || "agenscrape/made-in-china-com-product-scraper",
+      shopping: clean(process.env.APIFY_SHOPPING_ACTOR) || "automation-lab/google-shopping-scraper",
+      aliexpress: clean(process.env.APIFY_ALIEXPRESS_ACTOR)
+    }
+  },
   /* --- Proveedores/marketplaces con API (clave por tienda) --- */
   bigbuy: {
     apiKey: clean(process.env.BIGBUY_API_KEY),
@@ -125,8 +146,12 @@ function scrapingReady() {
   return config.scraping.provider !== "none" && Boolean(config.scraping.apiKey);
 }
 
+function apifyReady() {
+  return Boolean(config.apify.token);
+}
+
 function discoveryReady() {
-  return Boolean(config.discovery.apiKey);
+  return apifyReady() || Boolean(config.discovery.apiKey);
 }
 
 function bigbuyReady() {
@@ -147,6 +172,7 @@ module.exports = {
   keepaReady,
   feedReady,
   scrapingReady,
+  apifyReady,
   discoveryReady,
   bigbuyReady,
   aliexpressReady,
