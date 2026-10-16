@@ -5,6 +5,7 @@ const vault = require("../lib/vault");
 const store = require("../lib/store");
 const scheduler = require("../lib/scheduler");
 const top20 = require("../lib/top20");
+const apifyLib = require("../lib/apify");
 const pkg = require("../../package.json");
 
 function health(req, res) {
@@ -26,6 +27,7 @@ function health(req, res) {
       alibaba: apifyReady() && Boolean(config.apify.actors.alibaba),
       madeinchina: apifyReady() && Boolean(config.apify.actors.mic),
       gshopping: apifyReady() && Boolean(config.apify.actors.shopping),
+      explorar: apifyReady() && Boolean(config.apify.actors.shopping),
       foto: apifyReady() && Boolean(config.apify.actors.image),
       /* Busqueda inversa (Amazon -> proveedor): depende de Keepa para los
          candidatos de la demanda; los proveedores usan el resto de fuentes. */
@@ -67,6 +69,8 @@ function health(req, res) {
         last: scheduler.status().sweep.last
       }
     },
+    /* Consumo real de Apify desde el arranque (peticiones ejecutadas, no de cache). */
+    apifyUsage: apifyLib.stats,
     top20: top20.status(),
     adapters: list(),
     /* Catalogo del PDF con las particularidades por proveedor (EAN, stock

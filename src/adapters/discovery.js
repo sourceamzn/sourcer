@@ -170,12 +170,17 @@ async function search(body) {
       seen[h] = 1;
       return true;
     })
-    .slice(0, max)
     .map(toItem);
+  /* El buscador devuelve tiendas, blogs y paginas que no son proveedores.
+     Se priorizan las que tienen senales de mayorista/distribuidor/fabricante
+     (matchedHint) y se descarta el ruido; si ninguna la tiene, se conservan las
+     primeras como ultimo recurso para no dejar la fuente vacia. */
+  const hinted = items.filter(function (x) { return x.matchedHint; });
+  const kept = (hinted.length ? hinted : items.slice(0, 3)).slice(0, max);
   return {
-    ok: items.length > 0,
-    reason: items.length ? null : "discovery_sin_resultados",
-    data: { source: "discovery", engine: engine, query: q, via: via, count: items.length, items: items }
+    ok: kept.length > 0,
+    reason: kept.length ? null : "discovery_sin_resultados",
+    data: { source: "discovery", engine: engine, query: q, via: via, count: kept.length, items: kept }
   };
 }
 

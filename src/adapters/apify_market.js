@@ -55,7 +55,7 @@ function isEur(cur, id) {
 
 function toItem(o, id, label, candidate) {
   const url = String(first(o, ["product_url", "url", "link", "productUrl", "detailUrl", "itemUrl", "href"]) || "");
-  const supplier = String(first(o, ["company_name", "shop_name", "supplier", "supplierName", "companyName", "seller", "merchant", "store", "source"]) || label);
+  const supplier = String(first(o, ["company_name", "shop_name", "supplier", "supplierName", "companyName", "sellerName", "seller_name", "seller", "merchant", "store", "source"]) || label);
   const cur = currencyOf(o);
   const lo = priceOf(first(o, ["priceNumeric", "min_price", "price_min", "price", "priceMin", "minPrice", "unitPrice", "salePrice", "extractedPrice", "priceRange"]));
   const hi = priceOf(first(o, ["max_price", "price_max", "priceMax", "maxPrice"]));
@@ -89,7 +89,7 @@ function toItem(o, id, label, candidate) {
     attrs: {
       currency: cur,
       platform: platform,
-      factory: /manufactur|factory|fabric/i.test(String(first(o, ["business_type", "seller_type"]) || "")) || o.is_factory === true,
+      factory: /manufactur|factory|fabric/i.test(String(first(o, ["business_type", "seller_type", "sellerType"]) || "")) || o.is_factory === true || o.isFactory === true,
       note: candidate ? "Candidato: validar modelo y variante antes de comprar." : ""
     },
     capturedAt: new Date().toISOString()
@@ -113,7 +113,8 @@ function queryOf(body) {
 
 /* Entradas EXACTAS por actor (esquema de su ficha en Apify). */
 const BUILDERS = {
-  a1688: function (q) { return { keyword: q, maxPages: 1, proxy: { useApifyProxy: false } }; },
+  /* datacach/1688-search-scraper (pay-per-event): keywords[] + maxItemsPerKeyword. */
+  a1688: function (q, max) { return { keywords: [q], maxItemsPerKeyword: Math.min(Math.max(max, 3), 60), searchType: "pcmarket", proxyConfiguration: { useApifyProxy: true } }; },
   alibaba: function (q, max) { return { searchQueries: [q], maxProductsPerQuery: max, maxConcurrency: 3, proxyConfig: { useApifyProxy: true }, timeoutSecs: 90 }; },
   mic: function (q, max) { return { searchMode: "keyword", keyword: q, maxResults: max }; },
   aliexpress: function (q, max) { return { keyword: q, query: q, maxItems: max }; },

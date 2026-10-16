@@ -11,6 +11,8 @@
 const { config, apifyReady } = require("../config");
 
 const cache = new Map();
+/* Consumo real por actor (peticiones ejecutadas, no servidas de cache). Visible en /health. */
+const stats = { calls: 0, errors: 0, byActor: {}, lastError: null };
 const CACHE_MAX = 300;
 
 function actorPath(id) {
@@ -50,8 +52,10 @@ async function runActor(actorId, input, opts) {
   if (op && cap > 0 && op.spent >= cap) return { ok: false, reason: "tope_de_coste", items: [] };
 
   const k = keyOf(actorId, input);
-  const cached = cacheGet(k);
+  const cached = opts.noCache ? null : cacheGet(k);
   if (cached) return { ok: true, items: cached, cached: true };
+  stats.calls += 1;
+  stats.byActor[actorId] = (stats.byActor[actorId] || 0) + 1;
 
   const timeoutSec = opts.timeoutSec || config.apify.timeoutSec;
   const params = ["token=" + encodeURIComponent(config.apify.token), "timeout=" + timeoutSec];
@@ -75,6 +79,7 @@ async function runActor(actorId, input, opts) {
     if (!res.ok) {
       /* El token nunca se devuelve ni se registra. */
       const msg = data && data.error && data.error.message ? String(data.error.message).slice(0, 160) : "";
+      stats.errors += 1; stats.lastError = { actor: actorId, status: res.status, at: new Date().toISOString() };
       return { ok: false, reason: "actor_http_" + res.status, detail: msg, items: [] };
     }
     const items = Array.isArray(data) ? data : [];
@@ -89,4 +94,4 @@ async function runActor(actorId, input, opts) {
   }
 }
 
-module.exports = { runActor, newOp, apifyReady };
+module.exports = { runActor, newOp, apifyReady, stats };

@@ -154,6 +154,22 @@ function historyDays(prod) {
   } catch (e) {}
   return null;
 }
+/* Keepa devuelve en imagesCSV solo el NOMBRE de archivo (p. ej. "61abc.jpg");
+   la URL publica de Amazon se construye con el CDN de imagenes. Si ya viene
+   una URL completa se respeta. Sin imagen -> "" (la interfaz lo indica). */
+function keepaImageUrl(prod) {
+  if (!prod) return "";
+  let first = "";
+  if (prod.imagesCSV) first = String(prod.imagesCSV).split(",")[0].trim();
+  else if (Array.isArray(prod.images) && prod.images.length) {
+    const im = prod.images[0];
+    first = String((im && (im.l || im.m || im.url)) || im || "").trim();
+  } else if (prod.image) first = String(prod.image).trim();
+  if (!first) return "";
+  if (/^https?:\/\//i.test(first)) return first;
+  if (first.indexOf("//") === 0) return "https:" + first;
+  return "https://m.media-amazon.com/images/I/" + first.replace(/^\/+/, "");
+}
 function metricsFromKeepa(prod) {
   const s = (prod && prod.stats) || {};
   const pvp = keepaAvg90(prod, 18, true) || keepaCur(prod, 18, true) || keepaCur(prod, 1, true) || keepaCur(prod, 0, true);
@@ -170,7 +186,8 @@ function metricsFromKeepa(prod) {
     asin: String((prod && prod.asin) || "").toUpperCase(),
     title: (prod && prod.title) || "",
     brand: (prod && prod.brand) || "",
-    image: (prod && (prod.imagesCSV || prod.image)) ? String(prod.imagesCSV || prod.image).split(",")[0] : "",
+    image: keepaImageUrl(prod),
+    imageSource: keepaImageUrl(prod) ? "amazon (Keepa)" : "",
     url: prod && prod.asin ? "https://www.amazon.es/dp/" + String(prod.asin).toUpperCase() : "",
     pvp: round2(pvp), bsr: bsr, sales: Math.round(sales),
     thirdParty: Math.round(thirdParty), offersFba: Math.round(offersFba),
@@ -291,6 +308,22 @@ function relevance(name, qTokens) {
   });
   return hits / qTokens.length;
 }
+/* Oferta mas barata entre las que tienen precio en EUR y coinciden (exacto/probable). */
+function cheapestVerified(matches) {
+  const c = (matches || []).filter(function (m) { return m.price > 0 && !m.over && (m.match === "exacto" || m.match === "probable") && (!m.currency || m.currency === "EUR"); });
+  c.sort(function (a, b) { return a.price - b.price; });
+  return c[0] || null;
+}
+/* Tipo de proveedor segun la fuente y los datos de la oferta. */
+function roleOf(adapter, rec) {
+  if (rec.factory) return "fabricante";
+  const k = adapter && adapter.kind;
+  if (k === "wholesale") return "mayorista";
+  if (k === "supplier_market") return rec.candidate ? "fabricante/mayorista (candidato)" : "reventa";
+  if (k === "marketplace") return "reventa";
+  if (k === "discovery") return "distribuidor (web)";
+  return "tienda";
+}
 /* Resuelve la promesa o devuelve {ok:false,reason:"timeout"} si tarda demasiado,
    sin dejar timers colgando. */
 function withTimeout(promise, ms) {
@@ -301,9 +334,10 @@ function withTimeout(promise, ms) {
     function (e) { clearTimeout(t); throw e; }
   );
 }
-async function searchSuppliers(body, priceMax) {
+async function searchSuppliers(body, priceMax, hooks) {
+  hooks = hooks || {};
   const { adapters } = require("./index"); /* lazy: evita el ciclo index<->inverso */
-  const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1 };
+  const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1, explorar: 1 };
   /* Primero las fuentes que buscan en toda la red (buscador, 1688, Alibaba,
      Google Shopping...) y las API de mayoristas: son las lentas y las que mas
      valen; las webs de catalogo fijo van detras. */
@@ -332,8 +366,11 @@ async function searchSuppliers(body, priceMax) {
   let cursor = 0;
 
   async function runOne(id) {
-    const entry = { source: id, ok: false, count: 0 };
-    if (Date.now() > deadline) { entry.reason = "tiempo_agotado"; searched.push(entry); return; }
+    const entry = { source: id, sourceLabel: adapters[id].label || id, ok: false, count: 0, startedAt: new Date().toISOString() };
+    const t0 = Date.now();
+    const recsOut = [];
+    if (hooks.onStart) { try { hooks.onStart(id, entry.sourceLabel); } catch (e) {} }
+    if (Date.now() > deadline) { entry.reason = "tiempo_agotado"; entry.ms = 0; searched.push(entry); if (hooks.onSource) { try { hooks.onSource(entry, []); } catch (e) {} } return; }
     try {
       const r = await withTimeout(
         adapters[id].actions.search({
@@ -378,8 +415,15 @@ async function searchSuppliers(body, priceMax) {
           priceText: it.priceText || "", minOrder: it.minOrder || null,
           supplier: it.supplier || "", factory: Boolean(it.attrs && it.attrs.factory),
           rel: Math.round(relevance(it.name, qTokens) * 100) / 100,
-          under: price > 0 && priceMax > 0 && price <= priceMax
+          under: price > 0 && priceMax > 0 && price <= priceMax,
+          meetsMax: price > 0 && priceMax > 0 ? price <= priceMax : null,
+          currency: (it.attrs && it.attrs.currency) || (price > 0 ? "EUR" : ""),
+          checkedAt: new Date().toISOString()
         };
+        rec.role = roleOf(adapters[id], rec);
+        rec.match = (eanQ.length >= 8 && it.ean && String(it.ean).indexOf(eanQ) !== -1) ? "exacto" : (rec.rel >= 0.75 ? "probable" : "equivalente");
+        rec.imageOk = /^https?:\/\//i.test(String(rec.image || ""));
+        recsOut.push(rec);
         if (price <= 0) { matches.push(rec); return; }
         if (priceMax > 0 && price > priceMax) { above.push(rec); return; }
         matches.push(rec);
@@ -387,7 +431,9 @@ async function searchSuppliers(body, priceMax) {
     } catch (e) {
       entry.reason = String((e && e.message) || e);
     }
+    entry.ms = Date.now() - t0;
     searched.push(entry);
+    if (hooks.onSource) { try { hooks.onSource(entry, recsOut); } catch (e) {} }
   }
 
   const workers = [];
@@ -543,9 +589,9 @@ const inverso = {
     },
 
     /* Fase 2 · buscar donde comprar por debajo del precio maximo. */
-    sources: async function (body) {
+    sources: async function (body, ctx, hooks) {
       const priceMax = num(body && (body.priceMax || body.maxPrice));
-      const out = await searchSuppliers(body || {}, priceMax);
+      const out = await searchSuppliers(body || {}, priceMax, hooks);
       const amazon = (body && body.asin) ? (MARKET + "/dp/" + String(body.asin).toUpperCase()) : "";
       const google = out.q ? ("https://www.google.com/search?tbm=shop&q=" + encodeURIComponent(out.q)) : "";
       const wholesaleDraft = body && body.brand
@@ -558,7 +604,8 @@ const inverso = {
         data: {
           source: "inverso", kind: "sources", query: out.q, via: out.via,
           priceMax: round2(priceMax), matches: out.matches, searched: out.searched,
-          amazon: amazon, googleShopping: google, wholesaleDraft: wholesaleDraft
+          amazon: amazon, googleShopping: google, wholesaleDraft: wholesaleDraft,
+          cheapestVerified: cheapestVerified(out.matches), scope: { sourcesQueried: (out.searched || []).length, sourcesWithData: (out.searched || []).filter(function (x) { return x.ok; }).length, note: "Solo las fuentes listadas en searched; no equivale a todo Internet." }
         }
       };
     }
@@ -568,6 +615,7 @@ const inverso = {
 module.exports = inverso;
 module.exports.planFor = planFor;
 module.exports.metricsFromKeepa = metricsFromKeepa;
+module.exports.keepaImageUrl = keepaImageUrl;
 module.exports.keepaBestSellers = keepaBestSellers;
 module.exports.keepaProductsByAsins = keepaProductsByAsins;
 module.exports.keepaCategories = keepaCategories;

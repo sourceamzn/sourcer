@@ -4,6 +4,7 @@ const health = require("./routes/health");
 const sourcing = require("./routes/sourcing");
 const coverage = require("./routes/coverage");
 const alerts = require("./routes/alerts");
+const suppliers = require("./routes/suppliers");
 const scheduler = require("./lib/scheduler");
 const store = require("./lib/store");
 const pkg = require("../package.json");
@@ -32,6 +33,8 @@ app.get("/", (req, res) => res.json({ ok: true, service: pkg.name, version: pkg.
 app.get("/health", health);
 app.get("/coverage", coverage);
 app.use("/alerts", alerts);
+app.post("/suppliers/start", suppliers.startSuppliers);
+app.get("/suppliers/status/:id", suppliers.statusSuppliers);
 app.post("/sourcing/:source/:action", sourcing);
 
 /* Inicializa el almacen del vigilante en segundo plano (no bloquea el arranque). */
