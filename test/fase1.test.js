@@ -52,10 +52,12 @@ test("queries: con EAN ya no busca solo el EAN", () => {
   assert.ok(q.some((x) => x.via === "marca+modelo" && /Acme/.test(x.q) && /ZX-200/.test(x.q)));
   assert.ok(q.some((x) => x.via === "marca+titulo"));
 });
-test("queries: referencia sola y modelo solo", () => {
+test("queries: referencia sola y modelo solo si no hay marca+modelo", () => {
   const q = buildQueries({ brand: "Foo", model: "AB-1234", partNumber: "PN-998877", name: "Foo AB-1234 lampara" }, { maxQueries: 6 });
   assert.ok(q.some((x) => x.via === "referencia" && x.q === "PN-998877"));
-  assert.ok(q.some((x) => x.via === "modelo" && x.q === "AB-1234"));
+  assert.equal(q.some((x) => x.via === "modelo"), false);
+  const q2 = buildQueries({ model: "AB-1234", name: "Lampara AB-1234" }, { maxQueries: 6 });
+  assert.ok(q2.some((x) => x.via === "modelo" && x.q === "AB-1234"));
 });
 test("queries: paso en ingles marcado para fuentes internacionales", () => {
   const q = buildQueries({ brand: "Foo", name: "Foo lampara de mesa" }, { maxQueries: 6 });

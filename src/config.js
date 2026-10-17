@@ -10,7 +10,14 @@ const config = {
   port: parseInt(clean(process.env.PORT) || "3000", 10),
   market: clean(process.env.MARKETPLACE_ID) || "A1RKKUPIHCS9HS",
   region: clean(process.env.SPAPI_REGION) || "eu-west-1",
-  allowedOrigins: clean(process.env.ALLOWED_ORIGINS) || "*",
+  /* Seguridad. API_KEYS admite varias claves separadas por comas; la misma
+     clave se pega en el navegador (Conexiones) y viaja en X-API-Key. */
+  allowedOrigins: clean(process.env.ALLOWED_ORIGINS) || "https://tools.bruneagroup.com",
+  apiKeys: clean(process.env.API_KEYS).split(",").map(function (k) { return k.trim(); }).filter(Boolean),
+  rateLimitPerMin: Math.max(0, parseInt(clean(process.env.RATE_LIMIT_PER_MIN) || "60", 10) || 0),
+  beaconRatePerMin: Math.max(0, parseInt(clean(process.env.BEACON_RATE_PER_MIN) || "30", 10) || 0),
+  beaconMaxBytes: Math.max(1024, parseInt(clean(process.env.BEACON_MAX_BYTES) || "16384", 10) || 16384),
+  beaconMaxLines: Math.min(Math.max(parseInt(clean(process.env.BEACON_MAX_LINES) || "25", 10) || 25, 1), 50),
   vaultKey: clean(process.env.VAULT_KEY),
   amazon: {
     clientId: clean(process.env.LWA_CLIENT_ID),
@@ -24,6 +31,14 @@ const config = {
   keepa: {
     apiKey: clean(process.env.KEEPA_API_KEY),
     domain: parseInt(clean(process.env.KEEPA_DOMAIN) || "9", 10)
+  },
+  /* SP-API: reintentos ante 429/5xx y cuantas fichas se completan con tarifas
+     reales o restricciones de listado por busqueda (0 = no llamar). */
+  spapi: {
+    maxRetries: Math.min(Math.max(parseInt(clean(process.env.SPAPI_MAX_RETRIES) || "3", 10) || 3, 0), 5),
+    retryMs: Math.min(Math.max(parseInt(clean(process.env.SPAPI_RETRY_MS) || "600", 10) || 600, 200), 5000),
+    feesMax: Math.min(Math.max(parseInt(clean(process.env.SPAPI_FEES_MAX) || "8", 10) || 0, 0), 20),
+    restrictionsMax: Math.min(Math.max(parseInt(clean(process.env.SPAPI_RESTRICTIONS_MAX) || "8", 10) || 0, 0), 20)
   },
   feeds: ["outletpc", "lidl", "iherb", "selectavision", "yesstyle", "corteingles", "gemimarket", "norica", "famosa", "planafabrega", "vallesviasat"].reduce(function (acc, id) {
     acc[id] = clean(process.env["FEED_" + id.toUpperCase()]);
@@ -86,10 +101,24 @@ const config = {
     maxResults: Math.max(3, parseInt(clean(process.env.SUPPLIER_MAX_RESULTS) || "20", 10) || 20),
     maxResultsCap: Math.max(3, parseInt(clean(process.env.SUPPLIER_MAX_RESULTS_CAP) || "40", 10) || 40),
     /* Consultas por fuente gratuita / de pago (Apify cobra cada ejecucion). */
-    maxQueries: Math.min(Math.max(parseInt(clean(process.env.SUPPLIER_MAX_QUERIES) || "4", 10) || 4, 1), 6),
+    maxQueries: Math.min(Math.max(parseInt(clean(process.env.SUPPLIER_MAX_QUERIES) || "4", 10) || 4, 1), 5),
     maxQueriesPaid: Math.min(Math.max(parseInt(clean(process.env.SUPPLIER_MAX_QUERIES_PAID) || "2", 10) || 2, 1), 4),
     /* Con tantos resultados utiles ya no se prueba la siguiente consulta. */
     enough: Math.max(1, parseInt(clean(process.env.SUPPLIER_ENOUGH) || "5", 10) || 5)
+  },
+  /* Fase 4 · puntuacion de coincidencia. Enriquecimiento de ofertas "a
+     revisar" sin EAN: cuantas fichas se abren por busqueda y con que timeout. */
+  match: {
+    enrichMax: Math.min(Math.max(parseInt(clean(process.env.MATCH_ENRICH_MAX) || "6", 10) || 0, 0), 12),
+    enrichMs: Math.min(Math.max(parseInt(clean(process.env.MATCH_ENRICH_MS) || "6000", 10) || 6000, 1000), 20000)
+  },
+  /* Regla Buy Box 90 d: umbrales en % y numero de vendedores cuyo nombre se
+     consulta en Keepa para separar fabricante de terceros. */
+  buybox: {
+    sellerLookups: Math.min(Math.max(parseInt(clean(process.env.BB_SELLER_LOOKUPS) || "3", 10) || 3, 0), 6),
+    manufacturerMin: Math.min(Math.max(parseFloat(clean(process.env.BB_MANUFACTURER_MIN) || "95", 10) || 95, 50), 100),
+    thirdMax: Math.min(Math.max(parseFloat(clean(process.env.BB_THIRD_MAX) || "5", 10) || 5, 0), 50),
+    singleThird: Math.min(Math.max(parseFloat(clean(process.env.BB_SINGLE_THIRD) || "97", 10) || 97, 50), 100)
   },
   barcode: {
     provider: clean(process.env.BARCODE_PROVIDER) || "upcitemdb",

@@ -4,6 +4,7 @@
    poder probarla y reutilizarla desde cualquier adaptador. */
 
 const buybox = require("./buybox");
+const fees = require("./fees");
 
 const TIERS = [
   { max: 9, margin: 18, roi: 30, label: "menos de 10/mes" },
@@ -17,7 +18,10 @@ const PLAN_DEFAULT = {
   maxDiscount: 0, nearPct: 8, tiers: TIERS,
   /* 1 = descarta si en 90 d la Buy Box fue solo de Amazon o solo del
      fabricante/marca; 0 = solo aviso. */
-  bbRule: 1
+  bbRule: 1,
+  /* Regla Buy Box: Amazon + fabricante >= 95 % o terceros < 5 % = no apto.
+     Un unico tercero con >= 97 % queda "a revisar", nunca descarte. */
+  bbManufacturerMin: 95, bbThirdMax: 5, bbSingleThird: 97
 };
 
 function num(v, d) {
@@ -27,6 +31,17 @@ function num(v, d) {
 }
 function round2(n) {
   return Math.round((isFinite(n) ? n : 0) * 100) / 100;
+}
+/* Avisos de restricciones (array de textos o de objetos de la API). */
+function restrictionNotes(v) {
+  if (!v) return [];
+  const arr = Array.isArray(v) ? v : [v];
+  const out = [];
+  arr.forEach(function (x) {
+    const s = typeof x === "string" ? x : String((x && (x.message || x.reason || x.reasonCode)) || "");
+    if (s && out.indexOf(s) === -1) out.push(s);
+  });
+  return out;
 }
 
 function planParams(body) {
@@ -58,8 +73,10 @@ function planFor(m, p) {
   const tier = tierFor(sales, p);
   const vat = num(p.vat) / 100, recargo = num(p.recargo) / 100;
   const PV = pvp > 0 ? pvp / (1 + vat) : 0;
-  const referencia = PV * (num(p.referral) / 100);
-  const F = (referencia + num(p.fbaFee) + num(p.storage) + num(p.digital)) * (1 + vat) + num(p.inbound);
+  /* Tarifas reales del producto (Keepa/SP-API/manual) o estimacion del PDF. */
+  const rates = fees.resolve(m, p);
+  const referencia = PV * (rates.referralPct / 100);
+  const F = (referencia + rates.fbaFee + num(p.storage) + num(p.digital)) * (1 + vat) + num(p.inbound);
   const cRoi = (PV - F) / (1 + tier.roi / 100);
   const cMargin = PV - F - (tier.margin / 100) * PV;
   const costMax = Math.max(0, Math.min(cRoi, cMargin));
@@ -78,21 +95,30 @@ function planFor(m, p) {
   const fba = num(m.offersFba, 0);
   const lowFba = fbaKnown && fba < num(p.minFba);
   const privateLabel = !!m.privateLabel || (fbaKnown && num(m.thirdParty, 0) <= 1 && fba <= 1);
-  /* Regla Buy Box 90 d: solo Amazon o solo fabricante = no apto (configurable). Sin dato = no se descarta. */
-  const bbv = buybox.verdict(m.buyBox, m.sellerName, m.brand);
-  const bbBlocked = num(p.bbRule, 1) > 0 && (bbv.kind === "amazon" || bbv.kind === "fabricante");
+  /* Regla Buy Box 90 d: Amazon+fabricante >= 95 % o terceros < 5 % = no apto
+     (configurable). Un unico tercero >= 97 % solo se avisa. Sin dato no se descarta. */
+  const bbv = buybox.verdict(m.buyBox, m.sellerName, m.brand, m.manufacturer, {
+    manufacturerMin: p.bbManufacturerMin, thirdMax: p.bbThirdMax, singleThird: p.bbSingleThird
+  });
+  const bbBlocked = num(p.bbRule, 1) > 0 && (
+    bbv.kind === "amazon" || bbv.kind === "fabricante" ||
+    bbv.kind === "amazon+fabricante" || bbv.kind === "terceros"
+  );
   const hardDrop = costMax <= 0 || bbBlocked;
-  if (bbBlocked) reasons.push("No apto: " + bbv.note + " Nadie mas la gana, no hay hueco para revender.");
+  const restricted = restrictionNotes(m.restrictions);
+  if (bbBlocked) reasons.push("No apto: " + bbv.note + " No hay hueco para revender.");
   if (costMax <= 0) reasons.push("Con las tarifas reales no queda coste maximo positivo: no hay beneficio neto.");
   if (lowFba) reasons.push("Solo " + fba + " vendedor(es) FBA (minimo " + p.minFba + "): EN REVISION, no apto.");
   if (privateLabel) reasons.push("Marca privada con exclusividad probable (un unico vendedor): EN REVISION, no apto.");
   if (!hardDrop) {
+    if (num(p.bbRule, 1) > 0 && bbv.kind === "a_revisar") reasons.push(bbv.note);
     if (pvp > 0 && pvp < num(p.minBB)) reasons.push("Precio Buy Box " + round2(pvp) + " EUR por debajo del minimo (" + p.minBB + " EUR): el descuento necesario puede no conseguirse.");
     if (sales < num(p.minSales)) reasons.push("Ventas/mes " + round2(sales) + " por debajo del minimo (" + p.minSales + "): poca rotacion.");
     if (num(p.minThirdParty) > 0 && thirdParty < num(p.minThirdParty)) reasons.push("Solo " + thirdParty + " vendedor(es) tercero(s): si solo vende la marca, es marca privada.");
     if (historyDays != null && historyDays < num(p.minHistory)) reasons.push("Historial en Keepa de " + historyDays + " dias (minimo " + p.minHistory + "): listing nuevo, a revisar.");
     if (num(p.maxDiscount) > 0 && discPct > num(p.maxDiscount)) reasons.push("Descuento necesario " + discPct + " % supera el tope " + p.maxDiscount + " %: dificil de conseguir.");
     if (m.brandRestricted) reasons.push("Marca restringida: se puede solicitar en Seller Central (solo aviso).");
+    if (restricted.length) reasons.push("Restricciones de Amazon: " + restricted.join(" · ") + " (solo aviso).");
     if (m.hazmat) reasons.push("Posible hazmat: se vende por FBM (solo aviso).");
     if (m.amazonOnly) reasons.push("Amazon es el unico otro vendedor: dificilmente cede la Buy Box.");
   }
@@ -102,7 +128,17 @@ function planFor(m, p) {
     pvp: round2(pvp), pvNet: round2(PV), tier: { margin: tier.margin, roi: tier.roi, label: tier.label },
     referral: round2(referencia), feesReal: round2(F), costMax: round2(costMax),
     priceMax: round2(priceMax), discount: discPct, estado: estado, reasons: reasons,
-    buyBox: { kind: bbv.kind, note: bbv.note, rule: num(p.bbRule, 1) > 0 }
+    fees: {
+      referralPct: round2(rates.referralPct), fbaFee: round2(rates.fbaFee),
+      source: rates.source, partial: Boolean(rates.partial)
+    },
+    restrictions: restricted,
+    buyBox: {
+      kind: bbv.kind, note: bbv.note, rule: num(p.bbRule, 1) > 0,
+      amazonShare: bbv.amazonShare, manufacturerShare: bbv.manufacturerShare,
+      thirdShare: bbv.thirdShare, unknownShare: bbv.unknownShare,
+      thirdSellers: bbv.thirdSellers, breakdown: bbv.breakdown || []
+    }
   };
 }
 

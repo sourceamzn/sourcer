@@ -20,13 +20,18 @@ function words(s, n) {
   return clean(s).split(" ").filter(Boolean).slice(0, n).join(" ");
 }
 
-/* Une trozos sin repetir los que ya estan contenidos en lo anterior. */
+/* Une trozos sin repetir. Si el trozo nuevo ya contiene uno anterior, se quita
+   el anterior: [marca, titulo] no debe quedar como "Acme Acme ZX200...". */
 function joinUnique(parts) {
   const out = [];
   parts.forEach(function (p) {
     p = clean(p);
     if (!p) return;
-    if (!out.some(function (x) { return contains(x, p); })) out.push(p);
+    if (out.some(function (x) { return contains(x, p); })) return;
+    for (let i = out.length - 1; i >= 0; i--) {
+      if (contains(p, out[i])) out.splice(i, 1);
+    }
+    out.push(p);
   });
   return out.join(" ").trim();
 }
@@ -35,11 +40,13 @@ function joinUnique(parts) {
    opts: { maxQueries (def 4), maxLen (def 110) }
    Devuelve [{ via, q, intl }]. `intl:true` = solo para fuentes internacionales
    (el texto en ingles lo traduce el llamador porque necesita red). */
+const MAX_QUERIES = 5;
+
 function buildQueries(body, opts) {
   body = body || {};
   opts = opts || {};
   const maxLen = opts.maxLen || 110;
-  const maxQ = Math.max(1, opts.maxQueries || 4);
+  const maxQ = Math.min(MAX_QUERIES, Math.max(1, opts.maxQueries || MAX_QUERIES));
   const brand = clean(body.brand);
   const model = clean(body.model);
   const title = clean(body.name || body.title || body.query);
@@ -60,18 +67,22 @@ function buildQueries(body, opts) {
   const rawEan = gtin.digitsOnly(body.ean);
   if (eans.length) add("ean", rawEan.length >= 8 ? rawEan : eans[0]);
 
-  /* (b) marca + modelo */
-  if (model) add("marca+modelo", joinUnique([brand, model]));
+  /* (b) marca + modelo: la forma mas precisa sin EAN. */
+  const brandModel = Boolean(brand && model);
+  if (brandModel) add("marca+modelo", joinUnique([brand, model]));
 
-  /* (c) referencia / part number sola (y el modelo solo si no hay referencia) */
+  /* (c) referencia / part number. */
   const ref = clean(body.partNumber || body.reference || body.mpn);
   if (ref) add("referencia", ref);
-  if (model && brand) add("modelo", model);
 
-  /* (d) marca + titulo recortado */
-  if (title) add(brand || model ? "marca+titulo" : "titulo", joinUnique([brand, words(title, 12)]));
+  /* (d) marca + titulo SIEMPRE antes que el modelo suelto, para que no se
+     quede fuera al recortar a 5 consultas. */
+  if (title) add(brand ? "marca+titulo" : "titulo", joinUnique([brand, words(title, 12)]));
 
-  /* (e) titulo en ingles para fuentes internacionales (se rellena fuera) */
+  /* (e) modelo solo si NO se pudo formar marca+modelo. */
+  if (model && !brandModel) add("modelo", model);
+
+  /* (f) titulo en ingles para fuentes internacionales (se rellena fuera). */
   if (title) out.push({ via: "titulo_en", q: "", intl: true, lazyEnglish: true });
 
   /* Otros EAN del mismo producto, si los hay, van tras lo anterior. */
@@ -80,8 +91,8 @@ function buildQueries(body, opts) {
   /* Sin ningun dato util: al menos la consulta cruda. */
   if (!out.length && clean(body.query)) add("titulo", body.query);
 
-  /* El tope respeta el orden; el paso en ingles se conserva siempre si cabe. */
+  /* Tope duro: 5 consultas. */
   return out.slice(0, maxQ);
 }
 
-module.exports = { buildQueries, joinUnique, clean };
+module.exports = { buildQueries, joinUnique, clean, MAX_QUERIES };

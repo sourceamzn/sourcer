@@ -2,6 +2,7 @@ const { config, amazonReady } = require("../config");
 const { signRequest } = require("./sigv4");
 const { getAccessToken } = require("./lwa");
 const { jsonFetch } = require("./http");
+const retry = require("./retry");
 
 function endpointFor(region) {
   if (region.startsWith("na")) return "sellingpartnerapi-na.amazon.com";
@@ -9,6 +10,8 @@ function endpointFor(region) {
   return "sellingpartnerapi-eu.amazon.com";
 }
 
+/* Reintento con espera exponencial + jitter. SP-API devuelve 429 con
+   `Retry-After` en segundos: se respeta; si no hay cabecera se usa la base. */
 async function call(pathname, options = {}) {
   if (!amazonReady()) {
     return { ok: false, reason: "amazon_not_configured" };
@@ -24,30 +27,38 @@ async function call(pathname, options = {}) {
   const qs = query.toString();
   const url = "https://" + host + pathname + (qs ? "?" + qs : "");
   const body = options.body ? JSON.stringify(options.body) : "";
+  const cfg = config.spapi || {};
+  const maxRetries = cfg.maxRetries == null ? 3 : cfg.maxRetries;
+  const base = cfg.retryMs == null ? 600 : cfg.retryMs;
 
-  const signed = signRequest({
-    method,
-    url,
-    region: config.region,
-    service: "execute-api",
-    accessKeyId: config.amazon.accessKeyId,
-    secretAccessKey: config.amazon.secretAccessKey,
-    body
-  });
+  let res = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const signed = signRequest({
+      method,
+      url,
+      region: config.region,
+      service: "execute-api",
+      accessKeyId: config.amazon.accessKeyId,
+      secretAccessKey: config.amazon.secretAccessKey,
+      body
+    });
 
-  const headers = {
-    "x-amz-date": signed.amzDate,
-    "x-amz-access-token": accessToken,
-    Authorization: signed.authorization
-  };
-  if (body) headers["content-type"] = "application/json";
+    const headers = {
+      "x-amz-date": signed.amzDate,
+      "x-amz-access-token": accessToken,
+      Authorization: signed.authorization
+    };
+    if (body) headers["content-type"] = "application/json";
 
-  const res = await jsonFetch(url, { method, headers, body: body || undefined }, options.timeoutMs || 20000);
+    res = await jsonFetch(url, { method, headers, body: body || undefined }, options.timeoutMs || 20000);
+    if (res.ok) return { ok: true, data: res.data, status: res.status };
+    if (!retry.retryable(res.status) || attempt === maxRetries) break;
 
-  if (!res.ok) {
-    return { ok: false, reason: "spapi_http_" + res.status, status: res.status, data: res.data, error: res.error };
+    const retryAfter = res.headers && (res.headers["retry-after"] || res.headers["Retry-After"]);
+    await new Promise(function (r) { setTimeout(r, retry.backoffMs(attempt, retryAfter, base)); });
   }
-  return { ok: true, data: res.data, status: res.status };
+
+  return { ok: false, reason: "spapi_http_" + res.status, status: res.status, data: res.data, error: res.error };
 }
 
 function searchCatalogItems(params) {
@@ -91,11 +102,29 @@ function getMyFeesEstimate(asin, listingPriceAmount, currency) {
   });
 }
 
+/* Listings Restrictions API: marca (no descarta) si el listado exige aprobacion
+   o tiene restricciones de marca/categoria. Requiere SPAPI_SELLER_ID. */
+function getListingsRestrictions(asin, sellerId) {
+  const sid = sellerId || config.amazon.sellerId;
+  if (!sid) return { ok: false, reason: "seller_id_missing" };
+  return call("/listings/2021-08-01/restrictions", {
+    query: {
+      asin: String(asin || "").toUpperCase(),
+      sellerId: sid,
+      marketplaceIds: config.market,
+      conditionType: "new_new"
+    }
+  });
+}
+
 module.exports = {
   call,
+  backoffMs: retry.backoffMs,
+  retryable: retry.retryable,
   searchCatalogItems,
   getCatalogItem,
   getItemOffers,
   getCompetitivePricing,
-  getMyFeesEstimate
+  getMyFeesEstimate,
+  getListingsRestrictions
 };

@@ -63,6 +63,8 @@ const keepaFicha = require("../lib/keepaficha");
 const events = require("../lib/events");
 const gtinLib = require("../lib/gtin");
 const queriesLib = require("../lib/queries");
+const feesLib = require("../lib/fees");
+const spapi = require("../lib/spapi");
 
 /* ---------- metricas desde un producto Keepa ---------- */
 function keepaCur(prod, idx, scale) {
@@ -127,17 +129,21 @@ function metricsFromKeepa(prod) {
      disparaba siempre "menos de 2 FBA". */
   let offersFba = fbaFromOffers(prod);
   if (offersFba == null && posNum(s.offerCountFBA) > 0) offersFba = posNum(s.offerCountFBA);
-  /* Amazon vende si aparece en la Buy Box de 90 d (antes: precio actual + una lista mal leida). */
-  const bb = buybox.analyze(prod && prod.buyBoxSellerIdHistory, 90);
-  const amazonSells = keepaFicha.amazonSellsFrom(prod, bb, keepaCur(prod, 0, true));
-  const thirdParty = offersTotal > 0 ? Math.max(0, offersTotal - (amazonSells ? 1 : 0)) : (offersFba || 0);
   const fx = keepaFicha.fichaOf(prod);
   if (fx.missing.length) { try { events.add("keepa", { phase: "ficha_missing", asin: prod && prod.asin, missing: fx.missing.join(",") }); } catch (e) {} }
+  const brand = String((prod && prod.brand) || "").trim();
+  const manufacturer = String(fx.ficha.manufacturer || "").trim();
+  const sellerName = (prod && prod.__topSellerName) || "";
+  /* Amazon vende si aparece en la Buy Box de 90 d (antes: precio actual + una lista mal leida). */
+  const bb = buybox.analyze(prod && prod.buyBoxSellerIdHistory, 90, undefined, { brand: brand, manufacturer: manufacturer, sellerName: sellerName });
+  const amazonSells = keepaFicha.amazonSellsFrom(prod, bb, keepaCur(prod, 0, true));
+  const thirdParty = offersTotal > 0 ? Math.max(0, offersTotal - (amazonSells ? 1 : 0)) : (offersFba || 0);
   const ean = fx.ficha.eans[0] || (prod && prod.eanList && prod.eanList[0]) || (prod && prod.upcList && prod.upcList[0]) || "";
-  return {
+  const out = {
     asin: String((prod && prod.asin) || "").toUpperCase(),
     title: (prod && prod.title) || "",
-    brand: (prod && prod.brand) || "",
+    brand: brand,
+    manufacturer: manufacturer,
     image: keepaImageUrl(prod),
     imageSource: keepaImageUrl(prod) ? "amazon (Keepa)" : "",
     url: prod && prod.asin ? "https://www.amazon.es/dp/" + String(prod.asin).toUpperCase() : "",
@@ -147,8 +153,12 @@ function metricsFromKeepa(prod) {
     categoryTree: (prod && prod.categoryTree) || [],
     buyBox: bb, amazonSells: amazonSells,
     ficha: fx.ficha, eans: fx.ficha.eans,
-    sellerName: (prod && prod.__topSellerName) || ""
+    fees: feesLib.fromKeepa(prod),
+    sellerName: sellerName
   };
+  /* Historial crudo para clasificar los vendedores despues (no se serializa). */
+  Object.defineProperty(out, "__bbHist", { value: prod && prod.buyBoxSellerIdHistory, enumerable: false });
+  return out;
 }
 
 /* ---------- cliente Keepa (product / search / bestsellers / finder) ---------- */
@@ -272,6 +282,8 @@ async function keepaFinder(body) {
 
 /* ---------- Fase 2 · buscar proveedor por debajo del precio maximo ---------- */
 const identity = require("../lib/identity");
+const matchLib = require("../lib/match");
+const enrichLib = require("../lib/enrich");
 const MARKET = "https://www.amazon.es";
 function supplierQuery(body) {
   /* Primera consulta de la cascada (la lista completa la monta queries.buildQueries). */
@@ -371,7 +383,7 @@ async function searchSuppliers(body, priceMax, hooks) {
   }
   const sq = supplierQuery(body);
   const cfgS = config.suppliers || { maxResults: 20, maxResultsCap: 40, maxQueries: 4, maxQueriesPaid: 2, enough: 5 };
-  const qlist = queriesLib.buildQueries(body, { maxQueries: 6 });
+  const qlist = queriesLib.buildQueries(body, { maxQueries: 5 });
   const srcEans = gtinLib.normalizeAll([].concat((body && body.eans) || [], (body && body.ean) || []));
   const qTokens = tokensOf([body && body.brand, body && body.model, body && body.name].filter(Boolean).join(" ") || sq.q);
   const q = sq.q;
@@ -405,39 +417,6 @@ async function searchSuppliers(body, priceMax, hooks) {
     return out;
   }
   const srcCodes = modelCodes((body && body.model || "") + " " + srcText);
-  function modelGate(name) {
-    if (!srcCodes.length) return { ok: true };
-    const oc = modelCodes(name);
-    if (!oc.length) return { ok: true };
-    const hit = oc.some(function (c) { return srcCodes.some(function (s) { return c === s || (c.length >= 5 && s.length >= 5 && (c.indexOf(s) !== -1 || s.indexOf(c) !== -1)); }); });
-    return hit ? { ok: true } : { ok: false, reason: "Otro modelo: la oferta dice " + oc.slice(0, 2).join("/") + " y el origen " + srcCodes.slice(0, 2).join("/") + "." };
-  }
-  /* Puerta de marca: si el origen tiene marca, la oferta debe nombrarla (en el
-     titulo o en su campo marca) o coincidir en codigo de modelo. Misma categoria
-     con otra marca NO es el mismo producto. */
-  const brandNorm = String((body && body.brand) || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "");
-  function brandGate(it, name) {
-    if (brandNorm.length < 3) return { ok: true };
-    const hay = (String(name || "") + " " + String((it && it.brand) || "")).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "");
-    if (hay.indexOf(brandNorm) !== -1) return { ok: true };
-    const oc = modelCodes(name);
-    if (srcCodes.length && oc.some(function (c) { return srcCodes.some(function (s) { return c === s; }); })) return { ok: true };
-    return { ok: false, reason: "Marca no coincide: el origen es " + body.brand + " y la oferta no la indica." };
-  }
-  /* Puerta de color: si ambos dicen color y no comparten ninguno, es otra variante. */
-  const COLORS = { negro: "n", black: "n", blanco: "b", white: "b", rojo: "r", red: "r", azul: "a", blue: "a", verde: "v", green: "v", gris: "g", grey: "g", gray: "g", rosa: "p", pink: "p", amarillo: "y", yellow: "y", naranja: "o", orange: "o", morado: "m", purple: "m", dorado: "d", gold: "d", plateado: "s", silver: "s", marron: "t", brown: "t", beige: "e" };
-  function colorsOf(s) {
-    const set = {};
-    tokensOf(s).forEach(function (t) { if (COLORS[t]) set[COLORS[t]] = 1; });
-    return Object.keys(set);
-  }
-  const srcColors = colorsOf(srcText + " " + ((body && body.color) || ""));
-  function colorGate(name) {
-    if (!srcColors.length) return { ok: true };
-    const oc = colorsOf(name);
-    if (!oc.length) return { ok: true };
-    return oc.some(function (c) { return srcColors.indexOf(c) !== -1; }) ? { ok: true } : { ok: false, reason: "Otro color/variante respecto al origen." };
-  }
   const rejected = [];
   const matches = [], above = [], searched = [];
   if (!q) return { q: "", via: "", matches: matches, searched: searched, coverage: coverageLib.buildCoverage({ searched: searched, rejected: rejected, matches: matches }) };
@@ -559,21 +538,14 @@ async function searchSuppliers(body, priceMax, hooks) {
           return true;
         }
         if (open && !/[a-z]{3}/i.test(nm.normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) return true;
-        const mg = modelGate(nm);
-        if (!mg.ok) { rejected.push({ source: id, kind: "modelo", name: nm.slice(0, 80), reason: mg.reason }); return false; }
-        const bg = brandGate(it, nm);
-        if (!bg.ok) { rejected.push({ source: id, kind: "marca", name: nm.slice(0, 80), reason: bg.reason }); return false; }
-        const cg = colorGate(nm);
-        if (!cg.ok) { rejected.push({ source: id, kind: "color", name: nm.slice(0, 80), reason: cg.reason }); return false; }
+        /* Fase 4: el tipo ya no descarta; solo alimenta la puntuacion (15 puntos).
+           Modelo, marca y color tampoco descartan aqui: lo decide match.score. */
         const st = ptype.sameType(srcText, nm);
-        if (!st.ok) { rejected.push({ source: id, kind: "tipo", name: nm.slice(0, 80), reason: st.reason }); return false; }
-        const conceptHit = open && ptype.conceptsOf(srcText).some(function (c) { return ptype.conceptsOf(nm).indexOf(c) !== -1; });
-        /* Generico: comparte al menos un termino del perfil (categoria Keepa + sustantivo, es/en). */
+        const conceptHit = ptype.conceptsOf(srcText).some(function (c) { return ptype.conceptsOf(nm).indexOf(c) !== -1; });
         const profHit = (tprof.es.length + tprof.en.length) > 0 && typeprofile.hits(tprof, nm).length >= (open ? 1 : 2);
-        const ok = conceptHit || profHit || (relevance(nm, qTokens) >= (open ? 0.34 : 0.4) && typeGate(nm, open));
-        if (ok && open && !conceptHit) it.__review = true; /* aceptado solo por tipo: nunca "exacto" */
-        if (!ok) rejected.push({ source: id, kind: "tipo", name: nm.slice(0, 80), reason: "No es el mismo tipo de producto." });
-        return ok;
+        it.__typeOk = st.ok && (conceptHit || profHit || (relevance(nm, qTokens) >= (open ? 0.34 : 0.4) && typeGate(nm, open)));
+        it.__typeReason = st.ok ? "" : st.reason;
+        return true;
       });
       }
       entry.count = items.length;
@@ -607,17 +579,30 @@ async function searchSuppliers(body, priceMax, hooks) {
           checkedAt: new Date().toISOString()
         };
         rec.role = roleOf(adapters[id], rec);
+        /* Fase 4: puntuacion 0-100. Solo el conflicto fuerte (EAN, pack o
+           modelo distintos) descarta; el resto queda "a revisar". */
+        const mt = matchLib.score(srcId, { name: it.name, brand: it.brand, ean: it.ean }, { typeOk: it.__typeOk, typeReason: it.__typeReason });
+        rec.matchScore = mt.score;
+        rec.matchBand = mt.band;
+        rec.matchReasons = mt.reasons;
+        rec.matchChecks = mt.checks;
+        rec.__typeOk = it.__typeOk === true;
+        if (mt.strongConflict || mt.band === "descartar") {
+          rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: mt.reasons[0] || "Coincidencia insuficiente.", score: mt.score });
+          return;
+        }
         const cmp = identity.compare(srcId, { name: it.name, brand: it.brand, ean: it.ean });
-        rec.match = cmp.verdict === "exacto" ? "exacto" : cmp.verdict === "probable" ? "probable" : cmp.verdict === "variante" ? "variante" : "equivalente";
-        if (cmp.verdict === "equivalente" && rec.rel >= 0.75 && !it.ean) rec.match = "equivalente";
-        rec.identity = { verdict: cmp.verdict, reason: cmp.reason, checks: cmp.checks, score: cmp.score, matching: cmp.matching, conflicting: cmp.conflicting };
-        if (cmp.verdict === "variante") { rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: cmp.reason, score: cmp.score, conflicting: cmp.conflicting }); return; }
-        if (cmp.verdict === "distinto") { rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: cmp.reason }); return; }
+        rec.match = mt.band === "verificado" ? (mt.eanOk ? "exacto" : "probable") : "equivalente";
+        rec.identity = { verdict: cmp.verdict, reason: mt.reasons.join(" · ") || cmp.reason, checks: mt.checks, score: mt.score, matching: cmp.matching, conflicting: cmp.conflicting };
         rec.imageOk = /^https?:\/\//i.test(String(rec.image || ""));
         if (titlePrice) { rec.priceFromTitle = true; rec.priceText = "desde " + price.toFixed(2).replace(".", ",") + " € (leído del título, confirmar)"; }
         if (price <= 0) { rec.noPrice = true; rec.priceText = rec.priceText || "Contactar para precio"; }
-        if (it.__review || (weakId && rec.match !== "exacto")) { rec.review = true; rec.match = rec.match === "exacto" ? "exacto" : "equivalente"; rec.reviewNote = "Candidato a revisar: mismo tipo por categoria/nombre; compara la foto con la tuya."; }
-        rec.state = identity.stateOf(rec, cmp);
+        if (mt.band === "revisar") {
+          rec.review = true;
+          rec.reviewNote = "Candidato a revisar: coincidencia " + mt.score + "/100; compara la foto con la tuya.";
+        }
+        if (weakId) { rec.review = true; rec.reviewNote = rec.reviewNote || "Identidad de origen débil: candidato a revisar."; }
+        rec.state = mt.band === "verificado" ? "verificado" : "candidato";
         recsOut.push(rec);
         if (price <= 0) { matches.push(rec); return; }
         if (priceMax > 0 && price > priceMax) { above.push(rec); return; }
@@ -641,6 +626,44 @@ async function searchSuppliers(body, priceMax, hooks) {
     })());
   }
   await Promise.all(workers);
+
+  /* Fase 4 · las ofertas "a revisar" sin EAN se contrastan abriendo su ficha
+     (JSON-LD: gtin/mpn/sku/marca) y se vuelven a puntuar. Si el EAN leido es
+     distinto al de Amazon, caen como conflicto fuerte. */
+  const cfgM = config.match || {};
+  const enrichMax = cfgM.enrichMax == null ? 6 : cfgM.enrichMax;
+  if (enrichMax > 0) {
+    const targets = matches.filter(function (r) {
+      return r.matchBand === "revisar" && !r.ean && /^https?:\/\//i.test(String(r.url || ""));
+    }).sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); }).slice(0, enrichMax);
+    if (targets.length) {
+      try {
+        const got = await enrichLib.enrich(targets, { max: enrichMax, timeoutMs: cfgM.enrichMs || 6000 });
+        const removed = [];
+        targets.forEach(function (rec) {
+          if (!rec.enriched) return;
+          const mt = matchLib.score(srcId, { name: rec.name, brand: rec.brand, ean: rec.enriched.gtin || "" }, { typeOk: rec.__typeOk });
+          rec.matchScore = mt.score;
+          rec.matchBand = mt.band;
+          rec.matchReasons = mt.reasons;
+          rec.matchChecks = mt.checks;
+          if (rec.enriched.gtin) rec.ean = rec.enriched.gtin;
+          rec.match = mt.band === "verificado" ? (mt.eanOk ? "exacto" : "probable") : "equivalente";
+          rec.state = mt.band === "verificado" ? "verificado" : "candidato";
+          rec.review = mt.band !== "verificado";
+          rec.matchEnriched = { gtin: rec.enriched.gtin || "", mpn: rec.enriched.mpn || "", sku: rec.enriched.sku || "" };
+          if (mt.strongConflict || mt.band === "descartar") removed.push(rec);
+        });
+        removed.forEach(function (rec) {
+          const i = matches.indexOf(rec);
+          if (i !== -1) matches.splice(i, 1);
+          rejected.push({ source: rec.source, kind: "identidad", name: String(rec.name || "").slice(0, 80), reason: (rec.matchReasons && rec.matchReasons[0]) || "EAN distinto leido en la ficha del proveedor.", score: rec.matchScore });
+        });
+        try { events.add("job", { phase: "match_enrich", tried: targets.length, found: targets.filter(function (r) { return r.enriched; }).length, discarded: removed.length }); } catch (e) {}
+      } catch (e) {}
+    }
+  }
+  matches.forEach(function (r) { delete r.__typeOk; });
 
   /* Con precio en EUR: de mas barato a mas caro. Sin precio (enlaces de
      fabricante/mayorista, candidatos en USD/CNY): por relevancia, detras. */
@@ -763,28 +786,88 @@ const inverso = {
         };
       }
 
-      /* Si un unico vendedor (no Amazon) domina el 97 %+ de la Buy Box, se consulta su nombre
-         (1 token Keepa, cacheado, max 15 por busqueda) para saber si es el fabricante. */
+      /* Para separar fabricante de terceros se consulta el nombre de los
+         vendedores con mas peso (Keepa seller, cacheado, max 15 por busqueda).
+         Asi se puede sumar Amazon + fabricante y contar terceros distintos. */
       const baseM = products.map(metricsFromKeepa).filter(function (m) { return m.asin && m.pvp > 0; });
+      const bbCfg = config.buybox || { sellerLookups: 3 };
       let sellerLookups = 0;
       for (let i = 0; i < baseM.length; i++) {
-        const bb = baseM[i].buyBox;
-        if (p.bbRule && bb && bb.known && !bb.amazonOnly && bb.topShare >= 0.97 && sellerLookups < 15) {
+        const m = baseM[i], bb = m.buyBox;
+        if (!p.bbRule || !bb || !bb.known) continue;
+        const ids = (bb.breakdown || []).filter(function (x) { return x.role !== "amazon"; })
+          .slice(0, bbCfg.sellerLookups).map(function (x) { return x.id; });
+        if (!ids.length) continue;
+        const names = {};
+        for (let j = 0; j < ids.length && sellerLookups < 15; j++) {
           sellerLookups++;
-          baseM[i].sellerName = await keepaSellerName(bb.topSeller);
+          names[ids[j]] = await keepaSellerName(ids[j]);
+        }
+        if (!Object.keys(names).length) continue;
+        m.sellerNames = names;
+        m.buyBox = buybox.analyze(m.__bbHist, 90, undefined, {
+          brand: m.brand, manufacturer: m.manufacturer, sellerNames: names, sellerName: m.sellerName
+        });
+        m.sellerName = m.buyBox.topSellerName || m.sellerName;
+      }
+      notes.push("Buy Box 90 d: " + baseM.filter(function (m) { return m.buyBox && m.buyBox.known; }).length + "/" + baseM.length + " con historial; " + sellerLookups + " vendedor(es) consultado(s).");
+
+      /* Fase 5 · tarifas reales. Keepa las trae en la misma ficha; si falta
+         alguna y SP-API esta configurado, se pide getMyFeesEstimate (maximo
+         SPAPI_FEES_MAX por busqueda). Si tampoco hay dato, plan.js usa la
+         estimacion del PDF y lo indica en `plan.fees.source`. */
+      const cfgSp = config.spapi || {};
+      let spFees = 0;
+      if (amazonReady() && cfgSp.feesMax > 0) {
+        const need = baseM.filter(function (m) {
+          return !m.fees || m.fees.referralPct == null || m.fees.fbaFee == null;
+        }).slice(0, cfgSp.feesMax);
+        for (let i = 0; i < need.length; i++) {
+          try {
+            const r = await spapi.getMyFeesEstimate(need[i].asin, need[i].pvp, "EUR");
+            if (!r.ok) continue;
+            const f = feesLib.fromEstimate(r.data, need[i].pvp);
+            if (f.referralPct != null || f.fbaFee != null) { need[i].fees = f; spFees++; }
+          } catch (e) {}
         }
       }
-      notes.push("Buy Box 90 d: " + baseM.filter(function (m) { return m.buyBox && m.buyBox.known; }).length + "/" + baseM.length + " con historial; " + sellerLookups + " vendedor(es) unico(s) consultado(s).");
-      const cands = baseM
-        .map(function (m) {
-          const plan = planFor(m, p);
-          return Object.assign({}, m, { plan: plan, estado: plan.estado });
-        })
-        .sort(function (a, b) {
-          const rank = { apt: 0, casi: 1, descarte: 2 };
-          if (rank[a.estado] !== rank[b.estado]) return rank[a.estado] - rank[b.estado];
-          return (a.plan.discount || 0) - (b.plan.discount || 0);
-        });
+      const realFees = baseM.filter(function (m) {
+        return m.fees && !m.fees.partial && m.fees.source !== "estimado";
+      }).length;
+      if (baseM.length) {
+        notes.push("Tarifas reales: " + realFees + "/" + baseM.length +
+          (spFees ? " (" + spFees + " por SP-API)" : "") + "; el resto, estimacion del PDF.");
+      }
+
+      /* Restricciones de listado (solo aviso, nunca descarte). */
+      let restricted = 0;
+      let cands = baseM.map(function (m) {
+        const plan = planFor(m, p);
+        return Object.assign({}, m, { plan: plan, estado: plan.estado });
+      });
+      const rank = { apt: 0, casi: 1, descarte: 2 };
+      const byRank = function (a, b) {
+        if (rank[a.estado] !== rank[b.estado]) return rank[a.estado] - rank[b.estado];
+        return (a.plan.discount || 0) - (b.plan.discount || 0);
+      };
+      if (amazonReady() && config.amazon.sellerId && cfgSp.restrictionsMax > 0 && cands.length) {
+        const top = cands.slice().sort(byRank).slice(0, cfgSp.restrictionsMax);
+        for (let i = 0; i < top.length; i++) {
+          try {
+            const r = await spapi.getListingsRestrictions(top[i].asin);
+            if (!r.ok) continue;
+            const rs = feesLib.restrictionsFrom(r.data);
+            if (!rs.length) continue;
+            top[i].restrictions = rs;
+            restricted++;
+            const plan = planFor(top[i], p);
+            top[i].plan = plan;
+            top[i].estado = plan.estado;
+          } catch (e) {}
+        }
+        if (restricted) notes.push("Restricciones de listado en " + restricted + " candidato(s): solo aviso, no descarte.");
+      }
+      cands.sort(byRank);
 
       const counts = { apt: 0, casi: 0, descarte: 0 };
       cands.forEach(function (c) { counts[c.estado] = (counts[c.estado] || 0) + 1; });
@@ -799,19 +882,49 @@ const inverso = {
       };
     },
 
-    /* Calculo puro (misma formula) para una ficha manual. */
+    /* Calculo puro (misma formula) para una ficha manual. Con ASIN y SP-API
+       configurado se completan tarifas reales y restricciones de listado. */
     plan: async function (body) {
       const p = planParams(body);
-      const m = (body && body.metrics) || body || {};
+      const m = Object.assign({}, (body && body.metrics) || body || {});
+      const notes = [];
+      const asin = String(m.asin || "").toUpperCase();
+      const pvp = num(m.pvp || m.buybox90 || m.price);
+      if (asin && amazonReady()) {
+        const jobs = [spapi.getMyFeesEstimate(asin, pvp, "EUR").catch(function (e) {
+          return { ok: false, reason: String((e && e.message) || e) };
+        })];
+        if (config.amazon.sellerId) {
+          jobs.push(spapi.getListingsRestrictions(asin).catch(function (e) {
+            return { ok: false, reason: String((e && e.message) || e) };
+          }));
+        }
+        const got = await Promise.all(jobs);
+        if (got[0] && got[0].ok) {
+          const f = feesLib.fromEstimate(got[0].data, pvp);
+          if (f.referralPct != null || f.fbaFee != null) {
+            m.fees = f;
+            notes.push("Tarifas reales por SP-API: referencia " + f.referralPct + " %, FBA " + f.fbaFee + " EUR.");
+          } else {
+            notes.push("SP-API no devolvio tarifas para " + asin + "; se usa la estimacion del PDF.");
+          }
+        }
+        if (got[1] && got[1].ok) {
+          const rs = feesLib.restrictionsFrom(got[1].data);
+          if (rs.length) { m.restrictions = rs; notes.push("Restricciones de listado: " + rs.join(" · ")); }
+        }
+      }
       const plan = planFor({
-        pvp: num(m.pvp || m.buybox90 || m.price),
+        pvp: pvp,
         sales: num(m.sales),
         thirdParty: num(m.thirdParty),
         historyDays: m.historyDays == null ? null : num(m.historyDays),
         brandRestricted: !!m.brandRestricted, hazmat: !!m.hazmat, amazonOnly: !!m.amazonOnly,
-        buyBox: m.buyBox || null, sellerName: m.sellerName || "", brand: m.brand || ""
+        buyBox: m.buyBox || null, sellerName: m.sellerName || "",
+        brand: m.brand || "", manufacturer: m.manufacturer || "",
+        fees: m.fees || null, restrictions: m.restrictions || null
       }, p);
-      return { ok: true, data: { source: "inverso", kind: "plan", plan: plan, params: p } };
+      return { ok: true, data: { source: "inverso", kind: "plan", plan: plan, params: p, notes: notes } };
     },
 
     /* Fase 2 · buscar donde comprar por debajo del precio maximo. */

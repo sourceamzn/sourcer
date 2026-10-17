@@ -10,7 +10,7 @@ async function jsonFetch(url, options = {}, timeoutMs = 15000) {
     } catch (e) {
       data = text;
     }
-    return { ok: res.ok, status: res.status, data };
+    return { ok: res.ok, status: res.status, data, headers: Object.fromEntries(res.headers.entries()) };
   } catch (e) {
     return { ok: false, status: 0, error: String((e && e.message) || e) };
   } finally {

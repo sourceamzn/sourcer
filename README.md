@@ -136,7 +136,11 @@ Todas opcionales al arrancar. Ver `.env.example`.
 | Variable | Para qué |
 |----------|----------|
 | `PORT` | Puerto (Railway lo inyecta solo) |
-| `ALLOWED_ORIGINS` | CORS. `*` al inicio |
+| `API_KEYS` | Claves separadas por comas. El navegador envía una en `X-API-Key`. Sin ella en producción, `/sourcing`, `/alerts` y `/suppliers` responden 503 |
+| `ALLOWED_ORIGINS` | CORS, separados por comas. En producción: `https://tools.bruneagroup.com` (nunca `*`) |
+| `RATE_LIMIT_PER_MIN` | Peticiones por minuto y clave/IP (por defecto `60`) |
+| `BEACON_RATE_PER_MIN` / `BEACON_MAX_BYTES` / `BEACON_MAX_LINES` | Topes del beacon de diagnóstico (`30`, `16384`, `25`) |
+| `BB_SELLER_LOOKUPS` / `BB_MANUFACTURER_MIN` / `BB_THIRD_MAX` / `BB_SINGLE_THIRD` | Regla Buy Box: vendedores a consultar y umbrales (`3`, `95`, `5`, `97`) |
 | `VAULT_KEY` | Cifra los tokens en el servidor (`openssl rand -hex 32`) |
 | `MARKETPLACE_ID` | ES = `A1RKKUPIHCS9HS` |
 | `SPAPI_REGION` | `eu-west-1` para Europa |
@@ -156,6 +160,9 @@ Todas opcionales al arrancar. Ver `.env.example`.
 ## Seguridad
 
 - Primer nivel **solo lectura** en SP-API.
+- Las rutas privadas exigen `X-API-Key`; sin `API_KEYS` en producción fallan cerradas.
+- CORS solo acepta los orígenes de `ALLOWED_ORIGINS` (sin `*` en producción).
+- Límite de peticiones por minuto y topes de tamaño/frecuencia en `/debug/beacon`.
 - Los secretos viven en el servidor (variables de entorno / vault), nunca en el
   navegador.
 - No subas `.env` a GitHub (ya está en `.gitignore`).

@@ -24,7 +24,7 @@ test("buybox: un unico vendedor con nombre de marca -> fabricante", () => {
   const an = buybox.analyze(hist, 90);
   assert.equal(an.topShare, 1);
   assert.equal(buybox.verdict(an, "Acme Official", "Acme").kind, "fabricante");
-  assert.equal(buybox.verdict(an, "Random Store", "Acme").kind, "mixto");
+  assert.equal(buybox.verdict(an, "Random Store", "Acme").kind, "a_revisar");
 });
 test("buybox: sin historial no inventa (sin_dato) y no bloquea", () => {
   assert.equal(buybox.analyze([], 90).known, false);
@@ -34,6 +34,45 @@ test("buybox: sin historial no inventa (sin_dato) y no bloquea", () => {
 test("buybox: los tramos de -1/-2 (sin Buy Box) no cuentan", () => {
   const hist = [keepaMin(80), "-1", keepaMin(5), "-1"];
   assert.equal(buybox.analyze(hist, 90).known, false);
+});
+test("buybox: fabricante por manufacturer y sufijos societarios", () => {
+  assert.equal(buybox.isManufacturerSeller("ACME, S.L.", "", "Acme"), true);
+  assert.equal(buybox.isManufacturerSeller("Acme GmbH", "Acme", "Acme Manufacturing"), true);
+  assert.equal(buybox.isManufacturerSeller("Acme Ltd.", "Acme", ""), true);
+  assert.equal(buybox.isManufacturerSeller("Random Store", "Acme", "Acme"), false);
+  assert.equal(buybox.isManufacturerSeller("", "Acme", "Acme"), null);
+});
+test("buybox: desglose Amazon/fabricante/terceros con vendedores distintos", () => {
+  const hist = [
+    keepaMin(90), "A1AT7YVPFBWXBL",
+    keepaMin(60), "SELLER-M",
+    keepaMin(30), "SELLER-T"
+  ];
+  const an = buybox.analyze(hist, 90, undefined, {
+    brand: "Acme", manufacturer: "Acme",
+    sellerNames: { "A1AT7YVPFBWXBL": "Amazon", "SELLER-M": "Acme SL", "SELLER-T": "Random Store" }
+  });
+  assert.equal(an.classified, true);
+  assert.equal(an.sellers, 3);
+  assert.equal(an.thirdSellers, 1);
+  assert.ok(Math.abs(an.amazonShare - 0.333) < 0.01);
+  assert.ok(Math.abs(an.manufacturerShare - 0.333) < 0.01);
+  assert.ok(Math.abs(an.thirdShare - 0.333) < 0.01);
+  assert.equal(an.breakdown.filter((x) => x.role === "fabricante").length, 1);
+});
+test("buybox: Amazon + fabricante >= 95 % no apto", () => {
+  const an = {
+    known: true, classified: true, amazonShare: 0.4, manufacturerShare: 0.55,
+    thirdShare: 0, unknownShare: 0, thirdSellers: 0, topThirdShare: 0, sellers: 2
+  };
+  assert.equal(buybox.verdict(an, "", "Acme", "Acme").kind, "amazon+fabricante");
+});
+test("buybox: terceros < 5 % no apto", () => {
+  const an = {
+    known: true, classified: true, amazonShare: 0.5, manufacturerShare: 0.44,
+    thirdShare: 0.04, unknownShare: 0, thirdSellers: 1, topThirdShare: 0.04, sellers: 3
+  };
+  assert.equal(buybox.verdict(an, "", "Acme", "Acme").kind, "terceros");
 });
 
 /* ---------- planFor: formula y regla Buy Box configurable ---------- */
@@ -62,6 +101,35 @@ test("plan: sin dato de Buy Box no se descarta", () => {
   const p = plan.planFor(m, plan.PLAN_DEFAULT);
   assert.equal(p.buyBox.kind, "sin_dato");
   assert.equal(p.estado, "apt");
+});
+test("plan: Amazon + fabricante >= 95 % descarta", () => {
+  const m = {
+    pvp: 50, sales: 20, brand: "Acme", manufacturer: "Acme",
+    buyBox: { known: true, classified: true, amazonShare: 0.4, manufacturerShare: 0.56, thirdShare: 0.04, unknownShare: 0, thirdSellers: 1, topThirdShare: 0.04, sellers: 3 }
+  };
+  const p = plan.planFor(m, plan.PLAN_DEFAULT);
+  assert.equal(p.buyBox.kind, "amazon+fabricante");
+  assert.equal(p.estado, "descarte");
+  assert.ok(p.reasons.join(" ").indexOf("No hay hueco") !== -1);
+});
+test("plan: terceros < 5 % descarta", () => {
+  const m = {
+    pvp: 50, sales: 20, brand: "Acme",
+    buyBox: { known: true, classified: true, amazonShare: 0.5, manufacturerShare: 0.44, thirdShare: 0.04, unknownShare: 0, thirdSellers: 1, topThirdShare: 0.04, sellers: 3 }
+  };
+  assert.equal(plan.planFor(m, plan.PLAN_DEFAULT).estado, "descarte");
+});
+test("plan: un unico tercero con >= 97 % queda a revisar, no se descarta", () => {
+  const m = {
+    pvp: 50, sales: 20, brand: "Acme",
+    buyBox: { known: true, classified: true, amazonShare: 0, manufacturerShare: 0, thirdShare: 0.97, unknownShare: 0, thirdSellers: 1, topThirdShare: 0.97, sellers: 1 }
+  };
+  const on = plan.planFor(m, plan.PLAN_DEFAULT);
+  assert.equal(on.buyBox.kind, "a_revisar");
+  assert.equal(on.estado, "casi");
+  assert.ok(on.reasons.join(" ").indexOf("a revisar") !== -1);
+  const off = plan.planFor(m, Object.assign({}, plan.PLAN_DEFAULT, { bbRule: 0 }));
+  assert.equal(off.estado, "apt");
 });
 test("planParams: lee bbRule de params o filters y mantiene el resto a 0", () => {
   assert.equal(plan.planParams({ filters: { bbRule: 0 } }).bbRule, 0);
