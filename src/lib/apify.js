@@ -9,6 +9,7 @@
      actor_http_<status>, actor_error, sin_resultados. */
 
 const { config, apifyReady } = require("../config");
+const events = require("./events");
 
 const cache = new Map();
 /* Consumo real por actor (peticiones ejecutadas, no servidas de cache). Visible en /health. */
@@ -63,6 +64,7 @@ async function runActor(actorId, input, opts) {
   if (opts.limit) params.push("limit=" + opts.limit);
   const url = config.apify.base + "/v2/acts/" + actorPath(actorId) + "/run-sync-get-dataset-items?" + params.join("&");
 
+  const t0 = Date.now();
   const ctrl = new AbortController();
   const timer = setTimeout(function () { ctrl.abort(); }, (timeoutSec + 8) * 1000);
   try {
@@ -78,16 +80,20 @@ async function runActor(actorId, input, opts) {
     if (op) { op.calls += 1; op.spent += Number(opts.estCost) || 0.01; }
     if (!res.ok) {
       /* El token nunca se devuelve ni se registra. */
-      const msg = data && data.error && data.error.message ? String(data.error.message).slice(0, 160) : "";
-      stats.errors += 1; stats.lastError = { actor: actorId, status: res.status, at: new Date().toISOString() };
+      let msg = data && data.error && data.error.message ? String(data.error.message).slice(0, 300) : "";
+      if (!msg && text) msg = String(text).replace(/\s+/g, " ").slice(0, 300);
+      stats.errors += 1; stats.lastError = { actor: actorId, status: res.status, detail: msg, at: new Date().toISOString() };
+      events.add("apify", { actor: actorId, ok: false, status: res.status, ms: Date.now() - t0, detail: msg, inputKeys: Object.keys(input || {}).join(","), inputSample: JSON.stringify(input || {}).slice(0, 300) });
       return { ok: false, reason: "actor_http_" + res.status, detail: msg, items: [] };
     }
     const items = Array.isArray(data) ? data : [];
+    events.add("apify", { actor: actorId, ok: items.length > 0, status: res.status, ms: Date.now() - t0, items: items.length });
     if (!items.length) return { ok: false, reason: "sin_resultados", items: [] };
     cacheSet(k, items);
     return { ok: true, items: items };
   } catch (e) {
     const aborted = e && e.name === "AbortError";
+    events.add("apify", { actor: actorId, ok: false, status: aborted ? "timeout" : "error", ms: Date.now() - t0, detail: String((e && e.message) || e) });
     return { ok: false, reason: aborted ? "actor_timeout" : "actor_error", items: [] };
   } finally {
     clearTimeout(timer);

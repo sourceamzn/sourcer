@@ -5,6 +5,8 @@ const sourcing = require("./routes/sourcing");
 const coverage = require("./routes/coverage");
 const alerts = require("./routes/alerts");
 const suppliers = require("./routes/suppliers");
+const events = require("./lib/events");
+const debug = require("./routes/debug");
 const scheduler = require("./lib/scheduler");
 const store = require("./lib/store");
 const pkg = require("../package.json");
@@ -24,7 +26,7 @@ app.use(function cors(req, res, next) {
     res.setHeader("Vary", "Origin");
   }
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Debug-Token");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
@@ -35,13 +37,19 @@ app.get("/coverage", coverage);
 app.use("/alerts", alerts);
 app.post("/suppliers/start", suppliers.startSuppliers);
 app.get("/suppliers/status/:id", suppliers.statusSuppliers);
+app.get("/debug/events", events.guard, debug.getEvents);
+app.post("/debug/beacon", debug.beacon);
+app.get("/suppliers/log/:id", events.guard, debug.jobLog);
 app.post("/sourcing/:source/:action", sourcing);
 
 /* Inicializa el almacen del vigilante en segundo plano (no bloquea el arranque). */
 store.init().catch(function () {});
 
 app.use((req, res) => res.status(404).json({ ok: false, reason: "not_found", path: req.path }));
-app.use((err, req, res, next) => res.status(500).json({ ok: false, reason: String((err && err.message) || err) }));
+app.use((err, req, res, next) => {
+  events.add("error", { path: req.path, msg: String((err && err.message) || err) });
+  res.status(500).json({ ok: false, reason: String((err && err.message) || err) });
+});
 
 if (require.main === module) {
   app.listen(config.port, () => {

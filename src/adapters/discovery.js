@@ -117,9 +117,14 @@ async function apifySearch(q, count) {
     },
     { estCost: 0.01 }
   );
-  if (!r.ok) return { ok: false, reason: r.reason, status: r.status };
+  let r2 = r;
+  if (!r.ok && r.reason === "actor_http_400") {
+    /* Reintento con entrada minima: aisla si el 400 viene de algun parametro opcional. */
+    r2 = await apify.runActor(config.apify.actors.search, { queries: q, countryCode: config.apify.country, languageCode: config.discovery.lang }, { estCost: 0.01 });
+  }
+  if (!r2.ok) return { ok: false, reason: r2.reason, status: r2.status };
   const results = [];
-  r.items.forEach(function (page) {
+  r2.items.forEach(function (page) {
     ((page && page.organicResults) || []).forEach(function (o) {
       if (o && o.url) results.push({ title: o.title, url: o.url, description: o.description });
     });
