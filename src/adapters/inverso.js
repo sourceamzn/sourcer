@@ -50,88 +50,19 @@ function digits(v) {
   return m ? m.join("") : "";
 }
 
-/* ---------- parametros del proceso (mismos tramos y fiscalidad del PDF) ---------- */
-const TIERS = [
-  { max: 9, margin: 18, roi: 30, label: "menos de 10/mes" },
-  { max: 49, margin: 15, roi: 25, label: "10 a 49/mes" },
-  { max: 99, margin: 12.5, roi: 25, label: "50 a 99/mes" },
-  { max: 1e9, margin: 10, roi: 20, label: "100 o mas/mes" }
-];
-const PLAN_DEFAULT = {
-  vat: 21, recargo: 5.2, referral: 15, fbaFee: 3.5, storage: 0, digital: 0, inbound: 0.30,
-  minBB: 0, minSales: 0, minHistory: 0, minThirdParty: 0, minFba: 2,
-  maxDiscount: 0, nearPct: 8, tiers: TIERS
-};
-function planParams(body) {
-  const src = (body && (body.params || body.filters)) || {};
-  const p = Object.assign({}, PLAN_DEFAULT);
-  Object.keys(PLAN_DEFAULT).forEach(function (k) {
-    if (src[k] != null && src[k] !== "") p[k] = num(src[k], PLAN_DEFAULT[k]);
-  });
-  if (Array.isArray(src.tiers) && src.tiers.length) p.tiers = src.tiers;
-  return p;
-}
-function tierFor(sales, p) {
-  const arr = p.tiers || TIERS;
-  for (let i = 0; i < arr.length; i++) if (sales <= arr[i].max) return arr[i];
-  return arr[arr.length - 1];
-}
-
-/* ---------- Fase 1 · Precio maximo de compra (formula literal del PDF) ----------
-   1. PV = precio Buy Box media 90 dias, venta SIN IVA (a descontar).
-   2. Tarifas reales F = (referencia + FBA + almacenamiento + servicios digitales) x 1,21 + 0,30 envío a FBA.
-   3. Coste real maximo = min( (PV - F)/(1 + ROI min), (PV - F) - (margen min x PV) ).
-   4. Precio maximo en web del proveedor (con IVA, sin recargo) = coste real maximo / 1,262 x 1,21.
-   5. Descuento necesario = 1 - precio maximo / PVP de referencia. */
-function planFor(m, p) {
-  p = p || PLAN_DEFAULT;
-  const pvp = num(m.pvp);
-  const sales = num(m.sales);
-  const tier = tierFor(sales, p);
-  const vat = num(p.vat) / 100, recargo = num(p.recargo) / 100;
-  const PV = pvp > 0 ? pvp / (1 + vat) : 0;
-  const referencia = PV * (num(p.referral) / 100);
-  const F = (referencia + num(p.fbaFee) + num(p.storage) + num(p.digital)) * (1 + vat) + num(p.inbound);
-  const cRoi = (PV - F) / (1 + tier.roi / 100);
-  const cMargin = PV - F - (tier.margin / 100) * PV;
-  const costMax = Math.max(0, Math.min(cRoi, cMargin));
-  const priceMax = costMax > 0 ? (costMax / (1 + vat + recargo)) * (1 + vat) : 0;
-  const discount = pvp > 0 ? 1 - priceMax / pvp : 0;
-  const discPct = round2(discount * 100);
-
-  /* Única regla dura del motor: beneficio neto. Sin coste maximo positivo la
-     operacion pierde dinero -> descarte. El resto de criterios del PDF (Buy Box
-     minima, ventas, vendedores terceros, historial, descuento necesario) pasa a
-     AVISOS configurables: informan, no descartan. */
-  const reasons = [];
-  const thirdParty = num(m.thirdParty, 0);
-  const historyDays = m.historyDays == null ? null : num(m.historyDays);
-  const fbaKnown = m.offersFba != null && m.offersFba !== "";
-  const fba = num(m.offersFba, 0);
-  const lowFba = fbaKnown && fba < num(p.minFba);
-  const privateLabel = !!m.privateLabel || (fbaKnown && num(m.thirdParty, 0) <= 1 && fba <= 1);
-  const hardDrop = costMax <= 0;
-  if (costMax <= 0) reasons.push("Con las tarifas reales no queda coste maximo positivo: no hay beneficio neto.");
-  if (lowFba) reasons.push("Solo " + fba + " vendedor(es) FBA (minimo " + p.minFba + "): EN REVISION, no apto.");
-  if (privateLabel) reasons.push("Marca privada con exclusividad probable (un unico vendedor): EN REVISION, no apto.");
-  if (!hardDrop) {
-    if (pvp > 0 && pvp < num(p.minBB)) reasons.push("Precio Buy Box " + round2(pvp) + " € por debajo del minimo (" + p.minBB + " €): el descuento necesario puede no conseguirse.");
-    if (sales < num(p.minSales)) reasons.push("Ventas/mes " + round2(sales) + " por debajo del minimo (" + p.minSales + "): poca rotacion.");
-    if (num(p.minThirdParty) > 0 && thirdParty < num(p.minThirdParty)) reasons.push("Solo " + thirdParty + " vendedor(es) tercero(s): si solo vende la marca, es marca privada.");
-    if (historyDays != null && historyDays < num(p.minHistory)) reasons.push("Historial en Keepa de " + historyDays + " dias (minimo " + p.minHistory + "): listing nuevo, a revisar.");
-    if (num(p.maxDiscount) > 0 && discPct > num(p.maxDiscount)) reasons.push("Descuento necesario " + discPct + " % supera el tope " + p.maxDiscount + " %: dificil de conseguir.");
-    if (m.brandRestricted) reasons.push("Marca restringida: se puede solicitar en Seller Central (solo aviso).");
-    if (m.hazmat) reasons.push("Posible hazmat: se vende por FBM (solo aviso).");
-    if (m.amazonOnly) reasons.push("Amazon es el unico otro vendedor: dificilmente cede la Buy Box.");
-  }
-  const estado = hardDrop ? "descarte" : (reasons.length ? "casi" : "apt");
-
-  return {
-    pvp: round2(pvp), pvNet: round2(PV), tier: { margin: tier.margin, roi: tier.roi, label: tier.label },
-    referral: round2(referencia), feesReal: round2(F), costMax: round2(costMax),
-    priceMax: round2(priceMax), discount: discPct, estado: estado, reasons: reasons
-  };
-}
+/* ---------- parametros del proceso (mismos tramos y fiscalidad del PDF) ----------
+   La formula vive en lib/plan.js para poder probarla sin red ni Keepa. */
+const planLib = require("../lib/plan");
+const PLAN_DEFAULT = planLib.PLAN_DEFAULT;
+const planParams = planLib.planParams;
+const tierFor = planLib.tierFor;
+const planFor = planLib.planFor;
+const buybox = require("../lib/buybox");
+const coverageLib = require("../lib/coverage");
+const keepaFicha = require("../lib/keepaficha");
+const events = require("../lib/events");
+const gtinLib = require("../lib/gtin");
+const queriesLib = require("../lib/queries");
 
 /* ---------- metricas desde un producto Keepa ---------- */
 function keepaCur(prod, idx, scale) {
@@ -196,9 +127,13 @@ function metricsFromKeepa(prod) {
      disparaba siempre "menos de 2 FBA". */
   let offersFba = fbaFromOffers(prod);
   if (offersFba == null && posNum(s.offerCountFBA) > 0) offersFba = posNum(s.offerCountFBA);
-  const amazonSells = keepaCur(prod, 0, true) > 0 || num(s.outOfStockPercentage90) < 0;
+  /* Amazon vende si aparece en la Buy Box de 90 d (antes: precio actual + una lista mal leida). */
+  const bb = buybox.analyze(prod && prod.buyBoxSellerIdHistory, 90);
+  const amazonSells = keepaFicha.amazonSellsFrom(prod, bb, keepaCur(prod, 0, true));
   const thirdParty = offersTotal > 0 ? Math.max(0, offersTotal - (amazonSells ? 1 : 0)) : (offersFba || 0);
-  const ean = (prod && prod.eanList && prod.eanList[0]) || (prod && prod.upcList && prod.upcList[0]) || "";
+  const fx = keepaFicha.fichaOf(prod);
+  if (fx.missing.length) { try { events.add("keepa", { phase: "ficha_missing", asin: prod && prod.asin, missing: fx.missing.join(",") }); } catch (e) {} }
+  const ean = fx.ficha.eans[0] || (prod && prod.eanList && prod.eanList[0]) || (prod && prod.upcList && prod.upcList[0]) || "";
   return {
     asin: String((prod && prod.asin) || "").toUpperCase(),
     title: (prod && prod.title) || "",
@@ -209,7 +144,10 @@ function metricsFromKeepa(prod) {
     pvp: round2(pvp), bsr: bsr, sales: Math.round(sales),
     thirdParty: Math.round(thirdParty), offersFba: offersFba == null ? null : Math.round(offersFba),
     historyDays: historyDays(prod), ean: String(ean || ""),
-    categoryTree: (prod && prod.categoryTree) || []
+    categoryTree: (prod && prod.categoryTree) || [],
+    buyBox: bb, amazonSells: amazonSells,
+    ficha: fx.ficha, eans: fx.ficha.eans,
+    sellerName: (prod && prod.__topSellerName) || ""
   };
 }
 
@@ -238,6 +176,16 @@ async function keepaProductsByAsins(asins, offers) {
     if (r.ok && r.data && Array.isArray(r.data.products)) out.push.apply(out, r.data.products);
   }
   return { ok: true, products: out };
+}
+const _sellerCache = {};
+async function keepaSellerName(id) {
+  if (!id) return "";
+  if (_sellerCache[id] != null) return _sellerCache[id];
+  const r = await keepaRequest("seller", { seller: id });
+  let name = "";
+  try { const s = r.ok && r.data && r.data.sellers && r.data.sellers[id]; name = (s && (s.sellerName || s.name)) || ""; } catch (e) {}
+  _sellerCache[id] = name;
+  return name;
 }
 async function keepaSearchProducts(term) {
   const r = await keepaRequest("search", { type: "product", term: String(term), stats: "1" });
@@ -326,6 +274,9 @@ async function keepaFinder(body) {
 const identity = require("../lib/identity");
 const MARKET = "https://www.amazon.es";
 function supplierQuery(body) {
+  /* Primera consulta de la cascada (la lista completa la monta queries.buildQueries). */
+  const first = queriesLib.buildQueries(body, { maxQueries: 1 })[0];
+  if (first && first.q) return { q: first.q, via: first.via };
   const ean = digits(body && body.ean);
   if (ean.length >= 8) return { q: ean, via: "ean" };
   const raw = [body && body.brand, body && body.model, body && body.name].map(function (x) { return String(x == null ? "" : x).trim(); }).filter(Boolean);
@@ -397,9 +348,32 @@ async function searchSuppliers(body, priceMax, hooks) {
     const ry = rank[adapters[y].kind] != null ? rank[adapters[y].kind] : 5;
     return rx - ry;
   });
+  /* Ficha de Amazon: si el frontend no manda EAN/modelo/referencia, se leen de Keepa (1 llamada). */
+  let kpProd = null;
+  if (body && body.asin && keepaReady() && (!body.ean || !body.model || !body.partNumber || !body.categoryTree)) {
+    try {
+      const kp = await withTimeout(keepaProductsByAsins([String(body.asin).toUpperCase()], 0), 6000);
+      kpProd = (kp && kp.products && kp.products[0]) || null;
+    } catch (e) {}
+  }
+  if (kpProd) {
+    const fx = keepaFicha.fichaOf(kpProd);
+    const f = fx.ficha;
+    body = Object.assign({}, body, {
+      eans: gtinLib.normalizeAll([].concat(body.eans || [], body.ean || [], f.eans)),
+      ean: body.ean || f.eans[0] || "",
+      model: body.model || f.model || "",
+      partNumber: body.partNumber || f.partNumber || "",
+      brand: body.brand || String(kpProd.brand || ""),
+      categoryTree: body.categoryTree || kpProd.categoryTree || null
+    });
+    try { events.add("job", { phase: "ficha", asin: body.asin, eans: (body.eans || []).length, model: body.model, partNumber: body.partNumber, missing: fx.missing.join(",") }); } catch (e) {}
+  }
   const sq = supplierQuery(body);
+  const cfgS = config.suppliers || { maxResults: 20, maxResultsCap: 40, maxQueries: 4, maxQueriesPaid: 2, enough: 5 };
+  const qlist = queriesLib.buildQueries(body, { maxQueries: 6 });
+  const srcEans = gtinLib.normalizeAll([].concat((body && body.eans) || [], (body && body.ean) || []));
   const qTokens = tokensOf([body && body.brand, body && body.model, body && body.name].filter(Boolean).join(" ") || sq.q);
-  const eanQ = digits(body && body.ean);
   const q = sq.q;
   const srcId = identity.freezeCard(identity.identityOf(body || {}), body || {});
   const ptype = require("../lib/ptype");
@@ -466,17 +440,10 @@ async function searchSuppliers(body, priceMax, hooks) {
   }
   const rejected = [];
   const matches = [], above = [], searched = [];
-  if (!q) return { q: "", via: "", matches: matches, searched: searched };
+  if (!q) return { q: "", via: "", matches: matches, searched: searched, coverage: coverageLib.buildCoverage({ searched: searched, rejected: rejected, matches: matches }) };
   /* Perfil de tipo generico: categoria Keepa (hoja) + sustantivo del titulo, traducidos. Sin listas. */
   const typeprofile = require("../lib/typeprofile");
-  let catTree = (body && body.categoryTree) || null;
-  if (!catTree && body && body.asin && keepaReady()) {
-    try {
-      const kp = await withTimeout(keepaProductsByAsins([String(body.asin).toUpperCase()], 0), 6000);
-      const p0 = kp && kp.products && kp.products[0];
-      if (p0 && p0.categoryTree) catTree = p0.categoryTree;
-    } catch (e) {}
-  }
+  const catTree = (body && body.categoryTree) || null;
   let tprof = { es: [], en: [], zh: [] };
   try {
     const tr = require("../lib/translate");
@@ -486,8 +453,20 @@ async function searchSuppliers(body, priceMax, hooks) {
     ), 9000);
     if (built && built.es) tprof = built;
   } catch (e) {}
-  const weakId = !eanQ && !(body && body.brand) && !srcCodes.length;
-  const max = clampInt(body && body.max, 12, 3, 24);
+  const weakId = !srcEans.length && !(body && body.brand) && !srcCodes.length;
+  const max = clampInt(body && body.max, cfgS.maxResults, 3, cfgS.maxResultsCap);
+  /* Fuentes internacionales: reciben ademas el titulo traducido al ingles. */
+  const INTL_SOURCES = { alibaba: 1, madeinchina: 1, aliexpress: 1, aliexpress_apify: 1, cjdropshipping: 1, gshopping: 1, discovery: 1 };
+  let _en = null;
+  async function englishQuery() {
+    if (_en !== null) return _en;
+    try {
+      const tr = require("../lib/translate");
+      const v = await withTimeout(tr.marketQuery(body, "en").then(function (t) { return { ok: true, v: t }; }), 6000);
+      _en = v && v.ok ? String(v.v || "").trim().slice(0, 110) : "";
+    } catch (e) { _en = ""; }
+    return _en;
+  }
   /* Presupuesto global y concurrencia: antes se consultaba fuente a fuente en
      serie y la peticion entera superaba el timeout del frontend (70 s) → la
      busqueda "no encontraba nada". Ahora van en paralelo con tope de tiempo. */
@@ -503,61 +482,100 @@ async function searchSuppliers(body, priceMax, hooks) {
     if (hooks.onStart) { try { hooks.onStart(id, entry.sourceLabel); } catch (e) {} }
     if (Date.now() > deadline) { entry.reason = "tiempo_agotado"; entry.ms = 0; searched.push(entry); if (hooks.onSource) { try { hooks.onSource(entry, []); } catch (e) {} } return; }
     try {
-      const r = await withTimeout(
-        adapters[id].actions.search({
-          query: q,
-          max: max,
-          market: (body && body.market) || undefined,
-          ean: (body && body.ean) || "",
-          brand: (body && body.brand) || "",
-          model: (body && body.model) || "",
-          name: (body && body.name) || ""
-        }),
-        /* Las webs de catalogo fijo se cortan a 20 s; las que buscan en toda la red, al presupuesto. */
-        Math.min(Math.max(5000, deadline - Date.now()), rank[adapters[id].kind] != null ? 55000 : 20000)
-      );
-      const data = r && r.ok ? r.data : null;
-      let items = (data && data.items) || [];
-      const rawCount = items.length;
+      const open = adapters[id].kind === "discovery" || adapters[id].kind === "supplier_market";
+      /* Cascada de consultas: se prueban en orden hasta tener suficientes resultados utiles.
+         Las fuentes de pago (Apify) usan pocas; las que ya traducen su consulta, solo una. */
+      const paid = open;
+      const budgetQ = adapters[id].ownQuery ? 1 : (paid ? cfgS.maxQueriesPaid : cfgS.maxQueries);
+      const plan = [];
+      for (let qi = 0; qi < qlist.length && plan.length < budgetQ; qi++) {
+        const qq = qlist[qi];
+        if (qq.intl && !INTL_SOURCES[id]) continue;
+        plan.push(qq);
+      }
+      if (!plan.length) plan.push({ via: sq.via, q: q });
+      const kept = [], seenKey = {};
+      let r = null, rawCount = 0;
+      const tried = [];
+      const queryStats = [];
+      const keepIfNew = function (it, qq) {
+        const k = String(it.url || it.name || "").toLowerCase();
+        if (k && seenKey[k]) return;
+        if (k) seenKey[k] = 1;
+        it.__via = qq.via; it.__q = qq.q;
+        kept.push(it);
+      };
+      for (let pi = 0; pi < plan.length; pi++) {
+        const qq = plan[pi];
+        if (pi > 0 && Date.now() > deadline - 3000) break;
+        let qText = qq.q;
+        if (qq.lazyEnglish) { qText = await englishQuery(); if (!qText) continue; qq.q = qText; }
+        tried.push(qq.via);
+        r = await withTimeout(
+          adapters[id].actions.search({
+            query: qText,
+            max: max,
+            market: (body && body.market) || undefined,
+            ean: (body && body.ean) || "",
+            brand: (body && body.brand) || "",
+            model: (body && body.model) || "",
+            name: (body && body.name) || ""
+          }),
+          /* Las webs de catalogo fijo se cortan a 20 s; las que buscan en toda la red, al presupuesto. */
+          Math.min(Math.max(5000, deadline - Date.now()), rank[adapters[id].kind] != null ? 55000 : 20000)
+        );
+        const data = r && r.ok ? r.data : null;
+        const got = (data && data.items) || [];
+        const beforeKept = kept.length;
+        rawCount += got.length;
+        runFilter(got).forEach(function (it) { keepIfNew(it, qq); });
+        queryStats.push({ via: qq.via, q: qText, raw: got.length, kept: kept.length - beforeKept });
+        if (kept.length >= cfgS.enough) break;
+      }
+      entry.queries = tried;
+      entry.queryStats = queryStats;
+      entry.rawCount = rawCount;
+      let items = kept;
+      function runFilter(list) {
       /* Filtro de relevancia: las webs de catalogo devuelven enlaces de menu
          (Facebook, "Finalizar compra", categorias) que no tienen que ver con
          el producto. Se descartan salvo coincidencia exacta por EAN. */
-      const open = adapters[id].kind === "discovery" || adapters[id].kind === "supplier_market";
-      items = items.filter(function (it) {
-        if (eanQ.length >= 8 && it.ean && String(it.ean).indexOf(eanQ) !== -1) return true;
+      return list.filter(function (it) {
+        if (srcEans.length && it.ean && gtinLib.intersects(srcEans, it.ean)) return true;
         const nm = String(it.name || "");
         /* Enlaces de menu / paginas legales: sin precio ni foto no son un producto (vale para cualquier tienda). */
-        if (typeprofile.isJunk(it, { open: open })) { rejected.push({ source: id, name: nm.slice(0, 80), reason: "No es un producto (enlace de menu o pagina legal)." }); return false; }
+        if (typeprofile.isJunk(it, { open: open })) { rejected.push({ source: id, kind: "menu", name: nm.slice(0, 80), reason: "No es un producto (enlace de menu o pagina legal)." }); return false; }
         /* Nombres sin alfabeto latino (1688, etc.): no se pueden comparar, se conservan como candidatos. */
         if (ptype.hasCJK(nm)) {
           const sz = ptype.sameTypeZh(srcText, nm);
-          if (!sz.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: sz.reason }); return false; }
+          if (!sz.ok) { rejected.push({ source: id, kind: "tipo", name: nm.slice(0, 80), reason: sz.reason }); return false; }
           /* Si el tipo de origen no es un concepto conocido no se puede comprobar un titulo chino: solo pasa si nombra un modelo del origen. */
           if (!ptype.conceptsOf(srcText).length) {
             const lat = nm.toLowerCase().replace(/[^a-z0-9]+/g, "");
             const hit = (srcId.models || []).some(function (m) { return lat.indexOf(m) !== -1; });
             /* Sin lista: el tipo se traduce al chino desde categoria+titulo y se busca en el titulo. */
-            if (!hit && !typeprofile.zhOk(tprof, nm)) { rejected.push({ source: id, name: nm.slice(0, 80), reason: "Titulo chino sin ningun termino del tipo de producto." }); return false; }
+            if (!hit && !typeprofile.zhOk(tprof, nm)) { rejected.push({ source: id, kind: "tipo", name: nm.slice(0, 80), reason: "Titulo chino sin ningun termino del tipo de producto." }); return false; }
           }
           return true;
         }
         if (open && !/[a-z]{3}/i.test(nm.normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) return true;
         const mg = modelGate(nm);
-        if (!mg.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: mg.reason }); return false; }
+        if (!mg.ok) { rejected.push({ source: id, kind: "modelo", name: nm.slice(0, 80), reason: mg.reason }); return false; }
         const bg = brandGate(it, nm);
-        if (!bg.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: bg.reason }); return false; }
+        if (!bg.ok) { rejected.push({ source: id, kind: "marca", name: nm.slice(0, 80), reason: bg.reason }); return false; }
         const cg = colorGate(nm);
-        if (!cg.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: cg.reason }); return false; }
+        if (!cg.ok) { rejected.push({ source: id, kind: "color", name: nm.slice(0, 80), reason: cg.reason }); return false; }
         const st = ptype.sameType(srcText, nm);
-        if (!st.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: st.reason }); return false; }
+        if (!st.ok) { rejected.push({ source: id, kind: "tipo", name: nm.slice(0, 80), reason: st.reason }); return false; }
         const conceptHit = open && ptype.conceptsOf(srcText).some(function (c) { return ptype.conceptsOf(nm).indexOf(c) !== -1; });
         /* Generico: comparte al menos un termino del perfil (categoria Keepa + sustantivo, es/en). */
         const profHit = (tprof.es.length + tprof.en.length) > 0 && typeprofile.hits(tprof, nm).length >= (open ? 1 : 2);
         const ok = conceptHit || profHit || (relevance(nm, qTokens) >= (open ? 0.34 : 0.4) && typeGate(nm, open));
         if (ok && open && !conceptHit) it.__review = true; /* aceptado solo por tipo: nunca "exacto" */
-        if (!ok) rejected.push({ source: id, name: nm.slice(0, 80), reason: "No es el mismo tipo de producto." });
+        if (!ok) rejected.push({ source: id, kind: "tipo", name: nm.slice(0, 80), reason: "No es el mismo tipo de producto." });
         return ok;
       });
+      }
       entry.count = items.length;
       entry.ok = items.length > 0;
       if (!items.length) entry.reason = rawCount ? "sin_coincidencias_relevantes" : ((r && r.reason) || "sin_resultados");
@@ -579,6 +597,7 @@ async function searchSuppliers(body, priceMax, hooks) {
           shipping: num(it.shipping) || null, stock: it.stock == null ? null : num(it.stock),
           limit: it.limit == null ? null : num(it.limit),
           url: it.url || "", image: it.image || "", candidate: Boolean(it.candidate),
+          via: it.__via || sq.via, queryUsed: it.__q || q,
           priceText: it.priceText || "", minOrder: it.minOrder || null,
           supplier: it.supplier || "", factory: Boolean(it.attrs && it.attrs.factory),
           rel: Math.round(relevance(it.name, qTokens) * 100) / 100,
@@ -591,9 +610,9 @@ async function searchSuppliers(body, priceMax, hooks) {
         const cmp = identity.compare(srcId, { name: it.name, brand: it.brand, ean: it.ean });
         rec.match = cmp.verdict === "exacto" ? "exacto" : cmp.verdict === "probable" ? "probable" : cmp.verdict === "variante" ? "variante" : "equivalente";
         if (cmp.verdict === "equivalente" && rec.rel >= 0.75 && !it.ean) rec.match = "equivalente";
-        rec.identity = { verdict: cmp.verdict, reason: cmp.reason, checks: cmp.checks };
-        if (cmp.verdict === "variante") { rejected.push({ source: id, name: String(it.name || "").slice(0, 80), reason: cmp.reason }); return; }
-        if (cmp.verdict === "distinto") { rejected.push({ source: id, name: String(it.name || "").slice(0, 80), reason: cmp.reason }); return; }
+        rec.identity = { verdict: cmp.verdict, reason: cmp.reason, checks: cmp.checks, score: cmp.score, matching: cmp.matching, conflicting: cmp.conflicting };
+        if (cmp.verdict === "variante") { rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: cmp.reason, score: cmp.score, conflicting: cmp.conflicting }); return; }
+        if (cmp.verdict === "distinto") { rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: cmp.reason }); return; }
         rec.imageOk = /^https?:\/\//i.test(String(rec.image || ""));
         if (titlePrice) { rec.priceFromTitle = true; rec.priceText = "desde " + price.toFixed(2).replace(".", ",") + " € (leído del título, confirmar)"; }
         if (price <= 0) { rec.noPrice = true; rec.priceText = rec.priceText || "Contactar para precio"; }
@@ -640,7 +659,11 @@ async function searchSuppliers(body, priceMax, hooks) {
     above.sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); });
     extra = above.slice(0, 8).map(function (x) { return Object.assign({}, x, { over: true }); });
   }
-  return { q: q, via: sq.via, priceMax: round2(priceMax), matches: matches.concat(extra), searched: searched, identity: srcId, rejected: rejected.slice(0, 40) };
+  const coverage = coverageLib.buildCoverage({
+    searched: searched, rejected: rejected, matches: matches.concat(extra),
+    queries: qlist, identity: srcId, candidates: candidates.length
+  });
+  return { q: q, via: sq.via, priceMax: round2(priceMax), matches: matches.concat(extra), searched: searched, identity: srcId, rejected: rejected.slice(0, 40), coverage: coverage };
 }
 
 /* ---------- adaptador ---------- */
@@ -740,9 +763,19 @@ const inverso = {
         };
       }
 
-      const cands = products
-        .map(metricsFromKeepa)
-        .filter(function (m) { return m.asin && m.pvp > 0; })
+      /* Si un unico vendedor (no Amazon) domina el 97 %+ de la Buy Box, se consulta su nombre
+         (1 token Keepa, cacheado, max 15 por busqueda) para saber si es el fabricante. */
+      const baseM = products.map(metricsFromKeepa).filter(function (m) { return m.asin && m.pvp > 0; });
+      let sellerLookups = 0;
+      for (let i = 0; i < baseM.length; i++) {
+        const bb = baseM[i].buyBox;
+        if (p.bbRule && bb && bb.known && !bb.amazonOnly && bb.topShare >= 0.97 && sellerLookups < 15) {
+          sellerLookups++;
+          baseM[i].sellerName = await keepaSellerName(bb.topSeller);
+        }
+      }
+      notes.push("Buy Box 90 d: " + baseM.filter(function (m) { return m.buyBox && m.buyBox.known; }).length + "/" + baseM.length + " con historial; " + sellerLookups + " vendedor(es) unico(s) consultado(s).");
+      const cands = baseM
         .map(function (m) {
           const plan = planFor(m, p);
           return Object.assign({}, m, { plan: plan, estado: plan.estado });
@@ -775,7 +808,8 @@ const inverso = {
         sales: num(m.sales),
         thirdParty: num(m.thirdParty),
         historyDays: m.historyDays == null ? null : num(m.historyDays),
-        brandRestricted: !!m.brandRestricted, hazmat: !!m.hazmat, amazonOnly: !!m.amazonOnly
+        brandRestricted: !!m.brandRestricted, hazmat: !!m.hazmat, amazonOnly: !!m.amazonOnly,
+        buyBox: m.buyBox || null, sellerName: m.sellerName || "", brand: m.brand || ""
       }, p);
       return { ok: true, data: { source: "inverso", kind: "plan", plan: plan, params: p } };
     },
@@ -797,7 +831,9 @@ const inverso = {
           source: "inverso", kind: "sources", query: out.q, via: out.via,
           priceMax: round2(priceMax), matches: out.matches, searched: out.searched,
           amazon: amazon, googleShopping: google, wholesaleDraft: wholesaleDraft,
-          cheapestVerified: cheapestVerified(out.matches), cheapestProbable: cheapestVerified(out.matches, ["probable"]), identity: out.identity, rejected: out.rejected, scope: { sourcesQueried: (out.searched || []).length, sourcesWithData: (out.searched || []).filter(function (x) { return x.ok; }).length, note: "Solo las fuentes listadas en searched; no equivale a todo Internet." }
+          cheapestVerified: cheapestVerified(out.matches), cheapestProbable: cheapestVerified(out.matches, ["probable"]), identity: out.identity, rejected: out.rejected,
+          coverage: out.coverage,
+          scope: { sourcesQueried: (out.searched || []).length, sourcesWithData: (out.searched || []).filter(function (x) { return x.ok; }).length, note: "Solo las fuentes listadas en searched; no equivale a todo Internet." }
         }
       };
     }

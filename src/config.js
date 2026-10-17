@@ -81,6 +81,16 @@ const config = {
     base: clean(process.env.CJ_BASE) || "https://developers.cjdropshipping.com/api2.0/v1"
   },
   /* --- Identificador EAN/UPC -> producto (nombre/marca) --- */
+  /* Busqueda de proveedores (inverso.searchSuppliers). */
+  suppliers: {
+    maxResults: Math.max(3, parseInt(clean(process.env.SUPPLIER_MAX_RESULTS) || "20", 10) || 20),
+    maxResultsCap: Math.max(3, parseInt(clean(process.env.SUPPLIER_MAX_RESULTS_CAP) || "40", 10) || 40),
+    /* Consultas por fuente gratuita / de pago (Apify cobra cada ejecucion). */
+    maxQueries: Math.min(Math.max(parseInt(clean(process.env.SUPPLIER_MAX_QUERIES) || "4", 10) || 4, 1), 6),
+    maxQueriesPaid: Math.min(Math.max(parseInt(clean(process.env.SUPPLIER_MAX_QUERIES_PAID) || "2", 10) || 2, 1), 4),
+    /* Con tantos resultados utiles ya no se prueba la siguiente consulta. */
+    enough: Math.max(1, parseInt(clean(process.env.SUPPLIER_ENOUGH) || "5", 10) || 5)
+  },
   barcode: {
     provider: clean(process.env.BARCODE_PROVIDER) || "upcitemdb",
     apiKey: clean(process.env.UPCITEMDB_API_KEY)

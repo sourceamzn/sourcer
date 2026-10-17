@@ -61,6 +61,13 @@ function accessoryWords(text) {
   return ACCESSORY.filter(function (a) { return w.indexOf(a) !== -1; });
 }
 
+/* Quita menciones de compatibilidad ("for laptop", "para tablet 15.6", "fits 15 inch laptop") para que no cuenten como tipo de producto. */
+function stripCompat(text) {
+  return norm(text).replace(/\b(for|fits?|fit|para|compatible with|compatible|with|con|hasta|up to|suitable for|de)\s+(\d+(\.\d+)?\s?(inch|pulgadas|in)?\s*){0,2}(laptop|laptops|portatil|portatiles|computer|ordenador|tablet|tablets|ipad|macbook|movil|smartphone|phone)\b/g, " ")
+    .replace(/\b(laptop|portatil)\s+(compartment|sleeve|pocket|bolsillo|compartimento)\b/g, " ")
+    .replace(/\b(\d+(\.\d+)?)\s?(inch|pulgadas)\s+(laptop|portatil)\b/g, " ")
+    .replace(/\s+/g, " ");
+}
 /* Decide si la oferta es del mismo tipo que el origen.
    Devuelve {ok, reason}. Si el origen no encaja en ningun concepto conocido,
    ok=true y se deja a los demas filtros (pero los accesorios si se frenan). */
@@ -70,7 +77,10 @@ function sameType(sourceText, offerText) {
   const srcAcc = accessoryWords(sourceText);
   const offAcc = accessoryWords(offerText);
   /* Accesorio en la oferta y no en el origen: otro producto (funda de cuaderno...). */
-  const newAcc = offAcc.filter(function (a) { return srcAcc.indexOf(a) === -1; });
+  let newAcc = offAcc.filter(function (a) { return srcAcc.indexOf(a) === -1; });
+  /* Si la oferta comparte tipo con el origen, "bag/bolsa" es solo el nombre generico del mismo producto (school bag backpack), no un accesorio. */
+  const sharedNow = src.filter(function (c) { return off.indexOf(c) !== -1; });
+  if (sharedNow.length) newAcc = newAcc.filter(function (a) { return ["bag", "bags", "bolsa", "bolsas"].indexOf(a) === -1; });
   if (newAcc.length) {
     return { ok: false, reason: "Es un accesorio (" + newAcc[0] + "), no el producto." };
   }
@@ -80,7 +90,17 @@ function sameType(sourceText, offerText) {
   const shared = src.filter(function (c) { return off.indexOf(c) !== -1; });
   if (!shared.length) return { ok: false, reason: "Tipo distinto: origen " + src.join("/") + ", oferta " + off.join("/") + "." };
   /* Conflicto: la oferta ademas es de un concepto que el origen no tiene (cuaderno con funda de portatil). */
-  const extra = off.filter(function (c) { return src.indexOf(c) === -1 && (c === "portatil" || c === "tablet" || c === "movil"); });
+  let offTxt = stripCompat(offerText);
+  /* "laptop ... backpack": si un concepto compartido aparece pocas palabras despues, el otro es solo un adjetivo/uso. */
+  sharedNow.forEach(function (id) {
+    CONCEPTS[id].forEach(function (ph) {
+      const pn = norm(ph);
+      offTxt = offTxt.replace(new RegExp("\\b(laptop|laptops|portatil|computer|ordenador|tablet|ipad|movil|smartphone|phone)\\b(?=(\\s+\\w+){0,3}\\s+" + pn + "s?\\b)", "g"), " ");
+      offTxt = offTxt.replace(new RegExp("\\b(" + pn + "s?(\\s+\\w+){0,2}\\s+)(laptop|laptops|portatil|computer|ordenador|tablet|ipad|movil|smartphone|phone)\\b", "g"), "$1 ");
+    });
+  });
+  const offMain = conceptsOf(offTxt);
+  const extra = offMain.filter(function (c) { return src.indexOf(c) === -1 && (c === "portatil" || c === "tablet" || c === "movil"); });
   if (extra.length) return { ok: false, reason: "Mezcla otro tipo de producto (" + extra[0] + ")." };
   return { ok: true, reason: "" };
 }

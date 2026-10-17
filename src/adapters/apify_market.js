@@ -155,6 +155,9 @@ function makeAdapter(def) {
     label: def.label,
     kind: "supplier_market",
     supplier: true,
+    /* 1688/Alibaba/MIC construyen su consulta (sin marca, traducida) desde name: repetirlas con
+       otra consulta cuesta dinero y devuelve lo mismo. La cascada las lanza una sola vez. */
+    ownQuery: Boolean(def.lang),
     actions: {
       ping: async function () {
         const ok = apifyReady() && Boolean(actorId());

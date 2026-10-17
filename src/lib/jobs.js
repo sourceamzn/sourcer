@@ -69,6 +69,7 @@ function status(id) {
     elapsedMs: (j.finishedAt ? Date.parse(j.finishedAt) : Date.now()) - j.createdAt,
     running: j.running.map(function (r) { return { source: r.source, label: r.label, seconds: Math.round((Date.now() - r.since) / 1000) }; }),
     searched: j.searched,
+    coverage: finished ? ((j.result && j.result.coverage) || null) : null,
     partial: finished ? undefined : sortMatches(j.matches).slice(0, 40),
     result: finished ? j.result : null,
     error: j.error

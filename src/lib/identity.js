@@ -3,6 +3,8 @@
    pack, medida, color, voltaje) de un texto y compara origen vs oferta.
    Nunca inventa: si el texto no dice un atributo, queda vacio (na). */
 
+const gtin = require("./gtin");
+
 const COLORS = ["negro", "blanco", "rojo", "azul", "verde", "amarillo", "rosa", "gris", "naranja", "morado", "violeta", "lila", "marron", "beige", "dorado", "plateado", "turquesa", "celeste",
   "black", "white", "red", "blue", "green", "yellow", "pink", "grey", "gray", "orange", "purple", "brown", "gold", "silver"];
 const COLOR_MAP = { black: "negro", white: "blanco", red: "rojo", blue: "azul", green: "verde", yellow: "amarillo", pink: "rosa", grey: "gris", gray: "gris", orange: "naranja", purple: "morado", brown: "marron", gold: "dorado", silver: "plateado" };
@@ -64,6 +66,7 @@ function identityOf(o) {
   const attrs = o.attrs || {};
   return {
     ean: String(o.ean || "").replace(/\D+/g, ""),
+    eans: gtin.normalizeAll([].concat(o.eans || [], o.ean || [])),
     brand: String(o.brand || attrs.brand || "").trim(),
     models: modelsOf((o.model ? o.model + " " : "") + String(o.name || o.title || "")),
     quantity: quantityOf(o.name || o.title),
@@ -80,11 +83,15 @@ function compare(src, offer) {
     checks.push({ key: key, label: label, source: a || "—", offer: b || "—", state: state });
     if (state === "fail") conflicts.push(key);
   }
+  /* EAN: se compara el codigo COMPLETO normalizado a 13 digitos (nunca por subcadena)
+     y contra todos los EAN/UPC del origen, no solo el primero. */
+  const sEans = gtin.normalizeAll([].concat(src.eans || [], src.ean || []));
+  const oEans = gtin.normalizeAll(offer.ean);
   const sEan = src.ean, oEan = String(offer.ean || "").replace(/\D+/g, "");
   let eanOk = false;
-  if (sEan.length >= 8 && oEan.length >= 8) {
-    if (oEan.indexOf(sEan) !== -1 || sEan.indexOf(oEan) !== -1) { eanOk = true; add("ean", "EAN/UPC", sEan, oEan, "ok"); }
-    else add("ean", "EAN/UPC", sEan, oEan, "fail");
+  if (sEans.length && oEans.length) {
+    if (gtin.intersects(sEans, oEans)) { eanOk = true; add("ean", "EAN/UPC", sEan || sEans[0], oEan, "ok"); }
+    else add("ean", "EAN/UPC", sEan || sEans[0], oEan, "fail");
   } else add("ean", "EAN/UPC", sEan, oEan, "na");
 
   const oText = String(offer.name || "") + " " + String(offer.brand || "");
@@ -133,7 +140,16 @@ function compare(src, offer) {
     if (okKeys.indexOf("brand") !== -1 && okKeys.indexOf("model") !== -1) { verdict = "probable"; reason = "Marca y modelo coinciden pero sin EAN: confirmar antes de comprar."; }
     else { verdict = "equivalente"; reason = "Sin EAN ni marca+modelo coincidentes: producto parecido, no verificado."; }
   }
-  return { verdict: verdict, reason: reason, checks: checks, conflicts: conflicts, eanOk: eanOk };
+  const W = { ean: 100, model: 60, brand: 25, size: 10, quantity: 8, color: 6 };
+  let score = 0;
+  const matching = [], conflicting = [];
+  checks.forEach(function (c) {
+    if (c.state === "ok") { score += W[c.key] || 0; matching.push(c.key); }
+    else if (c.state === "fail") { conflicting.push(c.key); }
+  });
+  if (conflicting.length) score = Math.min(score, 20);
+  score = Math.max(0, Math.min(100, score));
+  return { verdict: verdict, reason: reason, checks: checks, conflicts: conflicts, eanOk: eanOk, score: score, matching: matching, conflicting: conflicting };
 }
 
 /* Ficha congelada: copia inmutable de lo que Amazon dice del producto. */
@@ -142,6 +158,7 @@ function freezeCard(id, body) {
     asin: String((body && body.asin) || "").toUpperCase(),
     image: String((body && (body.image || body.img)) || "")
   });
+  card.eans = Object.freeze((card.eans || []).slice());
   card.models = Object.freeze((card.models || []).slice());
   card.sizes = Object.freeze((card.sizes || []).slice());
   return Object.freeze(card);
@@ -155,6 +172,8 @@ function stateOf(rec, cmp) {
   const ok = {};
   (cmp.checks || []).forEach(function (c) { if (c.state === "ok") ok[c.key] = 1; });
   if (ok.model && ok.brand && !rec.review) return "verificado";
+  if (ok.model && !rec.review && cmp.score >= 60) return "verificado";
+  if (ok.brand && [ok.size, ok.quantity, ok.color].filter(Boolean).length >= 2 && !rec.review) return "probable";
   return "candidato";
 }
 
