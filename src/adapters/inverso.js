@@ -564,7 +564,14 @@ async function searchSuppliers(body, priceMax, hooks) {
       if (r && r.detail && !items.length) entry.detail = String(r.detail).slice(0, 140);
       const label = adapters[id].label || id;
       items.forEach(function (it) {
-        const price = num(it.price);
+        let price = num(it.price);
+        let titlePrice = false;
+        if (!(price > 0)) {
+          /* Sin campo precio: lee "desde 30,15 €" / "30,15 EUR" / "desde 30,15" del titulo. */
+          const tm = String(it.name || "").match(/(?:desde|a partir de|from)\s*(\d{1,4}(?:[.,]\d{1,2})?)(?!\d)|(\d{1,4}(?:[.,]\d{1,2})?)\s*(?:€|eur\b)/i);
+          const tv = tm ? num(String(tm[1] || tm[2]).replace(",", ".")) : 0;
+          if (tv > 0) { price = tv; titlePrice = true; }
+        }
         const rec = {
           source: id, sourceLabel: label,
           name: it.name || "", brand: it.brand || "", ean: it.ean || "",
@@ -588,6 +595,7 @@ async function searchSuppliers(body, priceMax, hooks) {
         if (cmp.verdict === "variante") { rejected.push({ source: id, name: String(it.name || "").slice(0, 80), reason: cmp.reason }); return; }
         if (cmp.verdict === "distinto") { rejected.push({ source: id, name: String(it.name || "").slice(0, 80), reason: cmp.reason }); return; }
         rec.imageOk = /^https?:\/\//i.test(String(rec.image || ""));
+        if (titlePrice) { rec.priceFromTitle = true; rec.priceText = "desde " + price.toFixed(2).replace(".", ",") + " € (leído del título, confirmar)"; }
         if (price <= 0) { rec.noPrice = true; rec.priceText = rec.priceText || "Contactar para precio"; }
         if (it.__review || (weakId && rec.match !== "exacto")) { rec.review = true; rec.match = rec.match === "exacto" ? "exacto" : "equivalente"; rec.reviewNote = "Candidato a revisar: mismo tipo por categoria/nombre; compara la foto con la tuya."; }
         recsOut.push(rec);
