@@ -83,6 +83,51 @@ function sameType(sourceText, offerText) {
   return { ok: true, reason: "" };
 }
 
+/* ---- Chino (1688, etc.): los nombres no tienen alfabeto latino, se comparan por subcadenas. ---- */
+const ZH_CONCEPTS = {
+  cuaderno: ["本子", "笔记本", "记事本", "线圈本", "日记本", "手账", "练习本", "作业本", "活页本", "速写本", "素描本", "笔记簿"],
+  portatil: ["笔记本电脑", "手提电脑", "电脑"],
+  tablet: ["平板"],
+  movil: ["手机"],
+  teclado: ["键盘"],
+  raton: ["鼠标"],
+  auricular: ["耳机"],
+  cargador: ["充电器", "充电头"],
+  cable: ["数据线", "充电线", "线缆"],
+  boligrafo: ["圆珠笔", "中性笔", "钢笔", "铅笔", "马克笔", "签字笔", "记号笔"],
+  mochila: ["背包", "书包", "双肩包"],
+  botella: ["水杯", "水壶", "保温杯", "水瓶"],
+  lampara: ["台灯", "灯具", "夜灯"],
+  zapatilla: ["运动鞋", "板鞋", "拖鞋", "鞋"]
+};
+const ZH_ACCESSORY = ["保护套", "保护壳", "手机壳", "壳", "支架", "贴膜", "钢化膜", "内胆包", "电脑包", "散热", "充电宝", "配件"];
+function hasCJK(s) { return /[\u3400-\u9fff]/.test(String(s || "")); }
+function conceptsOfZh(text) {
+  let t = String(text || "");
+  const out = [];
+  /* 笔记本电脑 = portatil; se retira para que no cuente como cuaderno. */
+  ZH_CONCEPTS.portatil.forEach(function (p) { if (t.indexOf(p) !== -1 && out.indexOf("portatil") === -1) out.push("portatil"); });
+  t = t.replace(/笔记本电脑|手提电脑|电脑/g, " ");
+  Object.keys(ZH_CONCEPTS).forEach(function (id) {
+    if (id === "portatil") return;
+    if (ZH_CONCEPTS[id].some(function (p) { return t.indexOf(p) !== -1; }) && out.indexOf(id) === -1) out.push(id);
+  });
+  return out;
+}
+/* Origen (es/en) frente a oferta en chino. */
+function sameTypeZh(sourceText, offerText) {
+  const src = conceptsOf(sourceText);
+  const off = conceptsOfZh(offerText);
+  const acc = ZH_ACCESSORY.filter(function (a) { return String(offerText).indexOf(a) !== -1; });
+  if (acc.length && accessoryWords(sourceText).length === 0) return { ok: false, reason: "Es un accesorio (" + acc[0] + "), no el producto." };
+  if (!src.length) return { ok: true, reason: "" };
+  if (!off.length) return { ok: false, reason: "No se reconoce el tipo de producto en el titulo chino (" + src[0] + ")." };
+  if (!src.some(function (c) { return off.indexOf(c) !== -1; })) return { ok: false, reason: "Tipo distinto: origen " + src.join("/") + ", oferta " + off.join("/") + "." };
+  const extra = off.filter(function (c) { return src.indexOf(c) === -1 && (c === "portatil" || c === "tablet" || c === "movil"); });
+  if (extra.length) return { ok: false, reason: "Mezcla otro tipo de producto (" + extra[0] + ")." };
+  return { ok: true, reason: "" };
+}
+
 /* Sustituye terminos ambiguos del origen por frases inequivocas antes de
    traducir/buscar (cuaderno -> "paper exercise book", nunca "notebook"). */
 const DISAMBIG_EN = [
@@ -98,4 +143,4 @@ function disambiguate(text) {
 }
 function hasAmbiguousTerm(text) { return /\b(cuadernos?|libretas?|portatil(es)?|agendas?)\b/i.test(norm(text)); }
 
-module.exports = { conceptsOf, sameType, disambiguate, hasAmbiguousTerm, norm };
+module.exports = { conceptsOf, conceptsOfZh, sameTypeZh, hasCJK, sameType, disambiguate, hasAmbiguousTerm, norm };

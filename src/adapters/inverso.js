@@ -442,6 +442,11 @@ async function searchSuppliers(body, priceMax, hooks) {
         if (eanQ.length >= 8 && it.ean && String(it.ean).indexOf(eanQ) !== -1) return true;
         const nm = String(it.name || "");
         /* Nombres sin alfabeto latino (1688, etc.): no se pueden comparar, se conservan como candidatos. */
+        if (ptype.hasCJK(nm)) {
+          const sz = ptype.sameTypeZh(srcText, nm);
+          if (!sz.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: sz.reason }); return false; }
+          return true;
+        }
         if (open && !/[a-z]{3}/i.test(nm.normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) return true;
         const st = ptype.sameType(srcText, nm);
         if (!st.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: st.reason }); return false; }
