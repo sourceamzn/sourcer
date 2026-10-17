@@ -48,6 +48,9 @@ async function marketQuery(body, lang) {
   const g = genericQuery(body) || String((body && body.query) || "").trim();
   if (!g || lang === "es") return g;
   try {
+    /* cuaderno -> "notebook" seria un portatil: se sustituye por frase inequivoca. */
+    const pt = require("./ptype");
+    if (lang === "en" && pt.hasAmbiguousTerm(g)) return pt.disambiguate(g).replace(/\s+/g, " ").trim();
     return await translate(g, lang);
   } catch (e) {
     return g;

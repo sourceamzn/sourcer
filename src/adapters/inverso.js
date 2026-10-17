@@ -224,6 +224,29 @@ async function keepaSearchProducts(term) {
   if (!r.ok) return { ok: false, reason: r.reason, error: r.error };
   return { ok: true, products: (r.data && r.data.products) || [] };
 }
+/* Terminos genericos de departamento amazon.es -> id raiz (top20.js). Coincidencia
+   EXACTA de la consulta entera; ante cualquier duda devuelve null (= palabra). */
+const CATEGORY_TERMS = [
+  { id: "599391031", name: "Hogar y cocina", t: ["hogar", "hogar y cocina", "casa y cocina"] },
+  { id: "599370031", name: "Electronica", t: ["electronica", "electronico", "electronicos", "electronica de consumo"] },
+  { id: "5512276031", name: "Moda", t: ["moda", "ropa", "ropa y accesorios"] },
+  { id: "667049031", name: "Informatica", t: ["informatica", "ordenadores", "computacion"] },
+  { id: "6198054031", name: "Belleza", t: ["belleza", "cosmetica", "belleza y cuidado personal"] },
+  { id: "2454136031", name: "Deportes y aire libre", t: ["deporte", "deportes", "deportes y aire libre"] },
+  { id: "6198072031", name: "Alimentacion", t: ["alimentacion", "comida", "supermercado"] },
+  { id: "599385031", name: "Juguetes y juegos", t: ["juguetes", "juguete", "juegos y juguetes", "juguetes y juegos"] },
+  { id: "2454133031", name: "Bricolaje", t: ["bricolaje", "bricolaje y herramientas"] },
+  { id: "3677430031", name: "Salud y cuidado personal", t: ["salud y cuidado personal"] },
+  { id: "1951051031", name: "Coche y moto", t: ["coche y moto", "automocion"] },
+  { id: "1571259031", name: "Jardin", t: ["jardin", "jardineria", "jardin y exterior"] }
+];
+function categoryFor(q) {
+  const s = String(q || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!s) return null;
+  for (let i = 0; i < CATEGORY_TERMS.length; i++) if (CATEGORY_TERMS[i].t.indexOf(s) >= 0) return CATEGORY_TERMS[i];
+  return null;
+}
+
 async function keepaBestSellers(categoryId, range) {
   const params = { category: String(categoryId) };
   if (range != null && String(range) !== "" && String(range) !== "0") params.range = String(range);
@@ -359,6 +382,8 @@ async function searchSuppliers(body, priceMax, hooks) {
   const eanQ = digits(body && body.ean);
   const q = sq.q;
   const srcId = identity.identityOf(body || {});
+  const ptype = require("../lib/ptype");
+  const srcText = [body && body.name, body && body.title, body && body.query].filter(Boolean).join(" ");
   /* Puerta de tipo de producto: palabras que dicen QUE es (telefonillo, teclado...),
      sin marca, modelo, medidas ni colores. La oferta debe compartir al menos una. */
   const brandToks = tokensOf(body && body.brand);
@@ -418,6 +443,8 @@ async function searchSuppliers(body, priceMax, hooks) {
         const nm = String(it.name || "");
         /* Nombres sin alfabeto latino (1688, etc.): no se pueden comparar, se conservan como candidatos. */
         if (open && !/[a-z]{3}/i.test(nm.normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) return true;
+        const st = ptype.sameType(srcText, nm);
+        if (!st.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: st.reason }); return false; }
         const ok = relevance(nm, qTokens) >= (open ? 0.34 : 0.4) && typeGate(nm);
         if (!ok) rejected.push({ source: id, name: nm.slice(0, 80), reason: "No es el mismo tipo de producto." });
         return ok;
@@ -518,11 +545,19 @@ const inverso = {
       const limit = clampInt(body && body.limit, 10, 1, 50);
       let query = String((body && (body.query || body.q)) || "").trim();
       const rawCategory = body && (body.categoryId || body.category);
-      const categoryDigits = digits(rawCategory);
+      let categoryDigits = digits(rawCategory);
       /* Si escriben un texto (no un node id) en el campo de categoria, se usa
          tambien como palabra clave en vez de descartar la busqueda. */
       if (!query && !categoryDigits && String(rawCategory || "").trim()) query = String(rawCategory).trim();
       let products = [], via = "", notes = [], errors = [];
+
+      /* Modo categoria: SOLO si la consulta entera es un termino generico de
+         departamento y no hay id numerico ni finder. Todo lo demas = palabra. */
+      let mode = "palabra", categoryName = "";
+      if (!categoryDigits && !(body && body.finder)) {
+        const cat = categoryFor(query);
+        if (cat) { categoryDigits = cat.id; categoryName = cat.name; mode = "categoria"; query = ""; notes.push("Categoria detectada: " + cat.name + " (best sellers de amazon.es)"); }
+      } else if (categoryDigits) { mode = "categoria"; }
 
       /* Fuentes del PDF, por orden: Product Finder, best sellers por categoria, busqueda por palabra clave. */
       if (body && body.finder) {
@@ -594,7 +629,7 @@ const inverso = {
       return {
         ok: true,
         data: {
-          source: "inverso", kind: "candidates", via: via, query: query,
+          source: "inverso", kind: "candidates", via: via, query: query, mode: via === "search" ? "palabra" : mode, categoryName: categoryName,
           count: cands.length, counts: counts,
           candidates: cands.slice(0, limit * 3),
           params: p, notes: notes
