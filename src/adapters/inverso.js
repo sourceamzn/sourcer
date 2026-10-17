@@ -172,6 +172,18 @@ function keepaImageUrl(prod) {
   if (first.indexOf("//") === 0) return "https:" + first;
   return "https://m.media-amazon.com/images/I/" + first.replace(/^\/+/, "");
 }
+/* Vendedores FBA reales (terceros, sin Amazon) desde la lista `offers` de Keepa.
+   null si el producto no trae ofertas. */
+function fbaFromOffers(prod) {
+  const offers = prod && Array.isArray(prod.offers) ? prod.offers : null;
+  if (!offers || !offers.length) return null;
+  const seen = {};
+  offers.forEach(function (o) {
+    if (!o || !o.isFBA || o.isAmazon) return;
+    seen[String(o.sellerId || Math.random())] = 1;
+  });
+  return Object.keys(seen).length;
+}
 function metricsFromKeepa(prod) {
   const s = (prod && prod.stats) || {};
   const pvp = keepaAvg90(prod, 18, true) || keepaCur(prod, 18, true) || keepaCur(prod, 1, true) || keepaCur(prod, 0, true);
@@ -180,9 +192,12 @@ function metricsFromKeepa(prod) {
   const sales = num(s.monthlySold) || num(s.salesRankDrops30) || 0;
   /* Keepa usa centinelas negativos (-1/-2) para "sin dato": nunca deben contar. */
   const offersTotal = posNum(s.offerCount) || posNum(s.totalOfferCount) || 0;
-  const offersFba = posNum(s.offerCountFBA);
+  /* null = Keepa no dio dato (sin `offers` en la peticion). Antes valia 0 y
+     disparaba siempre "menos de 2 FBA". */
+  let offersFba = fbaFromOffers(prod);
+  if (offersFba == null && posNum(s.offerCountFBA) > 0) offersFba = posNum(s.offerCountFBA);
   const amazonSells = keepaCur(prod, 0, true) > 0 || num(s.outOfStockPercentage90) < 0;
-  const thirdParty = offersTotal > 0 ? Math.max(0, offersTotal - (amazonSells ? 1 : 0)) : offersFba;
+  const thirdParty = offersTotal > 0 ? Math.max(0, offersTotal - (amazonSells ? 1 : 0)) : (offersFba || 0);
   const ean = (prod && prod.eanList && prod.eanList[0]) || (prod && prod.upcList && prod.upcList[0]) || "";
   return {
     asin: String((prod && prod.asin) || "").toUpperCase(),
@@ -192,7 +207,7 @@ function metricsFromKeepa(prod) {
     imageSource: keepaImageUrl(prod) ? "amazon (Keepa)" : "",
     url: prod && prod.asin ? "https://www.amazon.es/dp/" + String(prod.asin).toUpperCase() : "",
     pvp: round2(pvp), bsr: bsr, sales: Math.round(sales),
-    thirdParty: Math.round(thirdParty), offersFba: Math.round(offersFba),
+    thirdParty: Math.round(thirdParty), offersFba: offersFba == null ? null : Math.round(offersFba),
     historyDays: historyDays(prod), ean: String(ean || ""),
     categoryTree: (prod && prod.categoryTree) || []
   };
@@ -209,12 +224,17 @@ async function keepaRequest(path, params, method, body) {
   if (data && typeof data === "object" && data.error) return { ok: false, reason: "keepa_error", error: data.error };
   return { ok: true, data: data };
 }
-async function keepaProductsByAsins(asins) {
+async function keepaProductsByAsins(asins, offers) {
   if (!asins || !asins.length) return { ok: true, products: [] };
   const out = [];
+  /* `offers` (lista real de vendedores con flag FBA) cuesta ~6 tokens extra por
+     cada 10 ofertas y producto. Sin ella Keepa no da el recuento FBA fiable. */
+  const nOffers = offers === undefined ? 20 : Math.max(0, Math.min(parseInt(offers, 10) || 0, 100));
   for (let i = 0; i < asins.length; i += 100) {
     const chunk = asins.slice(i, i + 100).join(",");
-    const r = await keepaRequest("product", { asin: chunk, stats: "1", buybox: "1" });
+    const params = { asin: chunk, stats: "1", buybox: "1" };
+    if (nOffers >= 20) { params.offers = String(nOffers); params["only-live-offers"] = "1"; }
+    const r = await keepaRequest("product", params);
     if (r.ok && r.data && Array.isArray(r.data.products)) out.push.apply(out, r.data.products);
   }
   return { ok: true, products: out };
@@ -399,6 +419,51 @@ async function searchSuppliers(body, priceMax, hooks) {
     }).length;
     return hits >= Math.max(1, Math.ceil(typeToks.length * 0.34));
   }
+  /* Puerta de modelo: codigos alfanumericos (letras+digitos, p. ej. WH-1000XM5, SM-A546B).
+     Si el origen los tiene, la oferta debe contener alguno; si muestra OTROS codigos y
+     ninguno coincide, es otro modelo y se descarta. Sin codigos en la oferta no se decide. */
+  function modelCodes(s) {
+    const out = [];
+    String(s || "").toUpperCase().replace(/[^A-Z0-9\-\/ ]+/g, " ").split(/\s+/).forEach(function (w) {
+      const c = w.replace(/[\-\/]/g, "");
+      if (c.length >= 3 && c.length <= 16 && /[A-Z]/.test(c) && /\d/.test(c) && !/^\d+(CM|MM|KG|ML|GB|TB|MAH|W|V|L|G|PCS|UDS|UD)$/.test(c) && !/^(USB|HDMI|WIFI|4K|8K|5G|3D)\d*$/.test(c)) out.push(c);
+    });
+    return out;
+  }
+  const srcCodes = modelCodes((body && body.model || "") + " " + srcText);
+  function modelGate(name) {
+    if (!srcCodes.length) return { ok: true };
+    const oc = modelCodes(name);
+    if (!oc.length) return { ok: true };
+    const hit = oc.some(function (c) { return srcCodes.some(function (s) { return c === s || (c.length >= 5 && s.length >= 5 && (c.indexOf(s) !== -1 || s.indexOf(c) !== -1)); }); });
+    return hit ? { ok: true } : { ok: false, reason: "Otro modelo: la oferta dice " + oc.slice(0, 2).join("/") + " y el origen " + srcCodes.slice(0, 2).join("/") + "." };
+  }
+  /* Puerta de marca: si el origen tiene marca, la oferta debe nombrarla (en el
+     titulo o en su campo marca) o coincidir en codigo de modelo. Misma categoria
+     con otra marca NO es el mismo producto. */
+  const brandNorm = String((body && body.brand) || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "");
+  function brandGate(it, name) {
+    if (brandNorm.length < 3) return { ok: true };
+    const hay = (String(name || "") + " " + String((it && it.brand) || "")).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "");
+    if (hay.indexOf(brandNorm) !== -1) return { ok: true };
+    const oc = modelCodes(name);
+    if (srcCodes.length && oc.some(function (c) { return srcCodes.some(function (s) { return c === s; }); })) return { ok: true };
+    return { ok: false, reason: "Marca no coincide: el origen es " + body.brand + " y la oferta no la indica." };
+  }
+  /* Puerta de color: si ambos dicen color y no comparten ninguno, es otra variante. */
+  const COLORS = { negro: "n", black: "n", blanco: "b", white: "b", rojo: "r", red: "r", azul: "a", blue: "a", verde: "v", green: "v", gris: "g", grey: "g", gray: "g", rosa: "p", pink: "p", amarillo: "y", yellow: "y", naranja: "o", orange: "o", morado: "m", purple: "m", dorado: "d", gold: "d", plateado: "s", silver: "s", marron: "t", brown: "t", beige: "e" };
+  function colorsOf(s) {
+    const set = {};
+    tokensOf(s).forEach(function (t) { if (COLORS[t]) set[COLORS[t]] = 1; });
+    return Object.keys(set);
+  }
+  const srcColors = colorsOf(srcText + " " + ((body && body.color) || ""));
+  function colorGate(name) {
+    if (!srcColors.length) return { ok: true };
+    const oc = colorsOf(name);
+    if (!oc.length) return { ok: true };
+    return oc.some(function (c) { return srcColors.indexOf(c) !== -1; }) ? { ok: true } : { ok: false, reason: "Otro color/variante respecto al origen." };
+  }
   const rejected = [];
   const matches = [], above = [], searched = [];
   if (!q) return { q: "", via: "", matches: matches, searched: searched };
@@ -448,6 +513,12 @@ async function searchSuppliers(body, priceMax, hooks) {
           return true;
         }
         if (open && !/[a-z]{3}/i.test(nm.normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) return true;
+        const mg = modelGate(nm);
+        if (!mg.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: mg.reason }); return false; }
+        const bg = brandGate(it, nm);
+        if (!bg.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: bg.reason }); return false; }
+        const cg = colorGate(nm);
+        if (!cg.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: cg.reason }); return false; }
         const st = ptype.sameType(srcText, nm);
         if (!st.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: st.reason }); return false; }
         const ok = relevance(nm, qTokens) >= (open ? 0.34 : 0.4) && typeGate(nm);
@@ -577,7 +648,15 @@ const inverso = {
       }
       if (!products.length && query) {
         const s = await keepaSearchProducts(query);
-        if (s.ok) { products = s.products; via = via || "search"; notes.push("Busqueda '" + query + "': " + products.length + " resultado(s)"); }
+        if (s.ok) {
+          products = s.products; via = via || "search"; notes.push("Busqueda '" + query + "': " + products.length + " resultado(s)");
+          /* La busqueda no devuelve vendedores: se reconsultan los ASIN con `offers` para contar FBA reales. */
+          const asins = products.map(function (x) { return x && x.asin; }).filter(Boolean).slice(0, limit);
+          if (asins.length) {
+            const full = await keepaProductsByAsins(asins);
+            if (full.products && full.products.length) { products = full.products; notes.push("Vendedores FBA leidos de la lista de ofertas de Keepa."); }
+          }
+        }
         else errors.push("search:" + (s.reason || "error"));
       }
       if (!products.length) {
