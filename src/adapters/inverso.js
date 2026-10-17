@@ -510,6 +510,12 @@ async function searchSuppliers(body, priceMax, hooks) {
         if (ptype.hasCJK(nm)) {
           const sz = ptype.sameTypeZh(srcText, nm);
           if (!sz.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: sz.reason }); return false; }
+          /* Si el tipo de origen no es un concepto conocido no se puede comprobar un titulo chino: solo pasa si nombra un modelo del origen. */
+          if (!ptype.conceptsOf(srcText).length) {
+            const lat = nm.toLowerCase().replace(/[^a-z0-9]+/g, "");
+            const hit = (srcId.models || []).some(function (m) { return lat.indexOf(m) !== -1; });
+            if (!hit) { rejected.push({ source: id, name: nm.slice(0, 80), reason: "Titulo chino no verificable (sin modelo ni tipo conocido)." }); return false; }
+          }
           return true;
         }
         if (open && !/[a-z]{3}/i.test(nm.normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) return true;
@@ -552,6 +558,7 @@ async function searchSuppliers(body, priceMax, hooks) {
         rec.match = cmp.verdict === "exacto" ? "exacto" : cmp.verdict === "probable" ? "probable" : cmp.verdict === "variante" ? "variante" : "equivalente";
         if (cmp.verdict === "equivalente" && rec.rel >= 0.75 && !it.ean) rec.match = "equivalente";
         rec.identity = { verdict: cmp.verdict, reason: cmp.reason, checks: cmp.checks };
+        if (cmp.verdict === "variante") { rejected.push({ source: id, name: String(it.name || "").slice(0, 80), reason: cmp.reason }); return; }
         if (cmp.verdict === "distinto") { rejected.push({ source: id, name: String(it.name || "").slice(0, 80), reason: cmp.reason }); return; }
         rec.imageOk = /^https?:\/\//i.test(String(rec.image || ""));
         recsOut.push(rec);
