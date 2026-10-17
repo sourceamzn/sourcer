@@ -20,6 +20,7 @@ const CONCEPTS = {
   auricular: ["auricular", "auriculares", "cascos", "headphone", "headphones", "earphone", "earbuds", "headset"],
   cargador: ["cargador", "charger", "adaptador de corriente", "power adapter"],
   cable: ["cable"],
+  ambientador: ["ambientador", "ambientadores", "air freshener", "car freshener", "car scent", "car scents", "car perfume", "freshener", "aromatizador", "difusor de aroma", "difusor aromas", "odorizante", "desodorante ambiental", "parfum voiture", "deodorizer"],
   boligrafo: ["boligrafo", "bolígrafo", "pen", "ballpoint", "rotulador", "marker", "lapiz", "pencil"],
   mochila: ["mochila", "backpack", "rucksack"],
   botella: ["botella", "bottle", "termo", "flask"],
@@ -74,7 +75,8 @@ function sameType(sourceText, offerText) {
     return { ok: false, reason: "Es un accesorio (" + newAcc[0] + "), no el producto." };
   }
   if (!src.length) return { ok: true, reason: "" };
-  if (!off.length) return { ok: false, reason: "La oferta no indica el mismo tipo de producto (" + src[0] + ")." };
+  /* Oferta sin concepto de la lista: la lista no es una puerta; decide el perfil generico (categoria + sustantivo). */
+  if (!off.length) return { ok: true, reason: "", unknown: true };
   const shared = src.filter(function (c) { return off.indexOf(c) !== -1; });
   if (!shared.length) return { ok: false, reason: "Tipo distinto: origen " + src.join("/") + ", oferta " + off.join("/") + "." };
   /* Conflicto: la oferta ademas es de un concepto que el origen no tiene (cuaderno con funda de portatil). */

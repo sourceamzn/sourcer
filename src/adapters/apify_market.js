@@ -115,7 +115,7 @@ function queryOf(body) {
 const BUILDERS = {
   /* datacach/1688-search-scraper (pay-per-event): keywords[] + maxItemsPerKeyword. */
   a1688: function (q, max) { return { keywords: [q], maxItemsPerKeyword: Math.min(Math.max(max, 3), 60), searchType: "pcmarket", proxyConfiguration: { useApifyProxy: true } }; },
-  alibaba: function (q, max) { return { searchQueries: [q], maxProductsPerQuery: max, maxConcurrency: 3, proxyConfig: { useApifyProxy: true }, timeoutSecs: 90 }; },
+  alibaba: function (q, max) { return { searchQueries: [q], maxProductsPerQuery: Math.min(max, 8), maxConcurrency: 3, proxyConfig: { useApifyProxy: true }, timeoutSecs: 45 }; },
   mic: function (q, max) { return { searchMode: "keyword", keyword: q, maxResults: max }; },
   aliexpress: function (q, max) { return { keyword: q, query: q, maxItems: max }; },
   shopping: function (q, max) {
@@ -195,7 +195,7 @@ async function searchByImage(body) {
 }
 
 const a1688 = makeAdapter({ id: "a1688", actor: "a1688", label: "1688 (Apify)", lang: "zh", candidate: true, estCost: 0.03, timeoutSec: 45 });
-const alibaba = makeAdapter({ id: "alibaba", actor: "alibaba", label: "Alibaba (Apify)", lang: "en", candidate: true, estCost: 0.03, timeoutSec: 60 });
+const alibaba = makeAdapter({ id: "alibaba", actor: "alibaba", label: "Alibaba (Apify)", lang: "en", candidate: true, estCost: 0.03, timeoutSec: 50 });
 const madeinchina = makeAdapter({ id: "madeinchina", actor: "mic", label: "Made-in-China (Apify)", lang: "en", candidate: true, estCost: 0.03, timeoutSec: 45 });
 const gshopping = makeAdapter({ id: "gshopping", actor: "shopping", label: "Google Shopping (Apify)", candidate: false, estCost: 0.02, timeoutSec: 45 });
 const aliexpressApify = makeAdapter({ id: "aliexpress_apify", actor: "aliexpress", label: "AliExpress texto (Apify)", candidate: true, estCost: 0.03 });

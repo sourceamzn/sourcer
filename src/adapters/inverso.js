@@ -59,7 +59,7 @@ const TIERS = [
 ];
 const PLAN_DEFAULT = {
   vat: 21, recargo: 5.2, referral: 15, fbaFee: 3.5, storage: 0, digital: 0, inbound: 0.30,
-  minBB: 30, minSales: 10, minHistory: 90, minThirdParty: 0, minFba: 2,
+  minBB: 0, minSales: 0, minHistory: 0, minThirdParty: 0, minFba: 2,
   maxDiscount: 0, nearPct: 8, tiers: TIERS
 };
 function planParams(body) {
@@ -411,13 +411,13 @@ async function searchSuppliers(body, priceMax, hooks) {
   const typeToks = tokensOf((body && body.name) || (body && body.title) || "").filter(function (t) {
     return t.length >= 4 && !/\d/.test(t) && !NOISE[t] && brandToks.indexOf(t) === -1;
   }).slice(0, 8);
-  function typeGate(name) {
+  function typeGate(name, openSrc) {
     if (!typeToks.length) return true;
     const have = tokensOf(name);
     const hits = typeToks.filter(function (t) {
       return have.some(function (w) { return w === t || (w.length >= 5 && t.length >= 5 && (w.indexOf(t.slice(0, 5)) === 0)); });
     }).length;
-    return hits >= Math.max(1, Math.ceil(typeToks.length * 0.34));
+    return hits >= (openSrc ? 1 : Math.max(1, Math.ceil(typeToks.length * 0.34)));
   }
   /* Puerta de modelo: codigos alfanumericos (letras+digitos, p. ej. WH-1000XM5, SM-A546B).
      Si el origen los tiene, la oferta debe contener alguno; si muestra OTROS codigos y
@@ -467,6 +467,26 @@ async function searchSuppliers(body, priceMax, hooks) {
   const rejected = [];
   const matches = [], above = [], searched = [];
   if (!q) return { q: "", via: "", matches: matches, searched: searched };
+  /* Perfil de tipo generico: categoria Keepa (hoja) + sustantivo del titulo, traducidos. Sin listas. */
+  const typeprofile = require("../lib/typeprofile");
+  let catTree = (body && body.categoryTree) || null;
+  if (!catTree && body && body.asin && keepaReady()) {
+    try {
+      const kp = await withTimeout(keepaProductsByAsins([String(body.asin).toUpperCase()], 0), 6000);
+      const p0 = kp && kp.products && kp.products[0];
+      if (p0 && p0.categoryTree) catTree = p0.categoryTree;
+    } catch (e) {}
+  }
+  let tprof = { es: [], en: [], zh: [] };
+  try {
+    const tr = require("../lib/translate");
+    const built = await withTimeout(typeprofile.buildProfile(
+      { name: (body && (body.name || body.title)) || sq.q, brand: body && body.brand, categoryTree: catTree },
+      { en: function (t) { return tr.translate(t, "en"); }, zh: function (t) { return tr.translate(t, "zh"); } }
+    ), 9000);
+    if (built && built.es) tprof = built;
+  } catch (e) {}
+  const weakId = !eanQ && !(body && body.brand) && !srcCodes.length;
   const max = clampInt(body && body.max, 12, 3, 24);
   /* Presupuesto global y concurrencia: antes se consultaba fuente a fuente en
      serie y la peticion entera superaba el timeout del frontend (70 s) → la
@@ -506,6 +526,8 @@ async function searchSuppliers(body, priceMax, hooks) {
       items = items.filter(function (it) {
         if (eanQ.length >= 8 && it.ean && String(it.ean).indexOf(eanQ) !== -1) return true;
         const nm = String(it.name || "");
+        /* Enlaces de menu / paginas legales: sin precio ni foto no son un producto (vale para cualquier tienda). */
+        if (typeprofile.isJunk(it, { open: open })) { rejected.push({ source: id, name: nm.slice(0, 80), reason: "No es un producto (enlace de menu o pagina legal)." }); return false; }
         /* Nombres sin alfabeto latino (1688, etc.): no se pueden comparar, se conservan como candidatos. */
         if (ptype.hasCJK(nm)) {
           const sz = ptype.sameTypeZh(srcText, nm);
@@ -514,7 +536,8 @@ async function searchSuppliers(body, priceMax, hooks) {
           if (!ptype.conceptsOf(srcText).length) {
             const lat = nm.toLowerCase().replace(/[^a-z0-9]+/g, "");
             const hit = (srcId.models || []).some(function (m) { return lat.indexOf(m) !== -1; });
-            if (!hit) { rejected.push({ source: id, name: nm.slice(0, 80), reason: "Titulo chino no verificable (sin modelo ni tipo conocido)." }); return false; }
+            /* Sin lista: el tipo se traduce al chino desde categoria+titulo y se busca en el titulo. */
+            if (!hit && !typeprofile.zhOk(tprof, nm)) { rejected.push({ source: id, name: nm.slice(0, 80), reason: "Titulo chino sin ningun termino del tipo de producto." }); return false; }
           }
           return true;
         }
@@ -527,7 +550,11 @@ async function searchSuppliers(body, priceMax, hooks) {
         if (!cg.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: cg.reason }); return false; }
         const st = ptype.sameType(srcText, nm);
         if (!st.ok) { rejected.push({ source: id, name: nm.slice(0, 80), reason: st.reason }); return false; }
-        const ok = relevance(nm, qTokens) >= (open ? 0.34 : 0.4) && typeGate(nm);
+        const conceptHit = open && ptype.conceptsOf(srcText).some(function (c) { return ptype.conceptsOf(nm).indexOf(c) !== -1; });
+        /* Generico: comparte al menos un termino del perfil (categoria Keepa + sustantivo, es/en). */
+        const profHit = (tprof.es.length + tprof.en.length) > 0 && typeprofile.hits(tprof, nm).length >= (open ? 1 : 2);
+        const ok = conceptHit || profHit || (relevance(nm, qTokens) >= (open ? 0.34 : 0.4) && typeGate(nm, open));
+        if (ok && open && !conceptHit) it.__review = true; /* aceptado solo por tipo: nunca "exacto" */
         if (!ok) rejected.push({ source: id, name: nm.slice(0, 80), reason: "No es el mismo tipo de producto." });
         return ok;
       });
@@ -561,6 +588,8 @@ async function searchSuppliers(body, priceMax, hooks) {
         if (cmp.verdict === "variante") { rejected.push({ source: id, name: String(it.name || "").slice(0, 80), reason: cmp.reason }); return; }
         if (cmp.verdict === "distinto") { rejected.push({ source: id, name: String(it.name || "").slice(0, 80), reason: cmp.reason }); return; }
         rec.imageOk = /^https?:\/\//i.test(String(rec.image || ""));
+        if (price <= 0) { rec.noPrice = true; rec.priceText = rec.priceText || "Contactar para precio"; }
+        if (it.__review || (weakId && rec.match !== "exacto")) { rec.review = true; rec.match = rec.match === "exacto" ? "exacto" : "equivalente"; rec.reviewNote = "Candidato a revisar: mismo tipo por categoria/nombre; compara la foto con la tuya."; }
         recsOut.push(rec);
         if (price <= 0) { matches.push(rec); return; }
         if (priceMax > 0 && price > priceMax) { above.push(rec); return; }
