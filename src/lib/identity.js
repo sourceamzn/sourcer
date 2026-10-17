@@ -136,4 +136,26 @@ function compare(src, offer) {
   return { verdict: verdict, reason: reason, checks: checks, conflicts: conflicts, eanOk: eanOk };
 }
 
-module.exports = { identityOf, compare, modelsOf, sizesOf, quantityOf, colorOf };
+/* Ficha congelada: copia inmutable de lo que Amazon dice del producto. */
+function freezeCard(id, body) {
+  const card = Object.assign({}, id, {
+    asin: String((body && body.asin) || "").toUpperCase(),
+    image: String((body && (body.image || body.img)) || "")
+  });
+  card.models = Object.freeze((card.models || []).slice());
+  card.sizes = Object.freeze((card.sizes || []).slice());
+  return Object.freeze(card);
+}
+
+/* Estado visible: verificado (EAN, o marca+modelo coincidentes sin conflicto),
+   candidato (parecido, a revisar con foto). El resto ya se descarta antes. */
+function stateOf(rec, cmp) {
+  if (!cmp || cmp.conflicts.length) return "candidato";
+  if (cmp.eanOk) return "verificado";
+  const ok = {};
+  (cmp.checks || []).forEach(function (c) { if (c.state === "ok") ok[c.key] = 1; });
+  if (ok.model && ok.brand && !rec.review) return "verificado";
+  return "candidato";
+}
+
+module.exports = { freezeCard, stateOf, identityOf, compare, modelsOf, sizesOf, quantityOf, colorOf };

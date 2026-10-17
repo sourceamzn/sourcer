@@ -401,7 +401,7 @@ async function searchSuppliers(body, priceMax, hooks) {
   const qTokens = tokensOf([body && body.brand, body && body.model, body && body.name].filter(Boolean).join(" ") || sq.q);
   const eanQ = digits(body && body.ean);
   const q = sq.q;
-  const srcId = identity.identityOf(body || {});
+  const srcId = identity.freezeCard(identity.identityOf(body || {}), body || {});
   const ptype = require("../lib/ptype");
   const srcText = [body && body.name, body && body.title, body && body.query].filter(Boolean).join(" ");
   /* Puerta de tipo de producto: palabras que dicen QUE es (telefonillo, teclado...),
@@ -598,6 +598,7 @@ async function searchSuppliers(body, priceMax, hooks) {
         if (titlePrice) { rec.priceFromTitle = true; rec.priceText = "desde " + price.toFixed(2).replace(".", ",") + " € (leído del título, confirmar)"; }
         if (price <= 0) { rec.noPrice = true; rec.priceText = rec.priceText || "Contactar para precio"; }
         if (it.__review || (weakId && rec.match !== "exacto")) { rec.review = true; rec.match = rec.match === "exacto" ? "exacto" : "equivalente"; rec.reviewNote = "Candidato a revisar: mismo tipo por categoria/nombre; compara la foto con la tuya."; }
+        rec.state = identity.stateOf(rec, cmp);
         recsOut.push(rec);
         if (price <= 0) { matches.push(rec); return; }
         if (priceMax > 0 && price > priceMax) { above.push(rec); return; }
