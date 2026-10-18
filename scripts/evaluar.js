@@ -23,8 +23,10 @@
 
 const fs = require("fs");
 const path = require("path");
+const identityLib = require("../src/lib/identity");
 
 const DEFAULT_BASE = process.env.EVAL_BASE || "http://localhost:3000";
+const DEFAULT_IDENTITY_FIXTURE = path.join(__dirname, "..", "test", "fixtures", "identidad.json");
 const USAGE = [
   "Evaluador de aceptacion del buscador de proveedores.",
   "",
@@ -35,6 +37,8 @@ const USAGE = [
   "  --api-key <clave>   Clave X-API-Key (def. variable API_KEY)",
   "  --out <fichero>     Guarda el informe completo en JSON",
   "  --limit <n>         Solo las n primeras filas",
+  "  --identidad [json]  Evalua la tabla de identidad sin backend",
+  "                      (def. test/fixtures/identidad.json, >= 20 pares)",
   "  --price-max <n>     Precio maximo si la fila no lo trae (def. 0 = sin tope)",
   "  --timeout <seg>     Espera maxima por producto (def. 180)",
   "  --poll <seg>        Cada cuanto consulta el job (def. 2)",
@@ -409,6 +413,90 @@ function summarize(results) {
   return summary;
 }
 
+/* ---------------- tabla de identidad (offline, sin backend) ---------------- */
+
+function loadIdentityCases(file) {
+  const target = !file || file === "default" ? DEFAULT_IDENTITY_FIXTURE : path.resolve(file);
+  const data = JSON.parse(fs.readFileSync(target, "utf8"));
+  if (!Array.isArray(data)) throw new Error("El fixture de identidad debe ser un array de pares.");
+  return data;
+}
+
+function evaluateIdentityCase(c, index) {
+  const cse = c || {};
+  const src = identityLib.identityOf(cse.src || {});
+  const result = identityLib.decideIdentity(src, cse.offer || {}, cse.ctx || {});
+  const expect = cse.expect || {};
+  const fails = [];
+  if (expect.verdict && result.verdict !== expect.verdict) {
+    fails.push("veredicto " + result.verdict + " != " + expect.verdict);
+  }
+  if (expect.notVerdict && result.verdict === expect.notVerdict) {
+    fails.push("no debia ser " + expect.notVerdict);
+  }
+  if (expect.eanOk != null && result.eanOk !== expect.eanOk) fails.push("eanOk");
+  if (expect.strongConflict != null && result.strongConflict !== expect.strongConflict) fails.push("strongConflict");
+  if (expect.noTextMatch != null && result.noTextMatch !== expect.noTextMatch) fails.push("noTextMatch");
+  (expect.conflicts || []).forEach(function (key) {
+    if (result.conflicts.indexOf(key) === -1) fails.push("falta el conflicto " + key);
+  });
+  if (expect.conflicts && !expect.conflicts.length && result.conflicts.length) {
+    fails.push("conflictos inesperados: " + result.conflicts.join(", "));
+  }
+  return {
+    index: index + 1,
+    name: cse.name || ("caso " + (index + 1)),
+    expected: expect.verdict || "",
+    actual: result.verdict,
+    score: result.score,
+    conflicts: result.conflicts,
+    reasons: result.reasons,
+    pass: fails.length === 0,
+    fails: fails
+  };
+}
+
+function evaluateIdentityCases(cases) {
+  return (Array.isArray(cases) ? cases : []).map(evaluateIdentityCase);
+}
+
+function summarizeIdentity(results) {
+  const summary = {
+    total: results.length,
+    aciertos: 0,
+    fallos: 0,
+    verificado: 0,
+    revisar: 0,
+    descartar: 0,
+    accuracyPct: null,
+    fallosList: []
+  };
+  results.forEach(function (r) {
+    if (r.pass) summary.aciertos++;
+    else {
+      summary.fallos++;
+      summary.fallosList.push({ name: r.name, fails: r.fails });
+    }
+    if (summary[r.actual] != null) summary[r.actual]++;
+  });
+  summary.accuracyPct = summary.total ? Math.round((summary.aciertos / summary.total) * 1000) / 10 : null;
+  return summary;
+}
+
+function printIdentityTable(summary) {
+  console.log("\n== Identidad (tabla offline)");
+  console.log("pares: " + summary.total +
+    " | verificado: " + summary.verificado +
+    " | revisar: " + summary.revisar +
+    " | descartar: " + summary.descartar);
+  console.log("aciertos: " + summary.aciertos + "/" + summary.total +
+    (summary.accuracyPct == null ? "" : " (" + summary.accuracyPct + " %)"));
+  summary.fallosList.slice(0, 20).forEach(function (f) {
+    console.log("- " + f.name + ": " + f.fails.join("; "));
+  });
+  console.log("Regla: la foto no verifica sola; sin clave de vision queda 'sin confirmar visualmente'.");
+}
+
 /* ---------------- CLI ---------------- */
 
 function parseArgs(argv) {
@@ -418,6 +506,7 @@ function parseArgs(argv) {
     apiKey: process.env.API_KEY || "",
     out: "",
     limit: 0,
+    identity: "",
     priceMax: 0,
     timeoutMs: 180000,
     pollMs: 2000,
@@ -434,6 +523,11 @@ function parseArgs(argv) {
     else if (arg === "--api-key") opts.apiKey = next() || "";
     else if (arg === "--out") opts.out = next() || "";
     else if (arg === "--limit") opts.limit = parseInt(next(), 10) || 0;
+    else if (arg === "--identidad") {
+      const fixture = args[i + 1];
+      if (fixture && !fixture.startsWith("-")) { opts.identity = fixture; i++; }
+      else opts.identity = "default";
+    }
     else if (arg === "--price-max") opts.priceMax = toNumber(next());
     else if (arg === "--timeout") opts.timeoutMs = Math.max(10000, (parseInt(next(), 10) || 180) * 1000);
     else if (arg === "--poll") opts.pollMs = Math.max(500, (parseInt(next(), 10) || 2) * 1000);
@@ -585,6 +679,30 @@ function printSummary(summary, results) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) { console.log(USAGE); return; }
+  if (opts.identity) {
+    let cases;
+    try { cases = loadIdentityCases(opts.identity); }
+    catch (error) {
+      console.error("No se puede leer el fixture de identidad: " + opts.identity + " (" + error.message + ")");
+      process.exitCode = 1;
+      return;
+    }
+    const results = evaluateIdentityCases(cases);
+    const summary = summarizeIdentity(results);
+    printIdentityTable(summary);
+    if (opts.out) {
+      const outPath = path.resolve(opts.out);
+      fs.writeFileSync(outPath, JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        fixture: opts.identity === "default" ? DEFAULT_IDENTITY_FIXTURE : path.resolve(opts.identity),
+        summary: summary,
+        results: results
+      }, null, 2), "utf8");
+      console.log("\nInforme JSON: " + outPath);
+    }
+    if (summary.fallos) process.exitCode = 1;
+    return;
+  }
   if (!opts.csv) { console.log(USAGE); process.exitCode = 1; return; }
 
   const csvPath = path.resolve(opts.csv);
@@ -693,6 +811,10 @@ module.exports = {
   topReasons,
   evaluateRow,
   summarize,
+  loadIdentityCases,
+  evaluateIdentityCase,
+  evaluateIdentityCases,
+  summarizeIdentity,
   parseArgs
 };
 

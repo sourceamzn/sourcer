@@ -1,4 +1,4 @@
-const { config, amazonReady, keepaReady, feedReady, scrapingReady, apifyReady } = require("../config");
+const { config, amazonReady, keepaReady, feedReady, scrapingReady, apifyReady, visionReady } = require("../config");
 const { list } = require("../adapters");
 const { profileMeta } = require("../adapters/sources/catalog");
 const vault = require("../lib/vault");
@@ -32,6 +32,9 @@ function health(req, res) {
       gshopping: apifyReady() && Boolean(config.apify.actors.shopping),
       explorar: apifyReady() && Boolean(config.apify.actors.shopping),
       foto: apifyReady() && Boolean(config.apify.actors.image),
+      /* Comparacion visual de fotos: opcional; sin clave se usan heuristicas. */
+      vision: visionReady(),
+      visionProvider: config.imageAi.enabled ? config.imageAi.provider : "off",
       /* Busqueda inversa (Amazon -> proveedor): depende de Keepa para los
          candidatos de la demanda; los proveedores usan el resto de fuentes. */
       inverso: keepaReady(),

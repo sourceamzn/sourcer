@@ -20,8 +20,10 @@ const PLAN_DEFAULT = {
      fabricante/marca; 0 = solo aviso. */
   bbRule: 1,
   /* Regla Buy Box: Amazon + fabricante >= 95 % o terceros < 5 % = no apto.
-     Un unico tercero con >= 97 % queda "a revisar", nunca descarte. */
-  bbManufacturerMin: 95, bbThirdMax: 5, bbSingleThird: 97
+     Ademas se exigen al menos 2 vendedores FBA distintos: con uno solo no
+     hay competencia real en la Buy Box. */
+  bbManufacturerMin: 95, bbThirdMax: 5, bbSingleThird: 97,
+  requireTwoSellers: 1
 };
 
 function num(v, d) {
@@ -84,34 +86,43 @@ function planFor(m, p) {
   const discount = pvp > 0 ? 1 - priceMax / pvp : 0;
   const discPct = round2(discount * 100);
 
-  /* Unica regla dura del motor: beneficio neto. Sin coste maximo positivo la
-     operacion pierde dinero -> descarte. El resto de criterios del PDF (Buy Box
-     minima, ventas, vendedores terceros, historial, descuento necesario) pasa a
-     AVISOS configurables: informan, no descartan. */
+  /* Reglas duras: beneficio neto y Buy Box con competencia real (2 FBA). Sin
+     coste maximo positivo la operacion pierde dinero; con Amazon/fabricante
+     dominando o un solo vendedor FBA no hay hueco. El resto de criterios del
+     PDF (precio minimo, ventas, historial, descuento necesario) son AVISOS
+     configurables: informan, no descartan. */
   const reasons = [];
   const thirdParty = num(m.thirdParty, 0);
   const historyDays = m.historyDays == null ? null : num(m.historyDays);
   const fbaKnown = m.offersFba != null && m.offersFba !== "";
   const fba = num(m.offersFba, 0);
   const lowFba = fbaKnown && fba < num(p.minFba);
+  const lowFbaBlocked = num(p.bbRule, 1) > 0 && lowFba;
   const privateLabel = !!m.privateLabel || (fbaKnown && num(m.thirdParty, 0) <= 1 && fba <= 1);
   /* Regla Buy Box 90 d: Amazon+fabricante >= 95 % o terceros < 5 % = no apto
-     (configurable). Un unico tercero >= 97 % solo se avisa. Sin dato no se descarta. */
+     (configurable). Ademas, si hay historial clasificado, se exigen al menos
+     2 vendedores terceros distintos: con un solo vendedor no hay competencia. */
   const bbv = buybox.verdict(m.buyBox, m.sellerName, m.brand, m.manufacturer, {
     manufacturerMin: p.bbManufacturerMin, thirdMax: p.bbThirdMax, singleThird: p.bbSingleThird
   });
-  const bbBlocked = num(p.bbRule, 1) > 0 && (
+  const twoSellers = num(p.requireTwoSellers, 1) > 0;
+  const singleSeller = num(p.bbRule, 1) > 0 && twoSellers && bbv.kind !== "sin_dato" &&
+    bbv.thirdSellers != null && num(bbv.thirdSellers) < 2;
+  const bbBlocked = singleSeller || (num(p.bbRule, 1) > 0 && (
     bbv.kind === "amazon" || bbv.kind === "fabricante" ||
     bbv.kind === "amazon+fabricante" || bbv.kind === "terceros"
-  );
-  const hardDrop = costMax <= 0 || bbBlocked;
+  ));
+  const hardDrop = costMax <= 0 || bbBlocked || lowFbaBlocked;
   const restricted = restrictionNotes(m.restrictions);
   if (bbBlocked) reasons.push("No apto: " + bbv.note + " No hay hueco para revender.");
+  if (singleSeller && ["amazon", "fabricante", "amazon+fabricante", "terceros"].indexOf(bbv.kind) === -1) {
+    reasons.push("Buy Box 90 d: solo " + num(bbv.thirdSellers) + " vendedor(es) tercero(s); se exigen 2 vendedores distintos. No apto.");
+  }
   if (costMax <= 0) reasons.push("Con las tarifas reales no queda coste maximo positivo: no hay beneficio neto.");
-  if (lowFba) reasons.push("Solo " + fba + " vendedor(es) FBA (minimo " + p.minFba + "): EN REVISION, no apto.");
-  if (privateLabel) reasons.push("Marca privada con exclusividad probable (un unico vendedor): EN REVISION, no apto.");
+  if (lowFbaBlocked) reasons.push("Solo " + fba + " vendedor(es) FBA (minimo " + p.minFba + "): descartado, no hay 2 FBA.");
+  else if (lowFba) reasons.push("Solo " + fba + " vendedor(es) FBA (minimo " + p.minFba + "): EN REVISION, no apto.");
+  if (privateLabel && !lowFbaBlocked) reasons.push("Marca privada con exclusividad probable (un unico vendedor): EN REVISION, no apto.");
   if (!hardDrop) {
-    if (num(p.bbRule, 1) > 0 && bbv.kind === "a_revisar") reasons.push(bbv.note);
     if (pvp > 0 && pvp < num(p.minBB)) reasons.push("Precio Buy Box " + round2(pvp) + " EUR por debajo del minimo (" + p.minBB + " EUR): el descuento necesario puede no conseguirse.");
     if (sales < num(p.minSales)) reasons.push("Ventas/mes " + round2(sales) + " por debajo del minimo (" + p.minSales + "): poca rotacion.");
     if (num(p.minThirdParty) > 0 && thirdParty < num(p.minThirdParty)) reasons.push("Solo " + thirdParty + " vendedor(es) tercero(s): si solo vende la marca, es marca privada.");
@@ -137,7 +148,9 @@ function planFor(m, p) {
       kind: bbv.kind, note: bbv.note, rule: num(p.bbRule, 1) > 0,
       amazonShare: bbv.amazonShare, manufacturerShare: bbv.manufacturerShare,
       thirdShare: bbv.thirdShare, unknownShare: bbv.unknownShare,
-      thirdSellers: bbv.thirdSellers, breakdown: bbv.breakdown || []
+      thirdSellers: bbv.thirdSellers, fbaSellers: fbaKnown ? fba : null,
+      requireTwoSellers: twoSellers, singleSeller: singleSeller,
+      breakdown: bbv.breakdown || []
     }
   };
 }

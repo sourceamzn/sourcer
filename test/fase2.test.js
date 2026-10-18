@@ -119,17 +119,27 @@ test("plan: terceros < 5 % descarta", () => {
   };
   assert.equal(plan.planFor(m, plan.PLAN_DEFAULT).estado, "descarte");
 });
-test("plan: un unico tercero con >= 97 % queda a revisar, no se descarta", () => {
+test("plan: un unico tercero se descarta porque exige 2 vendedores FBA", () => {
   const m = {
     pvp: 50, sales: 20, brand: "Acme",
     buyBox: { known: true, classified: true, amazonShare: 0, manufacturerShare: 0, thirdShare: 0.97, unknownShare: 0, thirdSellers: 1, topThirdShare: 0.97, sellers: 1 }
   };
   const on = plan.planFor(m, plan.PLAN_DEFAULT);
   assert.equal(on.buyBox.kind, "a_revisar");
-  assert.equal(on.estado, "casi");
-  assert.ok(on.reasons.join(" ").indexOf("a revisar") !== -1);
+  assert.equal(on.estado, "descarte");
+  assert.ok(on.reasons.join(" ").indexOf("2 vendedores distintos") !== -1);
   const off = plan.planFor(m, Object.assign({}, plan.PLAN_DEFAULT, { bbRule: 0 }));
   assert.equal(off.estado, "apt");
+});
+test("plan: menos de 2 vendedores FBA descarta; 2 o mas no bloquea", () => {
+  const base = { pvp: 50, sales: 20, brand: "Acme" };
+  const one = plan.planFor(Object.assign({}, base, { offersFba: 1 }), plan.PLAN_DEFAULT);
+  assert.equal(one.estado, "descarte");
+  assert.ok(one.reasons.join(" ").indexOf("2 FBA") !== -1);
+  const two = plan.planFor(Object.assign({}, base, { offersFba: 2 }), plan.PLAN_DEFAULT);
+  assert.equal(two.estado, "apt");
+  const off = plan.planFor(Object.assign({}, base, { offersFba: 1 }), Object.assign({}, plan.PLAN_DEFAULT, { bbRule: 0 }));
+  assert.equal(off.estado, "casi");
 });
 test("planParams: lee bbRule de params o filters y mantiene el resto a 0", () => {
   assert.equal(plan.planParams({ filters: { bbRule: 0 } }).bbRule, 0);

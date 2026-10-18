@@ -1,4 +1,4 @@
-/* Fuentes de PROVEEDOR/FABRICANTE vía Apify (una sola clave: APIFY_TOKEN).
+﻿/* Fuentes de PROVEEDOR/FABRICANTE vÃ­a Apify (una sola clave: APIFY_TOKEN).
 
    1688, Alibaba, Made-in-China, Google Shopping y busqueda por foto.
    Cada actor tiene su propio esquema de entrada (verificado en su ficha de
@@ -48,9 +48,50 @@ function currencyOf(o) {
   return String(first(o, ["currency_code", "currency", "currencyCode"]) || "").trim();
 }
 
+/* Texto plano tolerante: los actores devuelven strings, arrays u objetos
+   {name,value}. Se conserva lo que declaran, sin inventar atributos. */
+function textOf(v) {
+  if (v == null) return "";
+  if (typeof v === "string") return v.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (Array.isArray(v)) return v.map(textOf).filter(Boolean).join(" Â· ");
+  if (typeof v === "object") return textOf(v.value != null ? v.value : (v.name || v.text || v.label || ""));
+  return "";
+}
+
+function listOf(v) {
+  const out = [];
+  function add(x) {
+    if (x == null) return;
+    if (Array.isArray(x)) { x.forEach(add); return; }
+    if (typeof x === "object") {
+      const k = x.name || x.key || x.label || x.spec || x.type;
+      const val = x.value != null ? x.value : (x.val != null ? x.val : x.text);
+      if (k && val != null) { out.push(String(k).trim() + ": " + textOf(val)); return; }
+      /* Mapa plano {Color:"negro", Talla:"M"}: se conserva cada atributo. */
+      const keys = Object.keys(x);
+      const flat = keys.length > 0 && keys.every(function (k2) { return x[k2] == null || typeof x[k2] !== "object"; });
+      if (flat) {
+        keys.forEach(function (k2) {
+          const t = textOf(x[k2]);
+          if (t) out.push(String(k2).trim() + ": " + t);
+        });
+        return;
+      }
+      const t = textOf(x);
+      if (t) out.push(t);
+      return;
+    }
+    const t = textOf(x);
+    if (t) out.push(t);
+  }
+  add(v);
+  return out.filter(Boolean).slice(0, 30);
+}
+
 function isEur(cur, id) {
   if (id === "gshopping") return true; /* se pide country=es */
-  return /€|eur/i.test(cur);
+  return /â‚¬|eur/i.test(cur);
 }
 
 function toItem(o, id, label, candidate) {
@@ -63,17 +104,37 @@ function toItem(o, id, label, candidate) {
   let priceText = "";
   if (lo && !eur) {
     const sym = cur || "";
-    priceText = (sym ? sym + " " : "") + lo + (hi && hi !== lo ? "–" + hi : "");
+    priceText = (sym ? sym + " " : "") + lo + (hi && hi !== lo ? "â€“" + hi : "");
   }
   const moq = moqOf(first(o, ["moq", "min_order", "minOrder", "minimumOrder", "minOrderQuantity", "minOrderQuantity"]));
   const platform = String(first(o, ["provider", "platform", "marketplace"]) || id);
+  /* Identidad y ficha completa: sin esto, una oferta china llega "desnuda" y
+     el cotejo no puede comparar marca, modelo, color, medidas ni caracteristicas. */
+  const brand = textOf(first(o, ["brand", "brandName", "brand_name"]));
+  const model = textOf(first(o, ["model", "modelNumber", "model_number", "modelNo", "sku", "productCode", "articleNumber", "mpn"]));
+  const eanRaw = String(first(o, ["ean", "gtin", "gtin13", "gtin12", "barcode", "upc"]) || "").replace(/\D/g, "");
+  const ean = eanRaw.length >= 8 && eanRaw.length <= 14 ? eanRaw : "";
+  const description = textOf(first(o, ["description", "product_description", "productDescription", "detail", "details", "shortDescription", "summary", "productDetails"])).slice(0, 1200);
+  const specs = listOf(first(o, ["specifications", "specs", "attributes", "properties", "keyProperties", "keyFacts", "keyfacts", "parameters"]));
+  const features = listOf(first(o, ["features", "featureList", "keyFeatures", "sellingPoints", "highlights"]));
+  const color = textOf(first(o, ["color", "colour", "colorName", "color_name"]));
+  const size = textOf(first(o, ["size", "dimensions", "dimension", "measurements", "productSize"]));
+  const material = textOf(first(o, ["material", "materials"]));
+  const weight = textOf(first(o, ["weight", "itemWeight", "item_weight", "productWeight"]));
   return {
     source: id,
     name: String(first(o, ["title", "product_name", "product_title", "name", "subject", "productName", "productTitle"]) || "").slice(0, 180),
-    brand: "",
-    model: "",
-    reference: "",
-    ean: "",
+    brand: brand,
+    model: model,
+    reference: model,
+    ean: ean,
+    description: description,
+    specs: specs,
+    features: features,
+    color: color,
+    size: size,
+    material: material,
+    weight: weight,
     price: eur ? lo : null,
     priceText: priceText,
     oldPrice: null,
@@ -90,6 +151,12 @@ function toItem(o, id, label, candidate) {
       currency: cur,
       platform: platform,
       factory: /manufactur|factory|fabric/i.test(String(first(o, ["business_type", "seller_type", "sellerType"]) || "")) || o.is_factory === true || o.isFactory === true,
+      description: description,
+      specs: specs,
+      color: color,
+      size: size,
+      material: material,
+      weight: weight,
       note: candidate ? "Candidato: validar modelo y variante antes de comprar." : ""
     },
     capturedAt: new Date().toISOString()
@@ -129,15 +196,20 @@ function dedupe(items, max) {
 
 function queryOf(body) {
   const b = body || {};
+  const q = String(b.query || "").trim();
   const parts = [b.brand, b.model, b.name].map(function (x) { return String(x == null ? "" : x).trim(); }).filter(Boolean);
-  return String(b.query || parts.join(" ") || "").trim();
+  const text = parts.join(" ").trim();
+  /* La cascada puede pasar el EAN como `query`; en un marketplace eso no
+     encuentra el producto. Si hay marca/modelo/nombre, mandan ellos. */
+  if (text && (!q || /^\d{8,14}$/.test(q))) return text;
+  return String(q || text || "").trim();
 }
 
 /* Entradas EXACTAS por actor (esquema de su ficha en Apify). */
 const BUILDERS = {
   /* datacach/1688-search-scraper (pay-per-event): keywords[] + maxItemsPerKeyword. */
   a1688: function (q, max) { return { keywords: [q], maxItemsPerKeyword: Math.min(Math.max(max, 3), 60), searchType: "pcmarket", proxyConfiguration: { useApifyProxy: true } }; },
-  alibaba: function (q, max) { return { searchQueries: [q], maxProductsPerQuery: Math.min(max, 8), maxConcurrency: 3, proxyConfig: { useApifyProxy: true }, timeoutSecs: 45 }; },
+  alibaba: function (q, max) { return { searchQueries: [q], maxProductsPerQuery: Math.min(max, 8), maxConcurrency: 3, proxyConfig: { useApifyProxy: true }, timeoutSecs: 80 }; },
   mic: function (q, max) { return { searchMode: "keyword", keyword: q, maxResults: max }; },
   aliexpress: function (q, max) { return { keyword: q, query: q, maxItems: max }; },
   shopping: function (q, max) {
@@ -211,7 +283,7 @@ async function searchByImage(body) {
     { estCost: 0.10, timeoutSec: 90, op: apify.newOp() }
   );
   if (!r.ok) return { ok: false, reason: r.reason, detail: r.detail };
-  const items = dedupe(r.items.map(function (o) { return toItem(o, "foto", "Búsqueda por foto", true); }), max);
+  const items = dedupe(r.items.map(function (o) { return toItem(o, "foto", "BÃºsqueda por foto", true); }), max);
   return {
     ok: items.length > 0,
     reason: items.length ? null : "sin_resultados",
@@ -219,15 +291,15 @@ async function searchByImage(body) {
   };
 }
 
-const a1688 = makeAdapter({ id: "a1688", actor: "a1688", label: "1688 (Apify)", lang: "zh", candidate: true, estCost: 0.03, timeoutSec: 45 });
-const alibaba = makeAdapter({ id: "alibaba", actor: "alibaba", label: "Alibaba (Apify)", lang: "en", candidate: true, estCost: 0.03, timeoutSec: 50 });
-const madeinchina = makeAdapter({ id: "madeinchina", actor: "mic", label: "Made-in-China (Apify)", lang: "en", candidate: true, estCost: 0.03, timeoutSec: 45 });
-const gshopping = makeAdapter({ id: "gshopping", actor: "shopping", label: "Google Shopping (Apify)", candidate: false, estCost: 0.02, timeoutSec: 45 });
+const a1688 = makeAdapter({ id: "a1688", actor: "a1688", label: "1688 (Apify)", lang: "zh", candidate: true, estCost: 0.03, timeoutSec: 90 });
+const alibaba = makeAdapter({ id: "alibaba", actor: "alibaba", label: "Alibaba (Apify)", lang: "en", candidate: true, estCost: 0.03, timeoutSec: 100 });
+const madeinchina = makeAdapter({ id: "madeinchina", actor: "mic", label: "Made-in-China (Apify)", lang: "en", candidate: true, estCost: 0.03, timeoutSec: 90 });
+const gshopping = makeAdapter({ id: "gshopping", actor: "shopping", label: "Google Shopping (Apify)", candidate: false, estCost: 0.02, timeoutSec: 90 });
 const aliexpressApify = makeAdapter({ id: "aliexpress_apify", actor: "aliexpress", label: "AliExpress texto (Apify)", candidate: true, estCost: 0.03 });
 
 const foto = {
   id: "foto",
-  label: "Búsqueda por foto (Apify)",
+  label: "BÃºsqueda por foto (Apify)",
   kind: "supplier_market",
   /* No participa en searchSuppliers (necesita imagen, no texto): sin accion search. */
   actions: {
@@ -240,3 +312,4 @@ const foto = {
 };
 
 module.exports = { a1688, alibaba, madeinchina, gshopping, aliexpressApify, foto, searchByImage };
+

@@ -124,6 +124,33 @@ const config = {
     thirdMax: Math.min(Math.max(parseFloat(clean(process.env.BB_THIRD_MAX) || "5", 10) || 5, 0), 50),
     singleThird: Math.min(Math.max(parseFloat(clean(process.env.BB_SINGLE_THIRD) || "97", 10) || 97, 50), 100)
   },
+  /* Comparacion visual de fotos (opcional). Sin clave se usan las
+     heuristicas de imagecheck y todo queda "sin confirmar visualmente".
+     Un solo proveedor activo: anthropic | openai | gemini | openrouter. */
+  imageAi: {
+    enabled: clean(process.env.IMAGE_AI_ENABLED) !== "false",
+    provider: clean(process.env.IMAGE_AI_PROVIDER) || "anthropic",
+    /* Maximo de llamadas de vision por busqueda (0 = no llamar). */
+    max: Math.max(0, parseInt(clean(process.env.IMAGE_AI_MAX) || "10", 10) || 0),
+    timeoutMs: Math.min(Math.max(parseInt(clean(process.env.IMAGE_AI_TIMEOUT_MS) || "12000", 10) || 12000, 2000), 30000),
+    cacheMin: Math.max(0, parseInt(clean(process.env.IMAGE_AI_CACHE_MIN) || "1440", 10) || 0),
+    anthropic: {
+      apiKey: clean(process.env.ANTHROPIC_API_KEY),
+      model: clean(process.env.ANTHROPIC_MODEL) || "claude-sonnet-4-6"
+    },
+    openai: {
+      apiKey: clean(process.env.OPENAI_API_KEY),
+      model: clean(process.env.OPENAI_MODEL) || "gpt-4o-mini"
+    },
+    gemini: {
+      apiKey: clean(process.env.GEMINI_API_KEY),
+      model: clean(process.env.GEMINI_MODEL) || "gemini-2.0-flash"
+    },
+    openrouter: {
+      apiKey: clean(process.env.OPENROUTER_API_KEY),
+      model: clean(process.env.OPENROUTER_MODEL) || "google/gemini-2.0-flash-001"
+    }
+  },
   barcode: {
     provider: clean(process.env.BARCODE_PROVIDER) || "upcitemdb",
     apiKey: clean(process.env.UPCITEMDB_API_KEY)
@@ -209,6 +236,13 @@ function cjReady() {
   return Boolean(config.cj.apiKey);
 }
 
+function visionReady() {
+  const ai = config.imageAi || {};
+  if (ai.enabled === false) return false;
+  const p = ai[ai.provider] || {};
+  return Boolean(p.apiKey);
+}
+
 module.exports = {
   config,
   amazonReady,
@@ -219,5 +253,6 @@ module.exports = {
   discoveryReady,
   bigbuyReady,
   aliexpressReady,
-  cjReady
+  cjReady,
+  visionReady
 };

@@ -457,7 +457,9 @@ async function searchSuppliers(body, priceMax, hooks) {
   /* Presupuesto global y concurrencia: antes se consultaba fuente a fuente en
      serie y la peticion entera superaba el timeout del frontend (70 s) → la
      busqueda "no encontraba nada". Ahora van en paralelo con tope de tiempo. */
-  const budgetMs = clampInt(body && body.budgetMs, 55000, 15000, 90000);
+  /* Los actores de Apify arrancan en frio y tardan 60-90 s. El trabajo es en
+     segundo plano (el frontend consulta el estado), asi que se le da margen. */
+  const budgetMs = clampInt(body && body.budgetMs, 110000, 15000, 180000);
   const deadline = Date.now() + budgetMs;
   const concurrency = Math.max(2, Math.min(clampInt(body && body.concurrency, 12, 1, 16), candidates.length || 1));
   let cursor = 0;
@@ -511,7 +513,7 @@ async function searchSuppliers(body, priceMax, hooks) {
             name: (body && body.name) || ""
           }),
           /* Las webs de catalogo fijo se cortan a 20 s; las que buscan en toda la red, al presupuesto. */
-          Math.min(Math.max(5000, deadline - Date.now()), rank[adapters[id].kind] != null ? 55000 : 20000)
+          Math.min(Math.max(5000, deadline - Date.now()), rank[adapters[id].kind] != null ? 100000 : 20000)
         );
         const data = r && r.ok ? r.data : null;
         const got = (data && data.items) || [];
@@ -553,6 +555,7 @@ async function searchSuppliers(body, priceMax, hooks) {
         const st = ptype.sameType(srcText, nm);
         const conceptHit = ptype.conceptsOf(srcText).some(function (c) { return ptype.conceptsOf(nm).indexOf(c) !== -1; });
         const profHit = (tprof.es.length + tprof.en.length) > 0 && typeprofile.hits(tprof, nm).length >= (open ? 1 : 2);
+        it.__typeConflict = !st.ok;
         it.__typeOk = st.ok && (conceptHit || profHit || (relevance(nm, qTokens) >= (open ? 0.34 : 0.4) && typeGate(nm, open)));
         it.__typeReason = st.ok ? "" : st.reason;
         return true;
@@ -586,6 +589,8 @@ async function searchSuppliers(body, priceMax, hooks) {
           shipping: num(it.shipping) || null, stock: it.stock == null ? null : num(it.stock),
           limit: it.limit == null ? null : num(it.limit),
           url: it.url || "", image: it.image || "", candidate: Boolean(it.candidate),
+          contactEmail: it.contactEmail || (it.attrs && it.attrs.email) || "",
+          contactPhone: it.contactPhone || (it.attrs && it.attrs.phone) || "",
           via: it.__via || sq.via, queryUsed: it.__q || q,
           priceText: it.priceText || "", minOrder: it.minOrder || null,
           supplier: it.supplier || "", factory: Boolean(it.attrs && it.attrs.factory),
@@ -604,29 +609,32 @@ async function searchSuppliers(body, priceMax, hooks) {
           specs: rec.specs, features: rec.features, description: rec.description,
           color: rec.color, size: rec.size, material: rec.material, weight: rec.weight,
           attrs: it.attrs
-        }, { typeOk: it.__typeOk, typeReason: it.__typeReason, specs: srcSpecs });
+        }, { typeOk: it.__typeOk, typeReason: it.__typeReason, typeConflict: it.__typeConflict === true, sourceText: srcText, specs: srcSpecs });
         rec.matchScore = mt.score;
         rec.matchBand = mt.band;
         rec.matchReasons = mt.reasons;
         rec.matchChecks = mt.checks;
         rec.__typeOk = it.__typeOk === true;
+        rec.__typeConflict = it.__typeConflict === true;
+        rec.__typeReason = it.__typeReason || "";
         /* Los descubrimientos web llegan solo con titulo + URL: no se pueden
            juzgar hasta abrir la ficha. Se conservan como provisionales y el
            cotejo posterior (JSON-LD/Open Graph + foto) decide. El resto de
            fuentes mantiene el descarte inmediato ante conflicto. */
-        if (mt.strongConflict || (mt.band === "descartar" && id !== "discovery")) {
+        if (mt.strongConflict || mt.typeConflict || (mt.band !== "verificado" && id !== "discovery")) {
           rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: mt.reasons[0] || "Coincidencia insuficiente.", score: mt.score });
           return;
         }
         const cmp = identity.compare(srcId, { name: it.name, brand: it.brand, ean: it.ean, model: rec.model, color: rec.color, size: rec.size, attrs: it.attrs });
-        rec.match = mt.band === "verificado" ? (mt.eanOk ? "exacto" : "probable") : "equivalente";
+        rec.match = mt.band === "verificado" ? "exacto" : "equivalente";
+        rec.matchBasis = mt.band === "verificado" ? (mt.eanOk ? "ean" : "marca+modelo") : "";
         rec.identity = { verdict: cmp.verdict, reason: mt.reasons.join(" · ") || cmp.reason, checks: mt.checks, score: mt.score, matching: cmp.matching, conflicting: cmp.conflicting };
         rec.imageOk = /^https?:\/\//i.test(String(rec.image || ""));
         if (titlePrice) { rec.priceFromTitle = true; rec.priceText = "desde " + price.toFixed(2).replace(".", ",") + " € (leído del título, confirmar)"; }
         if (price <= 0) { rec.noPrice = true; rec.priceText = rec.priceText || "Contactar para precio"; }
-        if (mt.band === "revisar" || (id === "discovery" && mt.band === "descartar")) {
+        if (mt.band !== "verificado") {
           rec.review = true;
-          rec.provisional = id === "discovery" && mt.band === "descartar";
+          rec.provisional = id === "discovery";
           rec.reviewNote = mt.noTextMatch
             ? "Candidato a revisar: titulo en chino, compara la foto con la tuya."
             : (rec.provisional
@@ -706,19 +714,22 @@ async function searchSuppliers(body, priceMax, hooks) {
             rec.meetsMax = priceMax > 0 ? rec.price <= priceMax : null;
           }
           if (!rec.name || rec.name.length < 8) rec.name = offerName || rec.name;
+          if (!rec.contactEmail && d.contactEmail) rec.contactEmail = d.contactEmail;
+          if (!rec.contactPhone && d.contactPhone) rec.contactPhone = d.contactPhone;
           const mt = matchLib.score(srcId, {
             name: offerName, brand: rec.brand, ean: d.gtin || rec.ean,
             model: rec.model || d.mpn || d.sku || "",
             specs: rec.specs, features: rec.features, description: rec.description || "",
             color: rec.color || "", size: rec.size || "", material: rec.material || "", weight: rec.weight || "",
             attrs: d
-          }, { typeOk: rec.__typeOk, specs: srcSpecs });
+          }, { typeOk: rec.__typeConflict === true ? false : rec.__typeOk, typeReason: rec.__typeReason || "", typeConflict: rec.__typeConflict === true, sourceText: srcText, specs: srcSpecs });
           rec.matchScore = mt.score;
           rec.matchBand = mt.band;
           rec.matchReasons = mt.reasons;
           rec.matchChecks = mt.checks;
           if (d.gtin) rec.ean = d.gtin;
-          rec.match = mt.band === "verificado" ? (mt.eanOk ? "exacto" : "probable") : "equivalente";
+          rec.match = mt.band === "verificado" ? "exacto" : "equivalente";
+          rec.matchBasis = mt.band === "verificado" ? (mt.eanOk ? "ean" : "marca+modelo") : "";
           rec.state = mt.band === "verificado" ? "verificado" : "candidato";
           rec.review = mt.band !== "verificado";
           rec.matchEnriched = {
@@ -735,7 +746,7 @@ async function searchSuppliers(body, priceMax, hooks) {
             verdict: cmp2.verdict, reason: mt.reasons.join(" | ") || cmp2.reason,
             checks: mt.checks, score: mt.score, matching: cmp2.matching, conflicting: cmp2.conflicting
           };
-          if (mt.strongConflict || mt.band === "descartar") removed.push(rec);
+          if (mt.strongConflict || mt.typeConflict || mt.band !== "verificado") removed.push(rec);
           else if (priceMax > 0 && rec.price > priceMax) {
             /* La ficha decia un precio distinto: ya no cumple el maximo. No se
                borra, se devuelve como referencia por encima del maximo. */
@@ -754,20 +765,14 @@ async function searchSuppliers(body, priceMax, hooks) {
       } catch (e) {}
     }
   }
-  /* Descubrimientos cuya ficha no se pudo leer y que siguen sin evidencia:
-     no se muestran como si se hubieran cotejado. */
-  for (let i = matches.length - 1; i >= 0; i--) {
-    const r = matches[i];
-    if (r.provisional && r.matchBand === "descartar" && !r.enriched) {
-      matches.splice(i, 1);
-      rejected.push({ source: r.source, kind: "identidad", name: String(r.name || "").slice(0, 80), reason: "No se pudo abrir su ficha para cotejar el producto.", score: r.matchScore });
-    }
-  }
-  /* Fase 4b · contraste de fotos: misma URL/CDN, misma huella o misma
-     proporcion. No asciende a "verificado": es una prueba adicional para las
-     ofertas que ya estan "a revisar". */
+  /* Fase 4b · contraste de fotos. La vision es opcional: sin clave se usan
+     las heuristicas y todo queda "sin confirmar visualmente". Una foto
+     claramente distinta descarta; una foto igual solo suma evidencia y nunca
+     verifica por si sola. */
+  const cfgI = config.imageAi || {};
   const imageMax = cfgM.imageMax == null ? 8 : Math.max(0, Math.min(parseInt(cfgM.imageMax, 10) || 0, 20));
-  if (imageMax > 0 && /^https?:\/\//i.test(String(body.image || ""))) {
+  const srcImage = body.image || srcId.image || "";
+  if (imageMax > 0 && /^https?:\/\//i.test(String(srcImage))) {
     const imageTargets = matches.filter(function (r) {
       return /^https?:\/\//i.test(String(r.image || ""));
     }).sort(function (a, b) {
@@ -778,17 +783,63 @@ async function searchSuppliers(body, priceMax, hooks) {
       return (b.matchScore || 0) - (a.matchScore || 0);
     }).slice(0, imageMax);
     if (imageTargets.length) {
+      const vision = require("../lib/vision");
+      const budget = vision.budget(cfgI.max == null ? 10 : cfgI.max);
       let ii = 0;
       async function imageWorker() {
         while (ii < imageTargets.length) {
           const rec = imageTargets[ii++];
           try {
-            const res = await imageLib.compareImages(body.image, rec.image, { timeoutMs: cfgM.imageMs || 5000 });
-            rec.imageCheck = { state: res.state, same: Boolean(res.same), reason: res.reason };
+            const res = await imageLib.visualCompare(srcImage, rec.image, {
+              timeoutMs: cfgM.imageMs || 5000,
+              apiTimeoutMs: cfgI.timeoutMs || 12000,
+              budget: budget,
+              srcName: body.name || body.title || "",
+              offerName: rec.name || "",
+              brand: srcId.brand || "",
+              model: (srcId.models && srcId.models[0]) || ""
+            });
+            rec.imageCheck = {
+              state: res.state, same: Boolean(res.same), confirmed: Boolean(res.confirmed),
+              reason: res.reason, provider: res.provider || "", cached: Boolean(res.cached)
+            };
             rec.imageSame = Boolean(res.same);
-            if (res.same) rec.reviewNote = "La foto es la misma que la de Amazon. " + (rec.reviewNote || "");
-            else if (res.state === "compatible") rec.reviewNote = "Foto con la misma proporcion que la de Amazon. " + (rec.reviewNote || "");
-            else if (res.state === "warn") rec.reviewNote = res.reason + " " + (rec.reviewNote || "");
+            /* La foto se aplica con la MISMA funcion de decision: no hay una
+               segunda regla en el adaptador. EAN igual sigue mandando. */
+            const imgState = res.state === "same" ? "same" : (res.state === "different" ? "different" : "unknown");
+            const mt2 = matchLib.score(srcId, {
+              name: rec.name, brand: rec.brand, ean: rec.ean, model: rec.model,
+              specs: rec.specs, features: rec.features, description: rec.description || "",
+              color: rec.color || "", size: rec.size || "", material: rec.material || "", weight: rec.weight || ""
+            }, {
+              typeOk: rec.__typeConflict === true ? false : rec.__typeOk,
+              typeReason: rec.__typeReason || "",
+              typeConflict: rec.__typeConflict === true,
+              sourceText: srcText, specs: srcSpecs,
+              image: { state: imgState, same: Boolean(res.same), reason: res.reason }
+            });
+            rec.matchScore = mt2.score;
+            rec.matchBand = mt2.band;
+            rec.matchReasons = mt2.reasons;
+            rec.matchChecks = mt2.checks;
+            rec.match = mt2.band === "verificado" ? "exacto" : "equivalente";
+            rec.matchBasis = mt2.band === "verificado" ? (mt2.eanOk ? "ean" : "marca+modelo") : "";
+            rec.state = mt2.band === "verificado" ? "verificado" : "candidato";
+            rec.review = mt2.band !== "verificado";
+            rec.imageConflict = mt2.conflicts.indexOf("image") !== -1;
+            rec.strongConflict = Boolean(mt2.strongConflict);
+            if (rec.identity) {
+              rec.identity.score = mt2.score;
+              rec.identity.checks = mt2.checks;
+              rec.identity.reason = mt2.reasons.join(" · ") || rec.identity.reason;
+            }
+            if (rec.imageConflict) {
+              rec.reviewNote = res.reason;
+            } else if (res.same) {
+              rec.reviewNote = "La foto es la misma que la de Amazon. " + (rec.reviewNote || "");
+            } else if (res.state === "unknown" && rec.matchBand !== "verificado") {
+              rec.reviewNote = (res.reason || "Foto sin confirmar visualmente.") + " " + (rec.reviewNote || "");
+            }
           } catch (e) {}
         }
       }
@@ -800,21 +851,44 @@ async function searchSuppliers(body, priceMax, hooks) {
           phase: "image_check",
           tried: imageTargets.length,
           same: imageTargets.filter(function (r) { return r.imageSame; }).length,
-          compatible: imageTargets.filter(function (r) { return r.imageCheck && r.imageCheck.state === "compatible"; }).length,
-          warn: imageTargets.filter(function (r) { return r.imageCheck && r.imageCheck.state === "warn"; }).length
+          different: imageTargets.filter(function (r) { return r.imageConflict; }).length,
+          unknown: imageTargets.filter(function (r) { return r.imageCheck && r.imageCheck.state === "unknown"; }).length,
+          ai: Boolean(budget.used)
         });
       } catch (e) {}
+    }
+  }
+
+  /* Regla dura: solo se muestra lo que queda VERIFICADO como el mismo
+     producto. Los descubrimientos que no se pudieron cotejar (o que tras
+     abrir su ficha siguen sin marca+modelo/EAN) no se muestran como si lo
+     fueran; pasan al registro de descartes. Una foto distinta tambien cae. */
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const r = matches[i];
+    if (r.matchBand !== "verificado") {
+      matches.splice(i, 1);
+      rejected.push({
+        source: r.source, kind: "identidad", name: String(r.name || "").slice(0, 80),
+        reason: r.imageConflict
+          ? ((r.matchReasons && r.matchReasons[0]) || "La foto no coincide con la de Amazon.")
+          : (r.enriched
+            ? ((r.matchReasons && r.matchReasons[0]) || "No se pudo verificar que sea el mismo producto.")
+            : "No se pudo abrir su ficha para cotejar el producto."),
+        score: r.matchScore
+      });
     }
   }
 
   function crossCheckOf(r) {
     const specs = (r.specs && r.specs.length) || (r.enriched && r.enriched.specs && r.enriched.specs.length) || 0;
     const photo = r.imageCheck
-      ? (r.imageSame ? "identica" : (r.imageCheck.state || "sin_verificar"))
+      ? (r.imageSame ? "identica" : (r.imageCheck.confirmed ? "distinta" : "sin_confirmar"))
       : (r.image ? "sin_verificar" : "sin_foto");
     return {
       photo: photo,
       photoReason: (r.imageCheck && r.imageCheck.reason) || "",
+      photoConfirmed: Boolean(r.imageCheck && r.imageCheck.confirmed),
+      photoProvider: (r.imageCheck && r.imageCheck.provider) || "",
       title: Boolean(r.name),
       brand: Boolean(r.brand || (r.enriched && r.enriched.brand)),
       model: Boolean(r.model || (r.matchEnriched && r.matchEnriched.mpn)),
@@ -829,7 +903,7 @@ async function searchSuppliers(body, priceMax, hooks) {
       url: Boolean(r.url)
     };
   }
-  matches.forEach(function (r) { r.crossCheck = crossCheckOf(r); delete r.__typeOk; });
+  matches.forEach(function (r) { r.crossCheck = crossCheckOf(r); delete r.__typeOk; delete r.__typeConflict; });
 
   /* Con precio en EUR: de mas barato a mas caro. Sin precio (enlaces de
      fabricante/mayorista, candidatos en USD/CNY): por relevancia, detras. */
@@ -844,15 +918,31 @@ async function searchSuppliers(body, priceMax, hooks) {
      por encima del maximo (marcadas «> max.») para que el usuario vea precios
      reales en vez de un "sin resultados" que parece un fallo del boton. */
   let extra = [];
-  if (!matches.length && priceMax > 0 && above.length) {
-    above.sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); });
-    extra = above.slice(0, 8).map(function (x) { return Object.assign({}, x, { over: true, crossCheck: x.crossCheck || crossCheckOf(x) }); });
+  const aboveVerified = above.filter(function (x) { return x.matchBand === "verificado"; });
+  if (!matches.length && priceMax > 0 && aboveVerified.length) {
+    aboveVerified.sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); });
+    extra = aboveVerified.slice(0, 8).map(function (x) { return Object.assign({}, x, { over: true, crossCheck: x.crossCheck || crossCheckOf(x) }); });
   }
   const coverage = coverageLib.buildCoverage({
     searched: searched, rejected: rejected, matches: matches.concat(extra),
     queries: qlist, identity: srcId, candidates: candidates.length
   });
-  return { q: q, via: sq.via, priceMax: round2(priceMax), matches: matches.concat(extra), searched: searched, identity: srcId, rejected: rejected.slice(0, 40), coverage: coverage };
+  /* Un recuento por fuente evita que 40 descartes de un catalogo generico
+     oculten por que fallaron las fuentes que si podian traer el producto. */
+  const rejectedBySource = {};
+  rejected.forEach(function (x) { rejectedBySource[x.source] = (rejectedBySource[x.source] || 0) + 1; });
+  /* Si no hay ninguna oferta bajo el maximo, `extra` ya muestra las mas
+     baratas por encima; no se duplican en `overMax`. */
+  const overMax = matches.length ? aboveVerified.slice(0, 12).map(function (x) {
+    return Object.assign({}, x, { over: true, crossCheck: x.crossCheck || crossCheckOf(x) });
+  }) : [];
+  return {
+    q: q, via: sq.via, priceMax: round2(priceMax),
+    matches: matches.concat(extra), overMax: overMax,
+    searched: searched, identity: srcId,
+    rejected: rejected.slice(0, 120), rejectedBySource: rejectedBySource,
+    coverage: coverage
+  };
 }
 
 /* ---------- adaptador ---------- */

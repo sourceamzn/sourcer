@@ -113,6 +113,28 @@ function offersOf(p) {
   return out;
 }
 
+/* Contacto publicado en la ficha (mailto o correo visible). Se usa para que
+   el usuario pueda pedir precio/condiciones sin salir de la herramienta. */
+function contactsOf(html) {
+  const text = String(html || "");
+  const emails = [];
+  const re = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    const e = m[0].toLowerCase();
+    if (/\.(png|jpe?g|gif|webp|svg)$/i.test(e)) continue;
+    if (/@(?:example|domain|email|sentry|wixpress|2x|3x)\./i.test(e)) continue;
+    if (emails.indexOf(e) === -1) emails.push(e);
+  }
+  const phones = [];
+  const tel = /href\s*=\s*["']tel:([^"']+)["']/gi;
+  while ((m = tel.exec(text))) {
+    const p = m[1].replace(/[^\d+().\s-]/g, "").trim();
+    if (p && phones.indexOf(p) === -1) phones.push(p);
+  }
+  return { emails: emails.slice(0, 3), phones: phones.slice(0, 3) };
+}
+
 function attrsOfTag(tag) {
   const out = {};
   const re = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/g;
@@ -136,6 +158,7 @@ function metaMap(html) {
    Solo se usa cuando el llamador pide permitir fichas sin identificador. */
 function metaOf(html) {
   const m = metaMap(html);
+  const contacts = contactsOf(html);
   const title = m["og:title"] || m["twitter:title"] || (String(html || "").match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || "";
   const image = m["og:image"] || m["og:image:secure_url"] || m["twitter:image"] || "";
   const amount = numberOf(m["product:price:amount"] || m["og:price:amount"] || m["price"]);
@@ -163,6 +186,8 @@ function metaOf(html) {
     currency: currency,
     availability: "",
     offerUrl: "",
+    contactEmail: contacts.emails[0] || "",
+    contactPhone: contacts.phones[0] || "",
     source: "meta"
   };
 }
@@ -197,6 +222,7 @@ function featuresOf(p) {
 function parseJsonLd(html, opts) {
   opts = opts || {};
   const allowNoId = Boolean(opts.allowNoId);
+  const contacts = contactsOf(html);
   const blocks = ldBlocks(html);
   for (let i = 0; i < blocks.length; i++) {
     let data;
@@ -236,6 +262,8 @@ function parseJsonLd(html, opts) {
       availability: best ? best.availability : "",
       offerUrl: best ? best.url : "",
       offers: offers.slice(0, 5),
+      contactEmail: contacts.emails[0] || "",
+      contactPhone: contacts.phones[0] || "",
       source: "jsonld"
     };
   }
@@ -252,8 +280,22 @@ async function fetchPage(url, timeoutMs) {
     },
     redirect: "follow"
   }, timeoutMs || 6000);
-  if (!r.ok || typeof r.data !== "string") return null;
-  return parseJsonLd(r.data.slice(0, MAX_HTML), { allowNoId: true });
+  let html = r.ok && typeof r.data === "string" ? r.data : "";
+  /* Muchas fichas de proveedor bloquearon la descarga directa (el log de
+     match_enrich daba found:0). Se reintenta con el lector web del backend,
+     que cae a r.jina.ai, sin dejar colgado el trabajo. */
+  if (!html) {
+    try {
+      const web = require("../adapters/web");
+      const w = await Promise.race([
+        web.actions.read({ url: url }),
+        new Promise(function (res) { setTimeout(function () { res(null); }, Math.max(3000, timeoutMs || 6000)); })
+      ]);
+      if (w && w.ok && w.text) html = w.text;
+    } catch (e) {}
+  }
+  if (!html) return null;
+  return parseJsonLd(html.slice(0, MAX_HTML), { allowNoId: true });
 }
 
 /* enrich(offers, { max, concurrency, timeoutMs, cache, fetchPage })
@@ -300,6 +342,8 @@ async function enrich(offers, opts) {
       if (!o.weight && data.weight) o.weight = data.weight;
       if (!o.offerUrl && data.offerUrl) o.offerUrl = data.offerUrl;
       if (!o.availability && data.availability) o.availability = data.availability;
+      if (!o.contactEmail && data.contactEmail) o.contactEmail = data.contactEmail;
+      if (!o.contactPhone && data.contactPhone) o.contactPhone = data.contactPhone;
     }
   }
   const workers = [];
@@ -312,4 +356,4 @@ async function enrich(offers, opts) {
   };
 }
 
-module.exports = { parseJsonLd, enrich, fetchPage, gtinOf };
+module.exports = { parseJsonLd, enrich, fetchPage, gtinOf, contactsOf };

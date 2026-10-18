@@ -69,7 +69,7 @@ function imageSize(buf) {
   return pngSize(buf) || jpegSize(buf) || gifSize(buf) || webpSize(buf);
 }
 
-async function fetchInfo(url, opts) {
+async function fetchImage(url, opts) {
   opts = opts || {};
   if (!isSafeRemoteUrl(url)) return { ok: false, reason: "url_no_permitida" };
   const fetchImpl = opts.fetch || fetch;
@@ -86,22 +86,44 @@ async function fetchInfo(url, opts) {
     if (declared > MAX_BYTES) return { ok: false, reason: "imagen_demasiado_grande", status: res.status };
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length > MAX_BYTES) return { ok: false, reason: "imagen_demasiado_grande", status: res.status };
-    const dim = imageSize(buf) || {};
-    const ratio = dim.width && dim.height ? dim.width / dim.height : null;
+    const declaredType = String((res.headers && res.headers.get && res.headers.get("content-type")) || "").split(";")[0].trim().toLowerCase();
     return {
       ok: true,
       status: res.status,
-      hash: crypto.createHash("sha256").update(buf).digest("hex"),
+      buffer: buf,
       bytes: buf.length,
-      width: dim.width || 0,
-      height: dim.height || 0,
-      ratio: ratio ? Math.round(ratio * 1000) / 1000 : null
+      mime: /^image\//.test(declaredType) ? declaredType : mimeOf(buf)
     };
   } catch (e) {
     return { ok: false, reason: String((e && e.message) || e) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+function mimeOf(buf) {
+  if (!buf || !buf.length) return "image/jpeg";
+  if (buf[0] === 0xFF && buf[1] === 0xD8) return "image/jpeg";
+  if (buf[0] === 0x89 && buf.toString("ascii", 1, 4) === "PNG") return "image/png";
+  if (buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") return "image/webp";
+  if (buf.toString("ascii", 0, 3) === "GIF") return "image/gif";
+  return "image/jpeg";
+}
+
+async function fetchInfo(url, opts) {
+  const r = await fetchImage(url, opts);
+  if (!r.ok) return { ok: false, status: r.status, reason: r.reason };
+  const dim = imageSize(r.buffer) || {};
+  const ratio = dim.width && dim.height ? dim.width / dim.height : null;
+  return {
+    ok: true,
+    status: r.status,
+    hash: crypto.createHash("sha256").update(r.buffer).digest("hex"),
+    bytes: r.bytes,
+    width: dim.width || 0,
+    height: dim.height || 0,
+    ratio: ratio ? Math.round(ratio * 1000) / 1000 : null
+  };
 }
 
 async function compareImages(srcUrl, offerUrl, opts) {
@@ -129,4 +151,49 @@ async function compareImages(srcUrl, offerUrl, opts) {
   return Object.assign({ state: "na", same: false, reason: "No se pudieron descargar las dos fotos para compararlas." }, detail);
 }
 
-module.exports = { imageRef, imageSize, fetchInfo, compareImages };
+function unknownWith(base, text) {
+  const why = String(text || "").trim();
+  let reason = String((base && base.reason) || "").trim();
+  if (why) reason = why;
+  if (!reason) reason = "No se pudo confirmar visualmente la foto.";
+  if (!/sin confirmar visualmente/i.test(reason)) {
+    reason = reason.replace(/[.\s]+$/, "") + ". Sin confirmar visualmente.";
+  }
+  return {
+    state: "unknown", same: false, confirmed: false, provider: "none",
+    cached: false, reason: reason, heuristic: base || null
+  };
+}
+
+/* Orquestador de la foto: heuristicas siempre; vision solo si hay clave y
+   presupuesto. La vision puede confirmar ("same") o descartar ("different");
+   sin clave todo queda "unknown" y marcado como no confirmado. */
+async function visualCompare(srcUrl, offerUrl, opts) {
+  opts = opts || {};
+  const base = await compareImages(srcUrl, offerUrl, opts);
+  if (base.state === "ok" && base.same) {
+    return {
+      state: "same", same: true, confirmed: true, provider: "heuristica",
+      cached: false, reason: base.reason || "La oferta usa la misma imagen que Amazon.",
+      heuristic: base
+    };
+  }
+  if (opts.enabled === false) return unknownWith(base, "Comparacion visual desactivada.");
+  let vision = null;
+  try { vision = require("./vision"); } catch (e) { vision = null; }
+  if (!vision || !vision.available(opts)) {
+    return unknownWith(base, "Falta una clave de vision (ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY u OPENROUTER_API_KEY).");
+  }
+  if (opts.budget && typeof opts.budget.take === "function" && !opts.budget.take()) {
+    return Object.assign(unknownWith(base, "Presupuesto de comparacion visual agotado."), { limited: true });
+  }
+  let v = null;
+  try { v = await vision.compare(srcUrl, offerUrl, opts); }
+  catch (e) { v = { state: "unknown", reason: "Error de vision: " + String((e && e.message) || e) }; }
+  if (v && (v.state === "same" || v.state === "different")) {
+    return Object.assign({ heuristic: base }, v);
+  }
+  return unknownWith(base, (v && v.reason) || "No se pudo confirmar visualmente.");
+}
+
+module.exports = { imageRef, imageSize, fetchInfo, fetchImage, compareImages, visualCompare };

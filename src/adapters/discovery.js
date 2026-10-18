@@ -45,12 +45,33 @@ function isBlocked(url) {
   return !host || BLOCKED.some(function (b) { return host.indexOf(b) !== -1; });
 }
 
+/* El buscador no entiende un EAN suelto: casi ninguna tienda lo indexa y
+   Google devuelve paginas que solo lo citan. Se prioriza marca+modelo (lo que
+   escribe una persona) y el EAN queda como una variante mas. */
+function withBrand(brand, text) {
+  const b = String(brand || "").trim();
+  const t = String(text || "").trim();
+  if (!b) return t;
+  if (!t) return b;
+  return t.toLowerCase().indexOf(b.toLowerCase()) !== -1 ? t : (b + " " + t);
+}
+
 function buildQuery(body) {
-  const e = digits(body && body.ean);
+  body = body || {};
+  const brand = String(body.brand || "").trim();
+  const model = String(body.model || body.partNumber || "").trim();
+  const name = String(body.name || body.title || body.query || "").trim();
+  /* El titulo de Amazon describe el producto mejor que un codigo interno:
+     "Anker P31i Bluetooth Headphones" encuentra tiendas; "D1202" a secas no. */
+  if (brand && name) {
+    let short = name.split(/\s+/).slice(0, 10).join(" ");
+    if (model && short.toLowerCase().indexOf(model.toLowerCase()) === -1) short += " " + model;
+    return { q: withBrand(brand, short).slice(0, 110), via: "marca+titulo" };
+  }
+  if (brand && model) return { q: withBrand(brand, model), via: "marca+modelo" };
+  const e = digits(body.ean);
   if (e.length >= 8) return { q: e, via: "ean" };
-  const parts = [body && body.brand, body && body.model, body && body.name]
-    .map(function (x) { return String(x == null ? "" : x).trim(); })
-    .filter(Boolean);
+  const parts = [brand, model, name].filter(Boolean);
   return { q: parts.join(" ").trim(), via: "titulo" };
 }
 
@@ -64,6 +85,8 @@ function queryVariants(q, body) {
   const size = String((body && (body.size || (body.attrs && body.attrs.size))) || "").trim();
   const withVariant = [base, color, size].filter(Boolean).join(" ").trim();
   const ean = digits(body && body.ean);
+  const brand = String((body && body.brand) || "").trim();
+  const model = String((body && (body.model || body.partNumber)) || "").trim();
   const queries = [];
   function add(x) {
     x = String(x || "").replace(/\s+/g, " ").trim();
@@ -72,14 +95,13 @@ function queryVariants(q, body) {
   add(withVariant);
   add(base + " mayorista");
   add(base + " distribuidor");
-  add(base + " al por mayor");
-  add(base + " proveedor");
-  add(base + " fabricante");
   add(base + " wholesale");
   add(base + " supplier");
-  add(base + " importador");
-  if (ean && ean.length >= 8) add(ean + " " + [body && body.brand, body && body.name].filter(Boolean).join(" ").trim());
-  return queries.slice(0, 8);
+  add(base + " al por mayor");
+  add(base + " proveedor");
+  /* El EAN solo como comprobacion final: no debe desplazar a marca+modelo. */
+  if (ean && ean.length >= 8) add(ean + " " + [brand, model].filter(Boolean).join(" ").trim());
+  return queries.slice(0, 6);
 }
 
 function toItem(r) {
@@ -185,15 +207,19 @@ function parseWebResults(html) {
    busqueda web del servidor (DuckDuckGo HTML y Bing como respaldo). No es
    Google pago, pero mantiene la busqueda abierta en todo Internet. */
 async function webMany(q, count, body) {
+  const variants = queryVariants(q, body).slice(0, 3);
+  /* En paralelo: si DuckDuckGo tarda o bloquea, Bing no espera detras. */
+  const batches = await Promise.all(variants.map(async function (v) {
+    try {
+      let r = await web.actions.search({ query: v, engine: "ddg" });
+      if (!r.ok) r = await web.actions.search({ query: v, engine: "bing" });
+      return r.ok ? parseWebResults(r.html) : [];
+    } catch (e) {
+      return [];
+    }
+  }));
   const all = [];
-  const variants = queryVariants(q, body).slice(0, 4);
-  for (let i = 0; i < variants.length; i++) {
-    let r = await web.actions.search({ query: variants[i], engine: "ddg" });
-    if (!r.ok) r = await web.actions.search({ query: variants[i], engine: "bing" });
-    if (!r.ok) continue;
-    parseWebResults(r.html).forEach(function (x) { all.push(x); });
-    if (all.length >= count * 2) break;
-  }
+  batches.forEach(function (list) { list.forEach(function (x) { all.push(x); }); });
   return all.length ? { ok: true, results: all, engine: "web" } : { ok: false, reason: "web_sin_resultados" };
 }
 
@@ -207,7 +233,9 @@ function pushResult(out, o) {
 }
 
 async function apifySearch(q, count, body) {
-  const queries = queryVariants(q, body).join("\n");
+  /* Menos variantes y mas tiempo: el actor necesita arrancar en frio y cada
+     consulta extra lo hacia morir a los 50 s sin devolver nada. */
+  const queries = queryVariants(q, body).slice(0, 4).join("\n");
   const r = await apify.runActor(
     config.apify.actors.search,
     {
@@ -220,14 +248,15 @@ async function apifySearch(q, count, body) {
       saveHtml: false,
       saveHtmlToKeyValueStore: false
     },
-    { estCost: 0.02 }
+    { estCost: 0.02, timeoutSec: 90 }
   );
   let r2 = r;
-  if (!r.ok && r.reason === "actor_http_400") {
-    /* Reintento con entrada minima: aisla si el 400 viene de algun parametro opcional. */
-    r2 = await apify.runActor(config.apify.actors.search, { queries: q, countryCode: config.apify.country, languageCode: config.discovery.lang }, { estCost: 0.01 });
+  /* Reintento solo si el 400 no es un timeout: repetir un actor agotado gasta
+     otros 50 s y deja la busqueda sin presupuesto para el fallback web. */
+  if (!r.ok && r.reason === "actor_http_400" && !/timed[\s-]?out/i.test(String(r.detail || ""))) {
+    r2 = await apify.runActor(config.apify.actors.search, { queries: q, countryCode: config.apify.country, languageCode: config.discovery.lang }, { estCost: 0.01, timeoutSec: 90 });
   }
-  if (!r2.ok) return { ok: false, reason: r2.reason, status: r2.status };
+  if (!r2.ok) return { ok: false, reason: r2.reason, status: r2.status, detail: r2.detail };
   const results = [];
   r2.items.forEach(function (page) {
     if (!page) return;
@@ -258,23 +287,33 @@ async function search(body) {
       if (extra) q = q + " " + extra;
     }
   }
-  let r = { ok: false, reason: "sin_motor" };
-  let engine = "";
-  if (apifyReady()) {
-    r = await apifySearch(q, Math.min(max * 2, 40), body);
-    engine = "apify";
+  /* Los motores se lanzan a la vez: si Apify tarda 90 s o falla, la busqueda
+     web sin clave ya trae resultados y no se queda esperando detras. */
+  const count = Math.min(max * 2, 40);
+  function settle(p, name) {
+    return p.then(function (r) { return { engine: name, r: r }; })
+      .catch(function (e) { return { engine: name, r: { ok: false, reason: String((e && e.message) || e) } }; });
   }
-  if (!r.ok && config.discovery.apiKey) {
-    r = await braveMany(q, Math.min(max * 2, 40), body);
-    engine = "brave";
-  }
-  if (!r.ok) {
-    r = await webMany(q, Math.min(max * 2, 40), body);
-    engine = "web";
-  }
-  if (!r.ok) return { ok: false, reason: r.reason, status: r.status };
+  const jobs = [];
+  if (apifyReady()) jobs.push(settle(apifySearch(q, count, body), "apify"));
+  if (config.discovery.apiKey) jobs.push(settle(braveMany(q, count, body), "brave"));
+  jobs.push(settle(webMany(q, count, body), "web"));
+  const settled = await Promise.all(jobs);
+  const results = [];
+  const engines = [];
+  let reason = "sin_motor", status = 0;
+  settled.forEach(function (s) {
+    if (s.r && s.r.ok && s.r.results && s.r.results.length) {
+      s.r.results.forEach(function (x) { results.push(x); });
+      engines.push(s.engine);
+    } else if (s.r && s.r.reason) {
+      reason = s.r.reason;
+      if (s.r.status) status = s.r.status;
+    }
+  });
+  if (!results.length) return { ok: false, reason: reason, status: status };
   const seen = {};
-  const items = (r.results || [])
+  const items = results
     .filter(function (x) { return x && x.url && !isBlocked(x.url); })
     .filter(function (x) {
       const h = hostOf(x.url);
@@ -293,7 +332,7 @@ async function search(body) {
   return {
     ok: kept.length > 0,
     reason: kept.length ? null : "discovery_sin_resultados",
-    data: { source: "discovery", engine: engine, query: q, via: via, count: kept.length, items: kept }
+    data: { source: "discovery", engine: engines.join("+") || "web", query: q, via: via, count: kept.length, items: kept }
   };
 }
 

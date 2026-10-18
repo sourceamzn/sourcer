@@ -1,0 +1,143 @@
+[
+  {
+    "name": "ean igual manda sobre todo",
+    "src": { "ean": "4006381333931", "brand": "Acme", "model": "ZX-200", "name": "Acme ZX-200 taladro" },
+    "offer": { "name": "Acme ZX-200 taladro", "ean": "4006381333931" },
+    "expect": { "verdict": "verificado", "eanOk": true, "strongConflict": false, "conflicts": [] }
+  },
+  {
+    "name": "ean distinto descarta",
+    "src": { "ean": "4006381333931", "brand": "Acme", "model": "ZX-200", "name": "Acme ZX-200 taladro" },
+    "offer": { "name": "Acme ZX-200 taladro", "ean": "8412345678905" },
+    "expect": { "verdict": "descartar", "eanOk": false, "strongConflict": true, "conflicts": ["ean"] }
+  },
+  {
+    "name": "ean igual gana aunque la foto parezca distinta",
+    "src": { "ean": "4006381333931", "brand": "Acme", "model": "ZX-200", "name": "Acme ZX-200" },
+    "offer": { "name": "Acme ZX-200", "ean": "4006381333931" },
+    "ctx": { "image": { "state": "different", "same": false, "reason": "fotos distintas" } },
+    "expect": { "verdict": "verificado", "eanOk": true }
+  },
+  {
+    "name": "accesorio con marca y modelo iguales descarta",
+    "src": { "brand": "Sony", "model": "WH-1000XM5", "name": "Sony WH-1000XM5 auriculares" },
+    "offer": { "name": "Funda compatible con Sony WH-1000XM5" },
+    "ctx": { "typeConflict": true, "typeReason": "Es un accesorio (funda), no el producto." },
+    "expect": { "verdict": "descartar", "strongConflict": true, "conflicts": ["type"] }
+  },
+  {
+    "name": "repuesto nombrado solo en la oferta descarta",
+    "src": { "brand": "Philips", "model": "HD9252", "name": "Philips Airfryer HD9252/90" },
+    "offer": { "name": "Filtro para Philips Airfryer HD9252" },
+    "ctx": { "sourceText": "Philips Airfryer HD9252/90" },
+    "expect": { "verdict": "descartar", "strongConflict": true, "conflicts": ["type"] }
+  },
+  {
+    "name": "modelo distinto con codigos distintivos descarta",
+    "src": { "brand": "Sony", "model": "WH-1000XM5", "name": "Sony WH-1000XM5" },
+    "offer": { "name": "Sony WH-1000XM4" },
+    "expect": { "verdict": "descartar", "strongConflict": true, "conflicts": ["model"] }
+  },
+  {
+    "name": "codigo generico no asciende a verificado",
+    "src": { "brand": "Acme", "model": "X12", "name": "Acme X12" },
+    "offer": { "name": "Acme X12" },
+    "expect": { "verdict": "revisar", "strongConflict": false }
+  },
+  {
+    "name": "marca distinta declarada descarta",
+    "src": { "brand": "Sony", "model": "WH-1000XM5", "name": "Sony WH-1000XM5" },
+    "offer": { "name": "Acme WH-1000XM5", "brand": "Acme" },
+    "expect": { "verdict": "descartar", "strongConflict": true, "conflicts": ["brand"] }
+  },
+  {
+    "name": "marca no declarada no inventa conflicto",
+    "src": { "brand": "Sony", "model": "WH-1000XM5", "name": "Sony WH-1000XM5" },
+    "offer": { "name": "Auriculares WH-1000XM5" },
+    "expect": { "notVerdict": "verificado", "strongConflict": false }
+  },
+  {
+    "name": "pack distinto descarta",
+    "src": { "brand": "Acme", "name": "Acme pilas AA pack de 2" },
+    "offer": { "name": "Acme pilas AA pack de 4" },
+    "expect": { "verdict": "descartar", "strongConflict": true, "conflicts": ["quantity"] }
+  },
+  {
+    "name": "pack no declarado no descarta",
+    "src": { "brand": "Acme", "model": "ZX-200", "name": "Acme ZX-200 pack de 2" },
+    "offer": { "name": "Acme ZX-200" },
+    "expect": { "verdict": "verificado", "strongConflict": false }
+  },
+  {
+    "name": "talla distinta descarta",
+    "src": { "brand": "Acme", "name": "Camiseta Acme talla M" },
+    "offer": { "name": "Camiseta Acme talla L" },
+    "expect": { "verdict": "descartar", "strongConflict": true, "conflicts": ["size"] }
+  },
+  {
+    "name": "talla no declarada no descarta",
+    "src": { "brand": "Acme", "model": "ZX-200", "name": "Camiseta Acme ZX-200 talla M" },
+    "offer": { "name": "Camiseta Acme ZX-200" },
+    "expect": { "verdict": "verificado", "strongConflict": false }
+  },
+  {
+    "name": "color distinto descarta",
+    "src": { "brand": "Acme", "model": "ZX-200", "name": "Acme ZX-200 soporte negro" },
+    "offer": { "name": "Acme ZX-200 soporte blanco" },
+    "expect": { "verdict": "descartar", "strongConflict": true, "conflicts": ["color"] }
+  },
+  {
+    "name": "color no declarado no descarta",
+    "src": { "brand": "Acme", "model": "ZX-200", "name": "Acme ZX-200 soporte negro" },
+    "offer": { "name": "Acme ZX-200 soporte" },
+    "expect": { "verdict": "verificado", "strongConflict": false }
+  },
+  {
+    "name": "oferta sin modelo queda a revisar",
+    "src": { "brand": "Acme", "model": "ZX-200", "name": "Acme ZX-200 soporte 500 ml pack de 2 negro" },
+    "offer": { "name": "Acme soporte 500 ml pack de 2 negro" },
+    "ctx": { "typeOk": true },
+    "expect": { "verdict": "revisar", "strongConflict": false }
+  },
+  {
+    "name": "marca y modelo distintivos verifican sin ean",
+    "src": { "brand": "Philips", "model": "HD9252", "name": "Philips Airfryer HD9252/90" },
+    "offer": { "name": "Philips Airfryer HD9252/90 freidora de aire" },
+    "ctx": { "typeOk": true },
+    "expect": { "verdict": "verificado", "eanOk": false, "strongConflict": false }
+  },
+  {
+    "name": "sin evidencia se descarta",
+    "src": { "brand": "Acme", "model": "ZX-200", "name": "Acme ZX-200 soporte" },
+    "offer": { "name": "Cosa cualquiera de otra marca" },
+    "expect": { "verdict": "descartar", "strongConflict": false, "conflicts": [] }
+  },
+  {
+    "name": "titulo solo en chino queda a revisar",
+    "src": { "brand": "LEGO", "model": "42151", "name": "LEGO Technic 42151 Bugatti Bolide" },
+    "offer": { "name": "乐高积木玩具赛车模型 儿童益智拼装玩具" },
+    "ctx": { "typeOk": true },
+    "expect": { "verdict": "revisar", "strongConflict": false, "noTextMatch": true }
+  },
+  {
+    "name": "chino con ean distinto descarta",
+    "src": { "ean": "5702017399573", "brand": "LEGO", "model": "42151", "name": "LEGO Technic 42151" },
+    "offer": { "name": "乐高积木玩具 42151", "ean": "8412345678905" },
+    "ctx": { "typeOk": true },
+    "expect": { "verdict": "descartar", "strongConflict": true, "conflicts": ["ean"] }
+  },
+  {
+    "name": "foto claramente distinta descarta",
+    "src": { "brand": "Philips", "model": "HD9252", "name": "Philips Airfryer HD9252/90" },
+    "offer": { "name": "Philips Airfryer HD9252/90 freidora de aire" },
+    "ctx": { "typeOk": true, "image": { "state": "different", "same": false, "reason": "La foto muestra otro producto." } },
+    "expect": { "verdict": "descartar", "strongConflict": true, "conflicts": ["image"] }
+  },
+  {
+    "name": "foto sin confirmar no descarta",
+    "src": { "brand": "Acme", "model": "ZX-200", "name": "Acme ZX-200 soporte 500 ml pack de 2 negro" },
+    "offer": { "name": "Acme soporte 500 ml pack de 2 negro" },
+    "ctx": { "typeOk": true, "image": { "state": "unknown", "same": null, "reason": "No se pudo confirmar visualmente la foto." } },
+    "expect": { "verdict": "revisar", "strongConflict": false }
+  }
+]

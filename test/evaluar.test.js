@@ -179,3 +179,33 @@ test("parseArgs acepta opciones y URL sin barra final", function () {
   assert.equal(opts.limit, 3);
   assert.equal(opts.dryRun, true);
 });
+
+test("parseArgs acepta --identidad con y sin ruta", function () {
+  assert.equal(evaluar.parseArgs(["--identidad"]).identity, "default");
+  assert.equal(evaluar.parseArgs(["--identidad", "pares.json"]).identity, "pares.json");
+  assert.equal(evaluar.parseArgs(["--identidad", "--out", "r.json"]).identity, "default");
+});
+
+test("fixture de identidad: al menos 20 pares", function () {
+  const cases = evaluar.loadIdentityCases("default");
+  assert.ok(Array.isArray(cases));
+  assert.ok(cases.length >= 20, "pares: " + cases.length);
+});
+
+test("evaluar tabla de identidad: aciertos y desglose por veredicto", function () {
+  const cases = [
+    { name: "ean", src: { ean: "4006381333931", brand: "Acme", model: "ZX-200", name: "Acme ZX-200" }, offer: { name: "Acme ZX-200", ean: "4006381333931" }, expect: { verdict: "verificado", eanOk: true } },
+    { name: "modelo", src: { brand: "Sony", model: "WH-1000XM5", name: "Sony WH-1000XM5" }, offer: { name: "Sony WH-1000XM4" }, expect: { verdict: "descartar", conflicts: ["model"] } },
+    { name: "revisar", src: { brand: "Acme", model: "X12", name: "Acme X12" }, offer: { name: "Acme X12" }, expect: { verdict: "revisar" } }
+  ];
+  const results = evaluar.evaluateIdentityCases(cases);
+  assert.equal(results.length, 3);
+  assert.equal(results.every(function (r) { return r.pass; }), true);
+  const summary = evaluar.summarizeIdentity(results);
+  assert.equal(summary.total, 3);
+  assert.equal(summary.aciertos, 3);
+  assert.equal(summary.verificado, 1);
+  assert.equal(summary.revisar, 1);
+  assert.equal(summary.descartar, 1);
+  assert.equal(summary.accuracyPct, 100);
+});

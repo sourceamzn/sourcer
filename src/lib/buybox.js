@@ -155,7 +155,8 @@ function threshold(v, fallback) {
 }
 
 /* Resumen final para planFor. kinds que bloquean: amazon, fabricante,
-   amazon+fabricante y terceros. `a_revisar` y `sin_dato` nunca descartan. */
+   amazon+fabricante y terceros. `a_revisar` (un solo tercero) lo descarta
+   planFor cuando requireTwoSellers=1; `sin_dato` nunca descarta. */
 function verdict(an, sellerName, brand, manufacturer, opts) {
   if (!an || !an.known) return { kind: "sin_dato", note: "Sin historial de Buy Box en Keepa." };
   const o = opts || {};
@@ -201,7 +202,7 @@ function verdict(an, sellerName, brand, manufacturer, opts) {
     return pack("terceros", "Buy Box 90 d: terceros solo " + pct(third) + " (por debajo del " + pct(thirdMax) + ").");
   }
   if (thirdSellers === 1 && topThird >= singleThird - 1e-9) {
-    return pack("a_revisar", "Buy Box 90 d: un unico vendedor tercero concentra " + pct(topThird) + "; a revisar (no se descarta).");
+    return pack("a_revisar", "Buy Box 90 d: un unico vendedor tercero concentra " + pct(topThird) + "; no hay 2 vendedores distintos en la Buy Box.");
   }
   if (unknown > 1e-4) {
     return pack("sin_dato", "Buy Box 90 d: no se pudo identificar a todos los vendedores (" + pct(unknown) + " sin nombre).");

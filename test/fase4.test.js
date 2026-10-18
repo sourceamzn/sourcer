@@ -52,12 +52,72 @@ test("match: pack distinto = conflicto fuerte", () => {
   assert.match(r.reasons[0], /Pack/i);
 });
 
-test("match: color distinto no descarta; queda a revisar", () => {
+test("match: color distinto con ambos declarados = conflicto fuerte (descarte)", () => {
   const src = card({ brand: "Acme", name: "Acme soporte de pared 500 ml pack de 2 negro" });
   const r = match.score(src, { name: "Acme soporte de pared 500 ml pack de 2 blanco" }, { typeOk: true });
-  assert.equal(r.strongConflict, false);
-  assert.equal(r.band, "revisar");
-  assert.ok(r.score >= 45 && r.score < 80);
+  assert.equal(r.strongConflict, true);
+  assert.equal(r.band, "descartar");
+  assert.equal(r.variantConflict, true);
+  assert.ok(r.conflicts.indexOf("color") !== -1);
+});
+
+test("match: un accesorio con la misma marca y modelo NO se verifica", () => {
+  const src = card({ brand: "Sony", model: "WH-1000XM5", name: "Sony WH-1000XM5 auriculares" });
+  const r = match.score(src, { name: "Funda compatible con Sony WH-1000XM5" }, {
+    typeConflict: true, typeReason: "Es un accesorio (funda), no el producto."
+  });
+  assert.equal(r.band, "descartar");
+  assert.equal(r.strongConflict, true);
+  assert.equal(r.typeConflict, true);
+  assert.ok(r.reasons.some(function (x) { return /accesorio|funda/i.test(x); }));
+});
+
+test("match: accesorio con mismo modelo se descarta aunque solo llegue typeOk=false", () => {
+  const src = card({ brand: "Philips", model: "HD9252", name: "Philips Airfryer HD9252/90" });
+  const r = match.score(src, { name: "Cesta de repuesto para Philips Airfryer HD9252/90" }, {
+    typeOk: false, typeReason: "Es un accesorio (cesta), no el producto."
+  });
+  assert.equal(r.band, "descartar");
+  assert.equal(r.strongConflict, true);
+  assert.equal(r.typeConflict, true);
+  assert.ok(r.reasons.some(function (x) { return /accesorio|repuesto/i.test(x); }));
+});
+
+test("match: repuesto nombrado solo en la oferta se descarta por el titulo", () => {
+  const src = card({ brand: "Philips", model: "HD9252", name: "Philips Airfryer HD9252/90" });
+  const r = match.score(src, { name: "Filtro para Philips Airfryer HD9252" }, {
+    sourceText: "Philips Airfryer HD9252/90"
+  });
+  assert.equal(r.band, "descartar");
+  assert.equal(r.strongConflict, true);
+  assert.ok(r.reasons.some(function (x) { return /accesorio|repuesto|filtro|para/i.test(x); }));
+});
+
+test("match: producto correcto con marca y modelo se verifica", () => {
+  const src = card({ brand: "Philips", model: "HD9252", name: "Philips Airfryer HD9252/90" });
+  const r = match.score(src, { name: "Philips Airfryer HD9252/90 freidora de aire" }, { typeOk: true });
+  assert.equal(r.band, "verificado");
+});
+
+test("match: mismo modelo con otra marca no se verifica", () => {
+  const src = card({ brand: "Sony", model: "WH-1000XM5", name: "Sony WH-1000XM5 auriculares" });
+  const r = match.score(src, { name: "Acme WH-1000XM5 auriculares" }, { typeOk: true });
+  assert.notEqual(r.band, "verificado");
+});
+
+test("match: modelo corto o generico no asciende a verificado", () => {
+  const src = { brand: "Acme", models: ["x12"], name: "Acme X12" };
+  const r = match.score(src, { name: "Acme X12" }, { typeOk: true });
+  assert.equal(r.modelOk, true);
+  assert.notEqual(r.band, "verificado");
+});
+
+test("match: color distinto con marca+modelo igual se descarta", () => {
+  const src = card({ brand: "Acme", model: "ZX-200", name: "Acme ZX-200 soporte negro" });
+  const r = match.score(src, { name: "Acme ZX-200 soporte blanco" }, { typeOk: true });
+  assert.equal(r.variantConflict, true);
+  assert.equal(r.band, "descartar");
+  assert.equal(r.strongConflict, true);
 });
 
 test("match: si la oferta no da modelo no hay conflicto y queda a revisar", () => {
@@ -172,12 +232,13 @@ test("specs: lee additionalProperty, features y descripcion", () => {
   assert.equal(ap.weight.value.unit, "mass");
 });
 
-test("match: caracteristica numerica distinta bloquea verificado", () => {
+test("match: caracteristica numerica distinta = conflicto fuerte (descarte)", () => {
   const src = card({ brand: "Acme", model: "ZX-200", name: "Acme ZX-200", features: ["Capacidad: 500 ml"] });
   const s = specs.fromSource({ features: ["Capacidad: 500 ml"] });
   const r = match.score(src, { name: "Acme ZX-200", features: ["Capacidad: 750 ml"] }, { typeOk: true, specs: s });
   assert.equal(r.specConflict, true);
-  assert.equal(r.band, "revisar");
+  assert.equal(r.band, "descartar");
+  assert.ok(r.conflicts.indexOf("spec") !== -1);
   assert.ok(r.reasons.some(function (x) { return /Caracteristica distinta/i.test(x); }));
 });
 
@@ -236,6 +297,12 @@ test("enrich: ficha de proveedor sin gtin pero con oferta, descripcion, color y 
   assert.equal(d.price, 19.95);
   assert.equal(d.currency, "EUR");
   assert.equal(d.availability, "InStock");
+});
+
+test("enrich: extrae el correo de contacto de la ficha", () => {
+  const c = enrich.contactsOf('<a href="mailto:ventas@proveedor.es">Ventas</a> <img src="logo@2x.png">');
+  assert.equal(c.emails[0], "ventas@proveedor.es");
+  assert.equal(c.emails.indexOf("logo@2x.png"), -1);
 });
 
 test("enrich: respaldo Open Graph cuando no hay JSON-LD de producto", () => {
