@@ -1,0 +1,6 @@
+# Plantilla del evaluador (Fase F). Rellena una fila por producto.
+# Las lineas que empiezan por # se ignoran.
+# asin: 10 caracteres. ean: 8-14 digitos. Rellena al menos ASIN, EAN o marca+modelo.
+# proveedor_esperado / url_esperada / precio_esperado son el CONTROL del examen:
+# NO se envian a la busqueda; solo se comparan despues.
+asin,ean,marca,modelo,nombre,proveedor_esperado,url_esperada,precio_esperado,precio_max,notas

@@ -16,6 +16,9 @@ function health(req, res) {
     time: new Date().toISOString(),
     env: config.env,
     market: config.market,
+    /* Numero de claves API cargadas. Sirve para comprobar en vivo si la
+       variable API_KEYS llego al proceso (0 = no configurada). */
+    auth: { apiKeys: config.apiKeys.length },
     vault: vault.available(),
     sources: {
       amazon: amazonReady(),

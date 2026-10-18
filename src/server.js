@@ -53,6 +53,7 @@ if (require.main === module) {
   app.listen(config.port, () => {
     console.log(pkg.name + " escuchando en http://localhost:" + config.port);
     console.log("Entorno: " + config.env + " | Marketplace: " + config.market);
+    console.log("Claves API cargadas: " + config.apiKeys.length);
   });
   scheduler.start();
 }
