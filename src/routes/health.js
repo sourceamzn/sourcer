@@ -1,4 +1,4 @@
-const { config, amazonReady, keepaReady, feedReady, scrapingReady, apifyReady, bigbuyReady, aliexpressReady, cjReady, visionReady } = require("../config");
+const { config, amazonReady, keepaReady, feedReady, scrapingReady, apifyReady, bigbuyReady, icecatReady, aliexpressReady, cjReady, visionReady } = require("../config");
 const { list } = require("../adapters");
 const { profileMeta } = require("../adapters/sources/catalog");
 const vault = require("../lib/vault");
@@ -47,6 +47,8 @@ function health(req, res) {
       /* Proveedores con API propia. bigbuy = mayorista (precio neto sin IVA,
          EAN y stock); aliexpress/cj = dropshipping. */
       bigbuy: bigbuyReady(),
+      /* Icecat: usuario/contrasena (no API key) y IP autorizada en su panel. */
+      icecat: icecatReady(),
       aliexpress: aliexpressReady(),
       cj: cjReady(),
       /* Fuentes generadas por perfil (outlets y mayoristas): lectura web del

@@ -89,6 +89,14 @@ const config = {
     base: clean(process.env.BIGBUY_BASE) || "https://api.bigbuy.eu",
     iso: clean(process.env.BIGBUY_ISO) || "es"
   },
+  /* Icecat: usuario y contrasena de la cuenta (no hay API key). La IP del
+     servidor debe estar autorizada en el panel de Icecat. */
+  icecat: {
+    username: clean(process.env.ICECAT_USERNAME),
+    password: clean(process.env.ICECAT_PASSWORD),
+    base: clean(process.env.ICECAT_BASE) || "https://live.icecat.biz",
+    lang: clean(process.env.ICECAT_LANG) || "es"
+  },
   aliexpress: {
     appKey: clean(process.env.ALIEXPRESS_APP_KEY),
     appSecret: clean(process.env.ALIEXPRESS_APP_SECRET),
@@ -233,6 +241,10 @@ function bigbuyReady() {
   return Boolean(config.bigbuy.apiKey);
 }
 
+function icecatReady() {
+  return Boolean(config.icecat.username && config.icecat.password);
+}
+
 function aliexpressReady() {
   return Boolean(config.aliexpress.appKey && config.aliexpress.appSecret);
 }
@@ -257,6 +269,7 @@ module.exports = {
   apifyReady,
   discoveryReady,
   bigbuyReady,
+  icecatReady,
   aliexpressReady,
   cjReady,
   visionReady
