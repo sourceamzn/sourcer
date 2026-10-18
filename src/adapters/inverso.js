@@ -127,7 +127,8 @@ function metricsFromKeepa(prod) {
   const offersTotal = posNum(s.offerCount) || posNum(s.totalOfferCount) || 0;
   /* null = Keepa no dio dato (sin `offers` en la peticion). Antes valia 0 y
      disparaba siempre "menos de 2 FBA". */
-  let offersFba = fbaFromOffers(prod);
+  const fbaOffersList = fbaFromOffers(prod);
+  let offersFba = fbaOffersList;
   if (offersFba == null && posNum(s.offerCountFBA) > 0) offersFba = posNum(s.offerCountFBA);
   const fx = keepaFicha.fichaOf(prod);
   if (fx.missing.length) { try { events.add("keepa", { phase: "ficha_missing", asin: prod && prod.asin, missing: fx.missing.join(",") }); } catch (e) {} }
@@ -138,6 +139,9 @@ function metricsFromKeepa(prod) {
   const bb = buybox.analyze(prod && prod.buyBoxSellerIdHistory, 90, undefined, { brand: brand, manufacturer: manufacturer, sellerName: sellerName });
   const amazonSells = keepaFicha.amazonSellsFrom(prod, bb, keepaCur(prod, 0, true));
   const thirdParty = offersTotal > 0 ? Math.max(0, offersTotal - (amazonSells ? 1 : 0)) : (offersFba || 0);
+  const fbaThird = fbaOffersList != null
+    ? fbaOffersList
+    : (offersFba == null ? null : Math.max(0, offersFba - (amazonSells ? 1 : 0)));
   const ean = fx.ficha.eans[0] || (prod && prod.eanList && prod.eanList[0]) || (prod && prod.upcList && prod.upcList[0]) || "";
   const out = {
     asin: String((prod && prod.asin) || "").toUpperCase(),
@@ -149,6 +153,7 @@ function metricsFromKeepa(prod) {
     url: prod && prod.asin ? "https://www.amazon.es/dp/" + String(prod.asin).toUpperCase() : "",
     pvp: round2(pvp), bsr: bsr, sales: Math.round(sales),
     thirdParty: Math.round(thirdParty), offersFba: offersFba == null ? null : Math.round(offersFba),
+    fbaThird: fbaThird == null ? null : Math.round(fbaThird),
     historyDays: historyDays(prod), ean: String(ean || ""),
     categoryTree: (prod && prod.categoryTree) || [],
     buyBox: bb, amazonSells: amazonSells,
@@ -346,6 +351,281 @@ function withTimeout(promise, ms) {
     function (e) { clearTimeout(t); throw e; }
   );
 }
+/* ---------- Fase 2 en modo EAN exacto ----------
+   Solo se aceptan ofertas cuyo EAN/UPC coincida exactamente con el del
+   producto. No hay cascada a marca/modelo/titulo, no hay "probable" y no se
+   usa la foto para decidir. Las fuentes que no publican EAN se cuentan y se
+   explican en el diagnostico, en vez de generar un cero silencioso. */
+function eanFieldsOf(it) {
+  return gtinLib.normalizeAll([].concat(
+    it && it.ean, it && it.eans,
+    it && it.gtin, it && it.barcode, it && it.upc,
+    it && it.attrs && it.attrs.ean, it && it.attrs && it.attrs.eans,
+    it && it.attrs && it.attrs.gtin, it && it.attrs && it.attrs.gtin13,
+    it && it.attrs && it.attrs.barcode, it && it.attrs && it.attrs.upc,
+    it && it.attrs && it.attrs.productID
+  ));
+}
+function eanQueryList(body, srcEans) {
+  const out = [];
+  const seen = {};
+  function add(q) {
+    const v = String(q || "").replace(/\D+/g, "");
+    if (!v || seen[v]) return;
+    seen[v] = 1;
+    out.push({ via: "ean", q: v });
+  }
+  const raw = gtinLib.normalize(body && body.ean);
+  if (raw) add(raw);
+  srcEans.forEach(add);
+  return out.slice(0, 3);
+}
+function eanRecFromItem(id, label, it, srcEans, priceMax) {
+  let price = num(it.price);
+  let titlePrice = false;
+  if (!(price > 0)) {
+    const tm = String(it.name || "").match(/(?:desde|a partir de|from)\s*(\d{1,4}(?:[.,]\d{1,2})?)(?!\d)|(\d{1,4}(?:[.,]\d{1,2})?)\s*(?:€|eur\b)/i);
+    const tv = tm ? num(String(tm[1] || tm[2]).replace(",", ".")) : 0;
+    if (tv > 0) { price = tv; titlePrice = true; }
+  }
+  const rec = {
+    source: id, sourceLabel: label,
+    name: it.name || "", brand: it.brand || "", ean: srcEans[0] || "",
+    model: it.model || (it.attrs && (it.attrs.model || it.attrs.reference)) || "",
+    description: it.description || (it.attrs && it.attrs.description) || "",
+    specs: it.specs || [], features: it.features || [],
+    color: it.color || (it.attrs && (it.attrs.color || it.attrs.colour)) || "",
+    size: it.size || (it.attrs && it.attrs.size) || "",
+    material: it.material || (it.attrs && it.attrs.material) || "",
+    weight: it.weight || (it.attrs && it.attrs.weight) || "",
+    price: price || null, oldPrice: num(it.oldPrice) || null,
+    shipping: num(it.shipping) || null, stock: it.stock == null ? null : num(it.stock),
+    limit: it.limit == null ? null : num(it.limit),
+    url: it.url || "", image: it.image || "", candidate: false,
+    contactEmail: it.contactEmail || (it.attrs && it.attrs.email) || "",
+    contactPhone: it.contactPhone || (it.attrs && it.attrs.phone) || "",
+    via: it.__via || "ean", queryUsed: it.__q || (srcEans[0] || ""),
+    priceText: it.priceText || "", minOrder: it.minOrder || null,
+    supplier: it.supplier || "", factory: Boolean(it.attrs && it.attrs.factory),
+    rel: 1, under: price > 0 && priceMax > 0 && price <= priceMax,
+    meetsMax: price > 0 && priceMax > 0 ? price <= priceMax : null,
+    currency: (it.attrs && it.attrs.currency) || (price > 0 ? "EUR" : ""),
+    checkedAt: new Date().toISOString(),
+    match: "exacto", state: "verificado", matchBand: "verificado",
+    matchScore: 100, matchBasis: "ean", eanExact: true, matchReasons: ["EAN/UPC exacto."],
+    identity: { verdict: "exacto", reason: "EAN/UPC exacto: mismo codigo normalizado.", checks: [], score: 100, matching: ["ean"], conflicting: [] },
+    crossCheck: { photo: it.image ? "sin_verificar" : "sin_foto", title: Boolean(it.name), brand: Boolean(it.brand), model: Boolean(it.model), ean: true, description: Boolean(it.description), specs: (it.specs || []).length, color: Boolean(it.color), size: Boolean(it.size), material: Boolean(it.material), weight: Boolean(it.weight), price: price > 0, url: Boolean(it.url) }
+  };
+  rec.role = it.factory ? "fabricante" : "proveedor";
+  if (titlePrice) { rec.priceFromTitle = true; rec.priceText = "desde " + price.toFixed(2).replace(".", ",") + " € (leido del titulo, confirmar)"; }
+  if (price <= 0) { rec.noPrice = true; rec.priceText = rec.priceText || "Contactar para precio"; }
+  return rec;
+}
+function eanZeroResult(body, priceMax, reason, message) {
+  const srcId = identity.freezeCard(identity.identityOf(body || {}), body || {});
+  const empty = coverageLib.buildCoverage({ searched: [], rejected: [], matches: [], queries: [], identity: srcId });
+  return {
+    q: "", via: "ean", priceMax: round2(priceMax), eanOnly: true,
+    matches: [], overMax: [], searched: [], rejected: [], identity: srcId,
+    coverage: empty,
+    summary: { exact: 0, raw: 0, withEan: 0, differentEan: 0, noEan: 0, sourcesWithEan: 0, sourcesNoEan: 0 },
+    diagnosis: { reason: reason || "producto_sin_ean", message: message || "Este producto no tiene EAN/UPC valido: no se puede buscar por coincidencia exacta." }
+  };
+}
+async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
+  hooks = hooks || {};
+  const { adapters } = require("./index");
+  const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1 };
+  const rank = { discovery: 0, supplier_market: 1, wholesale: 2, marketplace: 2 };
+  const candidates = Object.keys(adapters).filter(function (id) {
+    const a = adapters[id];
+    return !skip[id] && a && a.actions && typeof a.actions.search === "function";
+  }).sort(function (x, y) {
+    const rx = rank[adapters[x].kind] != null ? rank[adapters[x].kind] : 5;
+    const ry = rank[adapters[y].kind] != null ? rank[adapters[y].kind] : 5;
+    return rx - ry;
+  });
+  const cfgS = config.suppliers || { maxResults: 20 };
+  const max = clampInt(body && body.max, cfgS.maxResults || 20, 3, cfgS.maxResultsCap || 60);
+  const qlist = eanQueryList(body, srcEans);
+  if (!qlist.length) return eanZeroResult(body, priceMax, "producto_sin_ean");
+  const budgetMs = clampInt(body && body.budgetMs, 110000, 15000, 180000);
+  const deadline = Date.now() + budgetMs;
+  const concurrency = Math.max(2, Math.min(clampInt(body && body.concurrency, 10, 1, 16), candidates.length || 1));
+  const matches = [], above = [], searched = [], rejected = [], pending = [];
+  const seenKeys = {};
+  let cursor = 0;
+  const cfgM = config.match || {};
+  const enrichMax = Math.max(0, Math.min(parseInt(cfgM.enrichMax, 10) || 0, 30));
+
+  function accept(rec, entry, recsOut) {
+    const k = String(rec.url || "") + "|" + String(rec.price || "");
+    if (k !== "|" && seenKeys[k]) return;
+    if (k !== "|") seenKeys[k] = 1;
+    entry.count++;
+    if (recsOut) recsOut.push(rec);
+    if (rec.price <= 0) { matches.push(rec); return; }
+    if (priceMax > 0 && rec.price > priceMax) { rec.over = true; above.push(rec); return; }
+    matches.push(rec);
+  }
+
+  async function runOne(id) {
+    const entry = {
+      source: id, sourceLabel: adapters[id].label || id, ok: false,
+      count: 0, rawCount: 0, withEan: 0, differentEan: 0, noEan: 0,
+      queryStats: [], startedAt: new Date().toISOString()
+    };
+    const recsOut = [];
+    const t0 = Date.now();
+    if (hooks.onStart) { try { hooks.onStart(id, entry.sourceLabel); } catch (e) {} }
+    if (Date.now() > deadline) {
+      entry.reason = "tiempo_agotado"; entry.ms = 0;
+      searched.push(entry);
+      if (hooks.onSource) { try { hooks.onSource(entry, []); } catch (e) {} }
+      return;
+    }
+    try {
+      const qq = qlist[0];
+      const r = await withTimeout(adapters[id].actions.search({
+        query: qq.q,
+        max: max,
+        market: (body && body.market) || undefined,
+        ean: (body && body.ean) || srcEans[0],
+        eans: srcEans,
+        brand: (body && body.brand) || "",
+        model: (body && body.model) || "",
+        name: (body && body.name) || ""
+      }), Math.min(Math.max(5000, deadline - Date.now()), 30000));
+      const data = r && r.ok ? r.data : null;
+      const items = (data && data.items) || [];
+      entry.rawCount = items.length;
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        const got = eanFieldsOf(it);
+        if (got.length) {
+          entry.withEan++;
+          if (gtinLib.intersects(got, srcEans)) {
+            const rec = eanRecFromItem(id, entry.sourceLabel, it, srcEans, priceMax);
+            rec.ean = got.filter(function (e) { return srcEans.indexOf(e) !== -1; })[0] || srcEans[0];
+            accept(rec, entry, recsOut);
+          } else {
+            entry.differentEan++;
+            rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: "EAN/UPC distinto: " + got.join(", ") + " no es " + srcEans.join(", ") + "." });
+          }
+        } else if (it.url && pending.length < enrichMax) {
+          entry.noEan++;
+          pending.push({ id: id, label: entry.sourceLabel, it: it, entry: entry, recsOut: recsOut });
+        } else {
+          entry.noEan++;
+          rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: "La oferta no publica EAN/UPC; no se puede verificar por codigo." });
+        }
+      }
+      entry.ok = entry.count > 0;
+      if (!entry.ok) entry.reason = entry.rawCount ? "sin_coincidencias_ean" : ((r && r.reason) || "sin_resultados");
+      entry.ms = Date.now() - t0;
+    } catch (e) {
+      entry.reason = String((e && e.message) || e);
+      entry.ms = Date.now() - t0;
+    }
+    searched.push(entry);
+    if (hooks.onSource) { try { hooks.onSource(entry, recsOut); } catch (e) {} }
+  }
+
+  const workers = [];
+  for (let w = 0; w < concurrency; w++) {
+    workers.push((async function () {
+      while (cursor < candidates.length) {
+        const id = candidates[cursor++];
+        await runOne(id);
+      }
+    })());
+  }
+  await Promise.all(workers);
+
+  /* Enriquecer las fichas sin EAN: si al abrirlas aparece el mismo codigo, se
+     aceptan; si no, se rechazan. Nunca se acepta por parecido. */
+  const recsBySource = {};
+  pending.forEach(function (p) { recsBySource[p.entry.source] = p.recsOut; });
+  if (pending.length && enrichMax > 0) {
+    try {
+      const recs = pending.map(function (p) { return eanRecFromItem(p.id, p.label, p.it, srcEans, priceMax); });
+      await enrichLib.enrich(recs, { max: recs.length, concurrency: 4, timeoutMs: cfgM.enrichMs || 6000 });
+      recs.forEach(function (rec, i) {
+        const p = pending[i];
+        const d = rec.enriched || {};
+        const got = gtinLib.normalizeAll([].concat(d.gtin, d.ean, d.barcode, d.upc));
+        if (got.length && gtinLib.intersects(got, srcEans)) {
+          rec.ean = got.filter(function (e) { return srcEans.indexOf(e) !== -1; })[0] || srcEans[0];
+          if (!(rec.price > 0) && d.price > 0) {
+            rec.price = d.price; rec.priceFromPage = true;
+            rec.currency = d.currency || rec.currency || "EUR";
+            rec.under = priceMax > 0 ? rec.price <= priceMax : null;
+            rec.meetsMax = priceMax > 0 ? rec.price <= priceMax : null;
+          }
+          if (!rec.image && d.images && d.images.length) rec.image = d.images[0];
+          if (!rec.brand && d.brand) rec.brand = d.brand;
+          rec.matchEnriched = { gtin: got[0] || "", mpn: d.mpn || "", sku: d.sku || "", price: d.price || null };
+          accept(rec, p.entry, p.recsOut);
+        } else {
+          p.entry.noEan++;
+          rejected.push({ source: p.id, kind: "identidad", name: String(rec.name || "").slice(0, 80), reason: got.length ? ("EAN/UPC leido en la ficha (" + got.join(", ") + ") no coincide.") : "La ficha no publica EAN/UPC." });
+        }
+      });
+    } catch (e) {}
+  }
+
+  /* Se han podido aceptar ofertas despues de cerrar la fuente: recalcular. */
+  searched.forEach(function (s) {
+    s.ok = s.count > 0;
+    if (!s.ok && !s.reason) s.reason = s.rawCount ? "sin_coincidencias_ean" : "sin_resultados";
+  });
+  /* Reemitir solo las fuentes que ganaron coincidencias al enriquecer. */
+  Object.keys(recsBySource).forEach(function (srcId) {
+    const entry = searched.filter(function (s) { return s.source === srcId; })[0];
+    if (!entry || !entry.ok) return;
+    if (hooks.onSource) { try { hooks.onSource(entry, recsBySource[srcId]); } catch (e) {} }
+  });
+  matches.sort(function (a, b) {
+    const pa = a.price > 0, pb = b.price > 0;
+    if (pa && pb) return a.price - b.price;
+    if (pa) return -1;
+    if (pb) return 1;
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+  above.sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); });
+  const raw = searched.reduce(function (n, s) { return n + (s.rawCount || 0); }, 0);
+  const withEan = searched.reduce(function (n, s) { return n + (s.withEan || 0); }, 0);
+  const differentEan = searched.reduce(function (n, s) { return n + (s.differentEan || 0); }, 0);
+  const noEan = searched.reduce(function (n, s) { return n + (s.noEan || 0); }, 0);
+  const sourcesWithEan = searched.filter(function (s) { return (s.withEan || 0) > 0; }).length;
+  const sourcesNoEan = searched.filter(function (s) { return (s.rawCount || 0) > 0 && !(s.withEan > 0); }).length;
+  const missingKeys = searched.filter(function (s) { return /not_configured|api_key|apify|token|clave|missing/i.test(String(s.reason || "")); }).map(function (s) { return s.sourceLabel || s.source; });
+  const exactTotal = matches.length + above.length;
+  let diagnosis = null;
+  if (!exactTotal) {
+    const reason = !searched.length ? "sin_fuentes" : (!raw ? "sin_respuesta" : (!withEan ? "fuentes_sin_ean" : "ean_no_vendido"));
+    const msg = reason === "sin_fuentes"
+      ? "No hay fuentes de proveedores configuradas para buscar por EAN."
+      : reason === "sin_respuesta"
+        ? "Ninguna fuente devolvio resultados. Revisa las claves/API y la conexion."
+        : reason === "fuentes_sin_ean"
+          ? "Las fuentes respondieron pero no publican EAN/UPC. Conecta tarifas, mayoristas con EAN o descubrimiento con ficha verificable."
+          : "Ninguna fuente conectada vende ese EAN/UPC. No es un fallo de coincidencia: no se muestran parecidos.";
+    diagnosis = { reason: reason, message: msg, missingKeys: missingKeys, sourcesWithEan: sourcesWithEan, sourcesNoEan: sourcesNoEan };
+  }
+  const srcId = identity.freezeCard(identity.identityOf(body || {}), body || {});
+  const coverage = coverageLib.buildCoverage({ searched: searched, rejected: rejected, matches: matches.concat(above), queries: qlist, identity: srcId });
+  const cheapest = matches.filter(function (x) { return x.price > 0; }).sort(function (a, b) { return a.price - b.price; })[0] || null;
+  return {
+    q: srcEans[0] || "", via: "ean", priceMax: round2(priceMax), eanOnly: true,
+    matches: matches, overMax: above.slice(0, 20), searched: searched, identity: srcId,
+    rejected: rejected.slice(0, 120), coverage: coverage,
+    cheapestVerified: cheapest,
+    summary: { exact: exactTotal, raw: raw, withEan: withEan, differentEan: differentEan, noEan: noEan, sourcesWithEan: sourcesWithEan, sourcesNoEan: sourcesNoEan },
+    diagnosis: diagnosis
+  };
+}
+
 async function searchSuppliers(body, priceMax, hooks) {
   hooks = hooks || {};
   const { adapters } = require("./index"); /* lazy: evita el ciclo index<->inverso */
@@ -388,10 +668,18 @@ async function searchSuppliers(body, priceMax, hooks) {
     });
     try { events.add("job", { phase: "ficha", asin: body.asin, eans: (body.eans || []).length, model: body.model, partNumber: body.partNumber, missing: fx.missing.join(",") }); } catch (e) {}
   }
+  const srcEans = gtinLib.normalizeAll([].concat((body && body.eans) || [], (body && body.ean) || []));
+  /* Modo exacto por defecto: sin EAN no se buscan parecidos. */
+  if ((body && body.eanOnly) !== false) {
+    if (!srcEans.length) {
+      return eanZeroResult(body, priceMax, "producto_sin_ean",
+        "Este producto no tiene EAN/UPC valido. El modo exacto solo busca por codigo de barras: no se muestran parecidos por marca, modelo o foto.");
+    }
+    return searchSuppliersEan(body, priceMax, hooks, srcEans);
+  }
   const sq = supplierQuery(body);
   const cfgS = config.suppliers || { maxResults: 20, maxResultsCap: 40, maxQueries: 4, maxQueriesPaid: 2, enough: 5 };
   const qlist = queriesLib.buildQueries(body, { maxQueries: 5 });
-  const srcEans = gtinLib.normalizeAll([].concat((body && body.eans) || [], (body && body.ean) || []));
   const qTokens = tokensOf([body && body.brand, body && body.model, body && body.name].filter(Boolean).join(" ") || sq.q);
   const q = sq.q;
   const srcId = identity.freezeCard(identity.identityOf(body || {}), body || {});
@@ -945,6 +1233,212 @@ async function searchSuppliers(body, priceMax, hooks) {
   };
 }
 
+/* ---------- candidatos: pool grande, paginado y rotativo ----------
+   La lista de Best Sellers de Keepa trae hasta 100.000 ASIN. Antes se cortaba
+   a los primeros `limit`; ahora se recorre el pool por lotes, se excluyen los
+   ASIN ya vistos y se devuelve una pagina estable. */
+function seedHash(s) {
+  let h = 2166136261;
+  const str = String(s == null ? "" : s);
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function uniqAsins(list) {
+  const seen = {};
+  const out = [];
+  (list || []).forEach(function (a) {
+    const v = String(a || "").trim().toUpperCase();
+    if (!v || seen[v]) return;
+    seen[v] = 1;
+    out.push(v);
+  });
+  return out;
+}
+function asinListOf(products) {
+  return (products || []).map(function (p) { return p && p.asin; }).filter(Boolean);
+}
+async function candidatesLarge(body) {
+  if (!keepaReady()) return { ok: false, reason: "keepa_not_configured", hint: "La busqueda inversa parte de la demanda en Amazon: configura KEEPA_API_KEY." };
+  const p = planParams(body);
+  const limit = clampInt(body && body.limit, 60, 10, 120);
+  const includeDiscards = Boolean(body && body.includeDiscards);
+  const seed = num(body && body.seed, Date.now()) || Date.now();
+  const exclude = {};
+  (Array.isArray(body && body.exclude) ? body.exclude : []).forEach(function (a) {
+    const v = String(a || "").trim().toUpperCase();
+    if (v) exclude[v] = 1;
+  });
+  let query = String((body && (body.query || body.q)) || "").trim();
+  const rawCategory = body && (body.categoryId || body.category);
+  let categoryDigits = digits(rawCategory);
+  if (!query && !categoryDigits && String(rawCategory || "").trim()) query = String(rawCategory).trim();
+  let categoryName = "";
+  let mode = "palabra";
+  if (!categoryDigits && !(body && body.finder)) {
+    const cat = categoryFor(query);
+    if (cat) { categoryDigits = cat.id; categoryName = cat.name; mode = "categoria"; query = ""; }
+  } else if (categoryDigits) mode = "categoria";
+
+  const notes = [], errors = [];
+  let pool = [], via = "", bestsellerCalls = 0;
+
+  /* Product Finder explicito. */
+  if (body && body.finder) {
+    const f = await keepaFinder(body);
+    if (f.ok && f.asins.length) { pool = f.asins; via = "product_finder"; }
+    else if (!f.ok) errors.push("finder:" + (f.reason || "error"));
+  }
+
+  /* Categoria: dos listas (rango actual + otro rotado por seed). */
+  if (!pool.length && categoryDigits) {
+    let ranges = [0, [30, 90, 180][Math.abs(seed) % 3]];
+    if (body && body.range != null && String(body.range) !== "") ranges = [num(body.range)];
+    for (let i = 0; i < ranges.length; i++) {
+      const b = await keepaBestSellers(categoryDigits, ranges[i]);
+      bestsellerCalls++;
+      if (b.ok && b.asins.length) {
+        pool = pool.concat(b.asins);
+        via = via || "bestsellers";
+        notes.push("Best Sellers " + (ranges[i] ? (ranges[i] + " d") : "actual") + ": " + b.asins.length + " ASIN.");
+      } else if (!b.ok) errors.push("bestsellers:" + (b.reason || "error"));
+    }
+    if (pool.length && body && body.range == null) notes.push("Rangos usados: actual + " + ([30, 90, 180][Math.abs(seed) % 3]) + " d (rotacion por seed).");
+  }
+
+  /* Palabra clave: Product Finder por titulo (si esta disponible) y busqueda. */
+  if (!pool.length && query) {
+    const f = await keepaFinder({
+      selection: {
+        domainId: config.keepa.domain,
+        title: query,
+        perPage: Math.min(200, Math.max(50, limit * 2)),
+        productType: [0, 1],
+        sort: [["current_SALES", "desc"]]
+      }
+    });
+    if (f.ok && f.asins.length) { pool = f.asins; via = "product_finder"; notes.push("Product Finder por titulo: " + f.asins.length + " ASIN."); }
+    else if (!f.ok) errors.push("finder_titulo:" + (f.reason || "error"));
+  }
+  if (!pool.length && query) {
+    const s = await keepaSearchProducts(query);
+    if (s.ok) {
+      pool = asinListOf(s.products);
+      via = via || "search";
+      notes.push("Busqueda '" + query + "': " + pool.length + " ASIN.");
+    } else errors.push("search:" + (s.reason || "error"));
+  }
+
+  pool = uniqAsins(pool);
+  if (!pool.length) {
+    const attempted = (body && body.finder ? 1 : 0) + (categoryDigits ? 1 : 0) + (query ? 1 : 0);
+    const tok = await keepaTokens();
+    const tokHint = tok ? (" Tokens Keepa disponibles: " + tok.tokensLeft + (tok.refillMinutes ? (", reposicion en ~" + tok.refillMinutes + " min") : "") + ".") : "";
+    if (!attempted) return { ok: false, reason: "parametros_vacios", hint: "Indica una categoria, un categoryId de Keepa o una palabra clave (p. ej. freidoras de aire).", notes: notes };
+    if (errors.length && errors.length >= attempted) {
+      const outOfTokens = errors.some(function (x) { return /keepa_http_(402|429)/.test(x); }) || (tok && tok.tokensLeft <= 0);
+      if (outOfTokens) return { ok: false, reason: "keepa_sin_tokens", hint: "La cuenta de Keepa no tiene tokens disponibles (saldo " + (tok ? tok.tokensLeft : "?") + ")." + tokHint, notes: notes };
+      const first = errors[0].split(":")[1] || "keepa_error";
+      return { ok: false, reason: first, hint: "Keepa no respondio correctamente (" + errors.join(", ") + ")." + tokHint, notes: notes };
+    }
+    const noData = tok && tok.tokensLeft <= 0;
+    return {
+      ok: false,
+      reason: noData ? "keepa_sin_tokens" : "sin_candidatos",
+      hint: noData ? ("La cuenta de Keepa se quedo sin tokens." + tokHint) : ("Keepa no devolvio productos para " + (query ? ("'" + query + "'") : "esa categoria") + ". Prueba otra palabra clave o un node id de categoria." + tokHint),
+      notes: notes
+    };
+  }
+
+  const filteredPool = pool.filter(function (a) { return !exclude[a]; });
+  notes.push("Pool: " + pool.length + " ASIN; " + filteredPool.length + " sin los ya vistos.");
+
+  let cursor = 0, scanned = 0, out = [];
+  const counts = { apt: 0, casi: 0, descarte: 0 };
+  const maxScan = Math.min(filteredPool.length, Math.max(limit * 4, 120));
+  while (out.length < limit && cursor < filteredPool.length && scanned < maxScan) {
+    const take = Math.min(limit * 2, filteredPool.length - cursor, maxScan - scanned);
+    const chunk = filteredPool.slice(cursor, cursor + take);
+    cursor += take;
+    scanned += take;
+    if (!chunk.length) continue;
+    const got = await keepaProductsByAsins(chunk, 0);
+    const baseM = (got.products || []).map(metricsFromKeepa).filter(function (m) { return m.asin && m.pvp > 0; });
+    /* Nombres de los vendedores con mas peso para separar Amazon, marca y terceros. */
+    const bbCfg = config.buybox || { sellerLookups: 3 };
+    let sellerLookups = 0;
+    for (let i = 0; i < baseM.length; i++) {
+      const m = baseM[i], bb = m.buyBox;
+      if (!p.bbRule || !bb || !bb.known) continue;
+      const ids = (bb.breakdown || []).filter(function (x) { return x.role !== "amazon"; })
+        .slice(0, bbCfg.sellerLookups).map(function (x) { return x.id; });
+      if (!ids.length) continue;
+      const names = {};
+      for (let j = 0; j < ids.length && sellerLookups < 15; j++) {
+        sellerLookups++;
+        names[ids[j]] = await keepaSellerName(ids[j]);
+      }
+      if (!Object.keys(names).length) continue;
+      m.sellerNames = names;
+      m.buyBox = buybox.analyze(m.__bbHist, 90, undefined, {
+        brand: m.brand, manufacturer: m.manufacturer, sellerNames: names, sellerName: m.sellerName
+      });
+      m.sellerName = m.buyBox.topSellerName || m.sellerName;
+      if (m.offersFba != null) m.fbaThird = Math.max(0, m.offersFba - (m.buyBox && m.buyBox.amazonShare > 0 ? 1 : 0));
+    }
+    baseM.forEach(function (m) {
+      const plan = planFor(m, p);
+      m.plan = plan;
+      m.estado = plan.estado;
+      counts[m.estado] = (counts[m.estado] || 0) + 1;
+      if (includeDiscards || m.estado !== "descarte") out.push(m);
+    });
+    out = out.slice(0, limit);
+  }
+  if (!includeDiscards) notes.push("Se ocultan los descartados; activa 'Incluir descartados' para verlos.");
+
+  const sortKey = String((body && body.sort) || "rotacion");
+  const hash = function (asin) { return seedHash(seed + "|" + asin); };
+  out.sort(function (a, b) {
+    if (sortKey === "precio") {
+      const d = (b.pvp || 0) - (a.pvp || 0); if (d) return d;
+    } else if (sortKey === "descuento") {
+      const d = ((b.plan && b.plan.discount) || 0) - ((a.plan && a.plan.discount) || 0); if (d) return d;
+    } else if (sortKey === "ventas") {
+      const d = (b.sales || 0) - (a.sales || 0); if (d) return d;
+    } else {
+      const d = (b.sales || 0) - (a.sales || 0); if (d) return d;
+      const r = (a.bsr || 1e12) - (b.bsr || 1e12); if (r) return r;
+      const pr = (b.pvp || 0) - (a.pvp || 0); if (pr) return pr;
+    }
+    return hash(a.asin) - hash(b.asin);
+  });
+  out.slice(0, limit).forEach(function (m) {
+    m.rotation = Math.round(m.sales || 0);
+    delete m.__bbHist;
+  });
+
+  const tokensEstimate = scanned + bestsellerCalls * 50;
+  notes.push("Escaneados " + scanned + " ASIN; coste Keepa estimado ~" + tokensEstimate + " tokens.");
+  return {
+    ok: true,
+    data: {
+      source: "inverso", kind: "candidates", via: via,
+      query: query, mode: categoryDigits ? "categoria" : "palabra", categoryName: categoryName,
+      count: Math.min(out.length, limit), counts: counts,
+      candidates: out.slice(0, limit),
+      pool: pool.length, poolRemaining: Math.max(0, filteredPool.length - cursor),
+      hasMore: cursor < filteredPool.length,
+      seed: seed, page: num(body && body.page, 0),
+      params: p, notes: notes,
+      filters: { minFbaThird: p.minFbaThird, bbRule: p.bbRule, includeDiscards: includeDiscards, sort: sortKey, limit: limit },
+      cost: { asinsScanned: scanned, bestsellerCalls: bestsellerCalls, estimatedTokens: tokensEstimate }
+    }
+  };
+}
+
 /* ---------- adaptador ---------- */
 const inverso = {
   id: "inverso",
@@ -963,6 +1457,11 @@ const inverso = {
 
     /* Fase 1 · candidatos + filtro de precio maximo, todo ANTES de buscar proveedor. */
     candidates: async function (body) {
+      return candidatesLarge(body);
+    },
+
+    /* Implementacion anterior, conservada para comparar/rollback manual. */
+    candidatesLegacy: async function (body) {
       if (!keepaReady()) return { ok: false, reason: "keepa_not_configured", hint: "La busqueda inversa parte de la demanda en Amazon: configura KEEPA_API_KEY." };
       const p = planParams(body);
       const limit = clampInt(body && body.limit, 10, 1, 50);

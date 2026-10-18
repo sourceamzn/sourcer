@@ -30,7 +30,7 @@ function start(body, inverso) {
   const id = crypto.randomBytes(8).toString("hex");
   const job = {
     id: id, createdAt: Date.now(), startedAt: new Date().toISOString(), finishedAt: null,
-    state: "running", running: [], done: [], matches: [], searched: [], result: null, error: null, timeline: []
+    state: "running", running: [], done: [], matches: [], searched: [], result: null, error: null, timeline: [], seenMatch: {}
   };
   jobs.set(id, job);
   const tl = function (kind, d) { d = d || {}; d.job = id; job.timeline.push({ t: new Date().toISOString(), kind: kind, d: d }); events.add(kind, d); };
@@ -40,9 +40,14 @@ function start(body, inverso) {
     onSource: function (entry, recs) {
       tl("source", { source: entry.source, phase: "end", ok: entry.ok, count: entry.count, ms: entry.ms, reason: entry.reason, detail: entry.detail });
       job.running = job.running.filter(function (r) { return r.source !== entry.source; });
-      job.done.push(entry.source);
-      job.searched.push(entry);
-      recs.forEach(function (r) { if (!(r.price > 0 && body && Number(body.priceMax) > 0 && r.price > Number(body.priceMax))) job.matches.push(r); });
+      if (job.done.indexOf(entry.source) === -1) { job.done.push(entry.source); job.searched.push(entry); }
+      recs.forEach(function (r, idx) {
+        if (r.price > 0 && body && Number(body.priceMax) > 0 && r.price > Number(body.priceMax)) return;
+        const k = entry.source + "|" + idx + "|" + String(r.url || "") + "|" + String(r.price || "") + "|" + String(r.name || "");
+        if (job.seenMatch[k]) return;
+        job.seenMatch[k] = 1;
+        job.matches.push(r);
+      });
     }
   };
   Promise.resolve()
