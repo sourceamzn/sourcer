@@ -10,6 +10,7 @@
 
 const { config, apifyReady } = require("../config");
 const apify = require("../lib/apify");
+const gtinLib = require("../lib/gtin");
 const { marketQuery } = require("../lib/translate");
 
 function first(o, keys) {
@@ -194,6 +195,111 @@ function dedupe(items, max) {
   }).slice(0, max);
 }
 
+function inStock(v) {
+  const s = String(v || "").toLowerCase();
+  return !/(outofstock|out_of_stock|soldout|sold_out|agotado|no disponible)/.test(s);
+}
+
+/* El actor de EAN devuelve una fila por codigo con TODAS las ofertas de tienda
+   (store, price, shipping, direct link). Se convierten en resultados directos:
+   no hace falta abrir cada ficha para verificar el EAN, porque el codigo ya es
+   el de la fila. Se conservan envio, condicion, stock y enlace directo. */
+function mapEanRows(rows, ean, max) {
+  const want = gtinLib.normalizeAll([ean]);
+  const out = [];
+  const seen = {};
+  (Array.isArray(rows) ? rows : []).forEach(function (row) {
+    if (!row || typeof row !== "object") return;
+    const got = gtinLib.normalize(row.gtin || row.ean || row.gtin13 || row.barcode || "");
+    if (got && want.length && want.indexOf(got) === -1) return;
+    const code = got || want[0] || "";
+    const cur = String(row.currency || "").trim().toUpperCase();
+    const eur = !cur || cur === "EUR";
+    const base = {
+      source: "gshopping_ean",
+      name: String(row.title || "").slice(0, 180),
+      brand: String(row.brand || ""),
+      model: "", reference: "", ean: code,
+      description: String(row.description || "").slice(0, 1200),
+      specs: [], features: [], color: "", size: "", material: "", weight: "",
+      image: String(row.imageUrl || row.thumbnail || ""),
+      isSupplier: true,
+      candidate: false,
+      __via: "ean",
+      __q: code,
+      attrs: {
+        currency: cur || "EUR",
+        platform: "google_shopping_ean",
+        gtin: code,
+        gtinMatches: row.gtinMatches == null ? null : row.gtinMatches,
+        offersCount: row.offersCount == null ? null : row.offersCount,
+        offersAvailable: row.offersAvailable == null ? null : row.offersAvailable,
+        productUrl: String(row.productUrl || ""),
+        query: code
+      }
+    };
+    const offers = Array.isArray(row.offers) ? row.offers : [];
+    if (offers.length) {
+      offers.forEach(function (o) {
+        if (!o || typeof o !== "object") return;
+        const price = priceOf(o.price != null ? o.price : o.totalPrice);
+        const shipping = priceOf(o.shippingPrice != null ? o.shippingPrice : o.shipping);
+        const total = priceOf(o.totalPrice);
+        const store = String(o.store || o.sellerName || o.merchant || row.store || "");
+        const url = String(o.url || o.sellerReference || row.productUrl || "");
+        const name = String(o.offerTitle || row.title || "").slice(0, 180);
+        if (!name && !url) return;
+        const k = url + "|" + (price == null ? "" : price.toFixed(2)) + "|" + store;
+        if (seen[k]) return;
+        seen[k] = 1;
+        out.push(Object.assign({}, base, {
+          name: name,
+          price: eur ? price : null,
+          priceText: !eur && price > 0 ? cur + " " + price : "",
+          oldPrice: priceOf(o.oldPrice),
+          shipping: shipping,
+          stock: null,
+          available: inStock(o.availability),
+          url: url,
+          supplier: store,
+          attrs: Object.assign({}, base.attrs, {
+            store: store,
+            shipping: shipping,
+            totalPrice: total,
+            condition: String(o.condition || ""),
+            availability: String(o.availability || ""),
+            offerId: String(o.offerId || o.offer_id || "")
+          })
+        }));
+      });
+      return;
+    }
+    const price = priceOf(row.price != null ? row.price : row.lowestOfferPrice);
+    const url = String(row.productUrl || "");
+    if (!row.title || (!url && !(price > 0))) return;
+    const store = String(row.store || row.merchant || "");
+    const k = url + "|" + (price == null ? "" : price.toFixed(2)) + "|" + store;
+    if (seen[k]) return;
+    seen[k] = 1;
+    out.push(Object.assign({}, base, {
+      price: eur ? price : null,
+      priceText: !eur && price > 0 ? cur + " " + price : "",
+      shipping: null,
+      available: true,
+      url: url,
+      supplier: store
+    }));
+  });
+  out.sort(function (a, b) {
+    const pa = a.price > 0, pb = b.price > 0;
+    if (pa && pb) return a.price - b.price;
+    if (pa) return -1;
+    if (pb) return 1;
+    return 0;
+  });
+  return out.slice(0, max);
+}
+
 function queryOf(body) {
   const b = body || {};
   const q = String(b.query || "").trim();
@@ -213,7 +319,8 @@ const BUILDERS = {
   mic: function (q, max) { return { searchMode: "keyword", keyword: q, maxResults: max }; },
   aliexpress: function (q, max) { return { keyword: q, query: q, maxItems: max }; },
   shopping: function (q, max) {
-    return { queries: [q], maxResults: Math.max(max, 20), country: String(config.apify.country || "es").toLowerCase(), language: "es", sortBy: "price_low" };
+    const list = (Array.isArray(q) ? q : [q]).filter(Boolean).slice(0, 3);
+    return { queries: list, maxResults: Math.max(max, 20), country: String(config.apify.country || "es").toLowerCase(), language: "es", sortBy: "relevance" };
   }
 };
 
@@ -232,9 +339,20 @@ function makeAdapter(def) {
     }
     if (!apifyReady()) return { ok: false, reason: "apify_sin_token" };
     if (!actorId()) return { ok: false, reason: "actor_no_configurado" };
-    const max = Math.min(Math.max(parseInt((body && body.max) || "12", 10) || 12, 3), 30);
+    const max = Math.min(Math.max(parseInt((body && body.max) || "12", 10) || 12, 3), def.actor === "shopping" ? 60 : 30);
+    /* Google Shopping no entiende bien un EAN suelto: se lanzan en la misma
+       ejecucion el EAN, marca+modelo y el titulo corto. El actor etiqueta cada
+       tarjeta con `query`, asi que el resultado se puede deduplicar. */
+    let qs = [q];
+    if (def.actor === "shopping") {
+      const ean = String((body && body.ean) || "").replace(/\D/g, "");
+      const bm = [body && body.brand, body && body.model].map(function (x) { return String(x || "").trim(); }).filter(Boolean).join(" ").trim();
+      const shortTitle = String((body && body.name) || "").trim().split(/\s+/).slice(0, 10).join(" ");
+      [ean.length >= 8 ? ean : "", bm, shortTitle].forEach(function (x) { if (x && qs.indexOf(x) === -1) qs.push(x); });
+      qs = qs.slice(0, 3);
+    }
     const op = (body && body.__op) || apify.newOp();
-    const r = await apify.runActor(actorId(), BUILDERS[def.actor](q, max), { op: op, estCost: def.estCost || 0.03, timeoutSec: def.timeoutSec || 40 });
+    const r = await apify.runActor(actorId(), BUILDERS[def.actor](qs.length > 1 ? qs : q, max), { op: op, estCost: def.estCost || 0.03, timeoutSec: def.timeoutSec || 40 });
     if (!r.ok) return { ok: false, reason: r.reason, detail: r.detail };
     const items = dedupe(flatten(r.items).map(function (o) { return toItem(o, id, def.label, def.candidate); }), max);
     return {
@@ -297,6 +415,65 @@ const madeinchina = makeAdapter({ id: "madeinchina", actor: "mic", label: "Made-
 const gshopping = makeAdapter({ id: "gshopping", actor: "shopping", label: "Google Shopping (Apify)", candidate: false, estCost: 0.02, timeoutSec: 90 });
 const aliexpressApify = makeAdapter({ id: "aliexpress_apify", actor: "aliexpress", label: "AliExpress texto (Apify)", candidate: true, estCost: 0.03 });
 
+/* Google Shopping por EAN: usa un actor que resuelve el codigo de barras y
+   devuelve todas las ofertas de tienda (precio, envio, stock y enlace directo).
+   Evita depender de abrir fichas una a una y cubre tiendas que el buscador por
+   palabra clave no muestra. El actor es configurable con APIFY_SHOPPING_EAN_ACTOR. */
+const gshoppingEan = {
+  id: "gshopping_ean",
+  label: "Google Shopping · ofertas por EAN",
+  kind: "supplier_market",
+  supplier: true,
+  ean: true,
+  exactOnly: true,
+  ownQuery: true,
+  actions: {
+    ping: async function () {
+      const actor = config.apify.actors.shoppingEan;
+      const ok = apifyReady() && Boolean(actor);
+      return {
+        ok: ok,
+        configured: ok,
+        reason: ok ? null : !apifyReady() ? "apify_sin_token" : "actor_no_configurado",
+        mode: ok ? "apify:" + actor : "sin_clave",
+        note: "Resuelve el EAN/GTIN y devuelve las ofertas de cada tienda con enlace directo."
+      };
+    },
+    search: async function (body) {
+      body = body || {};
+      const ean = gtinLib.normalize(body.ean || (body.eans && body.eans[0]));
+      if (!ean) return { ok: false, reason: "producto_sin_ean" };
+      if (!apifyReady()) return { ok: false, reason: "apify_sin_token" };
+      const actor = config.apify.actors.shoppingEan;
+      if (!actor) return { ok: false, reason: "actor_no_configurado" };
+      const max = Math.min(Math.max(parseInt(body.max || "24", 10) || 24, 3), 60);
+      const op = body.__op || apify.newOp();
+      const r = await apify.runActor(actor, {
+        gtins: [ean],
+        country: String(config.apify.country || "es").toLowerCase(),
+        language: "es",
+        includeOffers: true,
+        includeDetails: false,
+        maxItems: max
+      }, { op: op, estCost: 0.06, timeoutSec: 100 });
+      if (!r.ok) return { ok: false, reason: r.reason, detail: r.detail };
+      const rows = Array.isArray(r.items) ? r.items : [];
+      const items = mapEanRows(rows, ean, max);
+      const errors = rows.map(function (row) { return row && (row.errorCode || row.error); }).filter(Boolean);
+      const offers = rows.reduce(function (n, row) { return n + (row && Array.isArray(row.offers) ? row.offers.length : 0); }, 0);
+      return {
+        ok: items.length > 0,
+        reason: items.length ? null : (errors[0] || "sin_resultados"),
+        detail: errors.length ? String(errors[0]) : null,
+        data: {
+          source: "gshopping_ean", query: ean, count: items.length, items: items,
+          evidence: { actor: actor, rows: rows.length, offers: offers, errors: errors.slice(0, 3) }
+        }
+      };
+    }
+  }
+};
+
 const foto = {
   id: "foto",
   label: "BÃºsqueda por foto (Apify)",
@@ -311,5 +488,5 @@ const foto = {
   }
 };
 
-module.exports = { a1688, alibaba, madeinchina, gshopping, aliexpressApify, foto, searchByImage };
+module.exports = { a1688, alibaba, madeinchina, gshopping, gshoppingEan, aliexpressApify, foto, searchByImage, mapEanRows };
 

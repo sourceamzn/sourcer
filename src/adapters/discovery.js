@@ -92,6 +92,15 @@ function queryVariants(q, body) {
     x = String(x || "").replace(/\s+/g, " ").trim();
     if (x && queries.indexOf(x) === -1) queries.push(x);
   }
+  /* En modo exacto el EAN manda: primero el codigo tal cual y citado, luego
+     marca+modelo y por ultimo las variantes comerciales. Asi Google Search
+     cubre tiendas que no aparecen en Google Shopping. */
+  if (body && body.__eanExact && ean) {
+    add(ean);
+    add('"' + ean + '"');
+    add("EAN " + ean);
+    add([ean, brand, model].filter(Boolean).join(" "));
+  }
   add(withVariant);
   add(base + " mayorista");
   add(base + " distribuidor");
@@ -243,7 +252,7 @@ async function apifySearch(q, count, body) {
       countryCode: config.apify.country,
       languageCode: config.discovery.lang,
       resultsPerPage: Math.min(Math.max(count, 10), 20),
-      maxPagesPerQuery: 1,
+      maxPagesPerQuery: body && body.__eanExact ? 2 : 1,
       mobileResults: false,
       saveHtml: false,
       saveHtmlToKeyValueStore: false

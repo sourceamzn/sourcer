@@ -1,5 +1,9 @@
 const path = require("path");
-require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+/* En produccion dotenv esta instalado; en tests sin node_modules se sigue
+   leyendo process.env sin romper el arranque. */
+try {
+  require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+} catch (e) {}
 
 function clean(value) {
   return value == null ? "" : String(value).trim();
@@ -75,6 +79,7 @@ const config = {
       alibaba: clean(process.env.APIFY_ALIBABA_ACTOR) || "happitap/alibaba-product-scraper",
       mic: clean(process.env.APIFY_MIC_ACTOR) || "agenscrape/made-in-china-com-product-scraper",
       shopping: clean(process.env.APIFY_SHOPPING_ACTOR) || "automation-lab/google-shopping-scraper",
+      shoppingEan: clean(process.env.APIFY_SHOPPING_EAN_ACTOR) || "scrapewise/google-shopping",
       aliexpress: clean(process.env.APIFY_ALIEXPRESS_ACTOR)
     }
   },
@@ -111,8 +116,8 @@ const config = {
   match: {
     /* Cotejo previo a mostrar resultados: se abren fichas de proveedor para
        leer precio, foto, descripcion, color, talla y caracteristicas. */
-    enrichMax: Math.min(Math.max(parseInt(clean(process.env.MATCH_ENRICH_MAX) || "12", 10) || 0, 0), 20),
-    enrichMs: Math.min(Math.max(parseInt(clean(process.env.MATCH_ENRICH_MS) || "6000", 10) || 6000, 1000), 20000),
+    enrichMax: Math.min(Math.max(parseInt(clean(process.env.MATCH_ENRICH_MAX) || "24", 10) || 0, 0), 60),
+    enrichMs: Math.min(Math.max(parseInt(clean(process.env.MATCH_ENRICH_MS) || "9000", 10) || 9000, 1000), 20000),
     imageMax: Math.min(Math.max(parseInt(clean(process.env.MATCH_IMAGE_MAX) || "8", 10) || 0, 0), 20),
     imageMs: Math.min(Math.max(parseInt(clean(process.env.MATCH_IMAGE_MS) || "5000", 10) || 5000, 1000), 15000)
   },

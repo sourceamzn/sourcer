@@ -63,6 +63,48 @@ function gtinOf(p) {
   return "";
 }
 
+/* Muchas fichas no ponen el EAN en el JSON-LD pero si en una tabla de
+   caracteristicas o en el HTML. Se acepta solo un GTIN con digito de control
+   valido: asi no se confunde con precios, referencias ni telefonos. */
+function validGtin(v) {
+  const n = gtin.normalize(v);
+  if (!n) return false;
+  let sum = 0, weight = 1;
+  for (let i = n.length - 1; i >= 0; i--) {
+    sum += Number(n.charAt(i)) * weight;
+    weight = weight === 1 ? 3 : 1;
+  }
+  return sum % 10 === 0;
+}
+
+/* Microdatos schema.org: muchas fichas no usan JSON-LD pero si
+   itemprop="gtin13" content="...". Se valida igual que el EAN visible. */
+function microdataGtin(html) {
+  const text = String(html || "");
+  const tags = text.match(/<[^>]+itemprop\s*=[^>]+>/gi) || [];
+  for (let i = 0; i < tags.length; i++) {
+    if (!/itemprop\s*=\s*["'](?:gtin13|gtin12|gtin14|gtin8|gtin|ean13|ean|upc|barcode)["']/i.test(tags[i])) continue;
+    const m = tags[i].match(/(?:content|value)\s*=\s*["']([^"']+)["']/i);
+    if (m && validGtin(m[1])) return gtin.normalize(m[1]);
+  }
+  return "";
+}
+
+function visibleGtin(html) {
+  const text = String(html || "");
+  const patterns = [
+    /"?(?:gtin13|gtin12|gtin14|gtin8|gtin|ean13|ean|upc|barcode)"?\s*[:=]\s*"?(\d[\d\s\-]{7,18}\d)"?/gi,
+    /(?:EAN|GTIN|UPC|barcode|c[oó]digo de barras)[^0-9]{0,20}(\d[\d\s\-]{7,18}\d)/gi
+  ];
+  for (let p = 0; p < patterns.length; p++) {
+    let m;
+    while ((m = patterns[p].exec(text))) {
+      if (validGtin(m[1])) return gtin.normalize(m[1]);
+    }
+  }
+  return "";
+}
+
 function textOf(v) {
   if (typeof v === "string") return v.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   if (typeof v === "number" && isFinite(v)) return String(v);
@@ -171,7 +213,7 @@ function metaOf(html) {
   return {
     name: name.slice(0, 300),
     brand: brand,
-    gtin: "",
+    gtin: microdataGtin(html) || visibleGtin(html),
     mpn: mpn.slice(0, 80),
     sku: "",
     description: description.slice(0, 1200),
@@ -235,7 +277,7 @@ function parseJsonLd(html, opts) {
     if (!list.length) continue;
     const withId = list.filter(function (p) { return gtinOf(p) || p.mpn || p.sku; });
     const p = withId[0] || list[0];
-    const g = gtinOf(p);
+    const g = gtinOf(p) || microdataGtin(html) || visibleGtin(html);
     const mpn = String(p.mpn || "").trim();
     const sku = String(p.sku || "").trim();
     const name = String(p.name || "").trim();

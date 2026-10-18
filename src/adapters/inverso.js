@@ -436,10 +436,12 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
   hooks = hooks || {};
   const { adapters } = require("./index");
   const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1 };
-  const rank = { discovery: 0, supplier_market: 1, wholesale: 2, marketplace: 2 };
+  const rank = { gshopping_ean: 0, discovery: 0, discovery_open: 0, supplier_market: 1, wholesale: 2, marketplace: 2 };
   const candidates = Object.keys(adapters).filter(function (id) {
     const a = adapters[id];
-    return !skip[id] && a && a.actions && typeof a.actions.search === "function";
+    /* En modo exacto no se consultan fuentes que declaran no publicar EAN:
+       solo gastan tiempo y ocupan fichas de enriquecimiento. */
+    return !skip[id] && a && a.ean !== false && !a.requiresAuth && a.actions && typeof a.actions.search === "function";
   }).sort(function (x, y) {
     const rx = rank[adapters[x].kind] != null ? rank[adapters[x].kind] : 5;
     const ry = rank[adapters[y].kind] != null ? rank[adapters[y].kind] : 5;
@@ -452,11 +454,12 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
   const budgetMs = clampInt(body && body.budgetMs, 110000, 15000, 180000);
   const deadline = Date.now() + budgetMs;
   const concurrency = Math.max(2, Math.min(clampInt(body && body.concurrency, 10, 1, 16), candidates.length || 1));
-  const matches = [], above = [], searched = [], rejected = [], pending = [];
+  const matches = [], above = [], searched = [], rejected = [], pendingAll = [];
   const seenKeys = {};
   let cursor = 0;
   const cfgM = config.match || {};
-  const enrichMax = Math.max(0, Math.min(parseInt(cfgM.enrichMax, 10) || 0, 30));
+  const cfgEnrich = parseInt(cfgM.enrichMax, 10) || 0;
+  const enrichMax = cfgEnrich > 0 ? Math.min(Math.max(cfgEnrich, 24), 60) : 0;
 
   function accept(rec, entry, recsOut) {
     const k = String(rec.url || "") + "|" + String(rec.price || "");
@@ -492,10 +495,12 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
         market: (body && body.market) || undefined,
         ean: (body && body.ean) || srcEans[0],
         eans: srcEans,
+        eanOnly: Boolean(body && body.eanOnly),
+        __eanExact: Boolean(body && body.eanOnly),
         brand: (body && body.brand) || "",
         model: (body && body.model) || "",
         name: (body && body.name) || ""
-      }), Math.min(Math.max(5000, deadline - Date.now()), 30000));
+      }), Math.min(Math.max(5000, deadline - Date.now()), 110000));
       const data = r && r.ok ? r.data : null;
       const items = (data && data.items) || [];
       entry.rawCount = items.length;
@@ -512,16 +517,15 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
             entry.differentEan++;
             rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: "EAN/UPC distinto: " + got.join(", ") + " no es " + srcEans.join(", ") + "." });
           }
-        } else if (it.url && pending.length < enrichMax) {
-          entry.noEan++;
-          pending.push({ id: id, label: entry.sourceLabel, it: it, entry: entry, recsOut: recsOut });
         } else {
           entry.noEan++;
-          rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: "La oferta no publica EAN/UPC; no se puede verificar por codigo." });
+          if (it.url) pendingAll.push({ id: id, label: entry.sourceLabel, it: it, entry: entry, recsOut: recsOut, order: pendingAll.length });
+          else rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: "La oferta no publica EAN/UPC ni enlace a su ficha; no se puede verificar por codigo." });
         }
       }
       entry.ok = entry.count > 0;
       if (!entry.ok) entry.reason = entry.rawCount ? "sin_coincidencias_ean" : ((r && r.reason) || "sin_resultados");
+      if (r && !r.ok && r.detail) entry.detail = String(r.detail).slice(0, 300);
       entry.ms = Date.now() - t0;
     } catch (e) {
       entry.reason = String((e && e.message) || e);
@@ -543,13 +547,32 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
   await Promise.all(workers);
 
   /* Enriquecer las fichas sin EAN: si al abrirlas aparece el mismo codigo, se
-     aceptan; si no, se rechazan. Nunca se acepta por parecido. */
+     aceptan; si no, se rechazan. Nunca se acepta por parecido.
+     Se priorizan Google Shopping/descubrimiento (donde de verdad hay tiendas
+     de cualquier sector) y se limita cada fuente para que no acapare las
+     fichas. Las que no caben se explican en el diagnostico. */
+  const priorityOf = { discovery: 0, explorar: 0, gshopping: 0, bigbuy: 1, aliexpress: 1, cjdropshipping: 2, a1688: 2, alibaba: 2, madeinchina: 2 };
+  const sortedPending = pendingAll.slice().sort(function (a, b) {
+    const pa = priorityOf[a.id] != null ? priorityOf[a.id] : 3;
+    const pb = priorityOf[b.id] != null ? priorityOf[b.id] : 3;
+    return pa - pb || a.order - b.order;
+  });
+  const perSource = {}, pending = [];
+  sortedPending.forEach(function (p) {
+    if (pending.length >= enrichMax) return;
+    perSource[p.id] = (perSource[p.id] || 0) + 1;
+    if (perSource[p.id] <= 10) pending.push(p);
+  });
+  const notEnriched = pendingAll.filter(function (p) { return pending.indexOf(p) === -1; });
+  notEnriched.slice(0, 40).forEach(function (p) {
+    rejected.push({ source: p.id, kind: "identidad", name: String(p.it && p.it.name || "").slice(0, 80), reason: "No se pudo abrir su ficha para comprobar el EAN dentro del limite de " + enrichMax + " fichas." });
+  });
   const recsBySource = {};
   pending.forEach(function (p) { recsBySource[p.entry.source] = p.recsOut; });
   if (pending.length && enrichMax > 0) {
     try {
       const recs = pending.map(function (p) { return eanRecFromItem(p.id, p.label, p.it, srcEans, priceMax); });
-      await enrichLib.enrich(recs, { max: recs.length, concurrency: 4, timeoutMs: cfgM.enrichMs || 6000 });
+      await enrichLib.enrich(recs, { max: recs.length, concurrency: 6, timeoutMs: cfgM.enrichMs || 9000 });
       recs.forEach(function (rec, i) {
         const p = pending[i];
         const d = rec.enriched || {};
@@ -599,11 +622,12 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
   const noEan = searched.reduce(function (n, s) { return n + (s.noEan || 0); }, 0);
   const sourcesWithEan = searched.filter(function (s) { return (s.withEan || 0) > 0; }).length;
   const sourcesNoEan = searched.filter(function (s) { return (s.rawCount || 0) > 0 && !(s.withEan > 0); }).length;
-  const missingKeys = searched.filter(function (s) { return /not_configured|api_key|apify|token|clave|missing/i.test(String(s.reason || "")); }).map(function (s) { return s.sourceLabel || s.source; });
+  const missingKeys = searched.filter(function (s) { return /not_configured|actor_no_configurado|actor_http|api_key|apify|token|clave|missing/i.test(String(s.reason || "")); }).map(function (s) { return s.sourceLabel || s.source; });
   const exactTotal = matches.length + above.length;
   let diagnosis = null;
   if (!exactTotal) {
-    const reason = !searched.length ? "sin_fuentes" : (!raw ? "sin_respuesta" : (!withEan ? "fuentes_sin_ean" : "ean_no_vendido"));
+    const gtinMiss = searched.some(function (s) { return /GTIN_NOT_FOUND|INVALID_GTIN|NO_MATCHING_PRODUCTS/i.test(String(s.reason || "")); });
+    const reason = gtinMiss ? "ean_no_vendido" : (!searched.length ? "sin_fuentes" : (!raw ? "sin_respuesta" : (!withEan ? "fuentes_sin_ean" : "ean_no_vendido")));
     const msg = reason === "sin_fuentes"
       ? "No hay fuentes de proveedores configuradas para buscar por EAN."
       : reason === "sin_respuesta"
@@ -636,7 +660,7 @@ async function searchSuppliers(body, priceMax, hooks) {
   const rank = { discovery: 0, supplier_market: 1, wholesale: 2, marketplace: 2 };
   const candidates = Object.keys(adapters).filter(function (id) {
     const a = adapters[id];
-    return !skip[id] && a && a.actions && typeof a.actions.search === "function";
+    return !skip[id] && a && !a.exactOnly && a.actions && typeof a.actions.search === "function";
   }).sort(function (x, y) {
     const rx = rank[adapters[x].kind] != null ? rank[adapters[x].kind] : 5;
     const ry = rank[adapters[y].kind] != null ? rank[adapters[y].kind] : 5;

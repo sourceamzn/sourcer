@@ -263,6 +263,8 @@ function makeAdapter(profile) {
     id: source,
     label: profile.label || source,
     kind: profile.kind || "scraping",
+    ean: profile.ean !== false,
+    requiresAuth: Boolean(profile.requiresAuth),
     actions: {
       ping: async () => {
         if (profile.requiresAuth) {

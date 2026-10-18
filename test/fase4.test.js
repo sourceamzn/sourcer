@@ -172,6 +172,24 @@ test("enrich: lee JSON-LD Product simple (gtin, mpn, brand)", () => {
   assert.equal(d.mpn, "WH1000XM5");
 });
 
+test("enrich: lee el EAN visible aunque no este en el JSON-LD", () => {
+  const html = '<script type="application/ld+json">' + JSON.stringify({
+    "@type": "Product", name: "Maquina de coser", mpn: "MC-1"
+  }) + '</script><table><tr><td>EAN</td><td>4006381333931</td></tr></table>';
+  assert.equal(enrich.parseJsonLd(html).gtin, "4006381333931");
+  const bad = '<script type="application/ld+json">' + JSON.stringify({
+    "@type": "Product", name: "Maquina de coser", mpn: "MC-1"
+  }) + '</script><table><tr><td>EAN</td><td>4006381333932</td></tr></table>';
+  assert.equal(enrich.parseJsonLd(bad).gtin || "", "");
+});
+
+test("enrich: lee el EAN de microdatos schema.org", () => {
+  const html = '<script type="application/ld+json">' + JSON.stringify({
+    "@type": "Product", name: "Maquina de coser", mpn: "MC-2"
+  }) + '</script><span itemprop="gtin13" content="4006381333931">4006381333931</span>';
+  assert.equal(enrich.parseJsonLd(html).gtin, "4006381333931");
+});
+
 test("enrich: acepta @graph y arrays", () => {
   const graph = '<script type="application/ld+json">' + JSON.stringify({
     "@context": "https://schema.org",

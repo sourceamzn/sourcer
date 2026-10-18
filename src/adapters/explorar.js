@@ -11,6 +11,7 @@
 
 const { config, apifyReady } = require("../config");
 const apify = require("../lib/apify");
+const gtin = require("../lib/gtin");
 
 const CATEGORIES = [
   "secador de pelo", "freidora de aire", "aspirador robot", "auriculares bluetooth", "cafetera monodosis",
@@ -21,7 +22,9 @@ const CATEGORIES = [
   "mochila antirrobo", "maleta cabina", "silla gaming", "escritorio elevable", "lampara led escritorio",
   "juguete educativo", "puzzle", "juego de mesa", "patinete electrico", "casco bicicleta",
   "masajeador cervical", "pistola de masaje", "esterilla yoga", "mancuernas ajustables", "comba fitness",
-  "comedero automatico gatos", "cama perro", "rascador gatos", "colchon viscoelastica", "almohada cervical"
+  "comedero automatico gatos", "cama perro", "rascador gatos", "colchon viscoelastica", "almohada cervical",
+  "maquina de coser", "bordadora", "kit de costura", "tela para coser", "herramienta electrica",
+  "sierra circular", "taladro percutor", "compresor de aire", "hidrolimpiadora", "deshumidificador"
 ];
 const SYNONYMS = {
   "secador de pelo": ["secador cabello", "hair dryer"],
@@ -56,14 +59,28 @@ function expand(q) {
   return out.filter(function (x, i) { return x && out.indexOf(x) === i; }).slice(0, 4);
 }
 
+function eanOf(o) {
+  const sources = [o, o && o.productDetails, o && o.productInfo, o && o.offers && (Array.isArray(o.offers) ? o.offers[0] : o.offers)];
+  const keys = ["gtin", "gtin13", "gtin12", "gtin14", "gtin8", "ean", "ean13", "upc", "barcode"];
+  for (let s = 0; s < sources.length; s++) {
+    const x = sources[s];
+    if (!x || typeof x !== "object") continue;
+    for (let i = 0; i < keys.length; i++) {
+      const n = gtin.normalize(x[keys[i]]);
+      if (n) return n;
+    }
+  }
+  return "";
+}
+
 function toItem(o, query) {
   const price = Number(o.priceNumeric);
   const cur = String(o.currency || "EUR");
-  const eur = /eur|€/i.test(cur) || !o.currency;
+  const eur = /eur|�'�/i.test(cur) || !o.currency;
   return {
     source: "explorar",
     name: String(o.title || "").slice(0, 180),
-    brand: "", model: "", reference: "", ean: "",
+    brand: "", model: "", reference: "", ean: eanOf(o),
     price: eur && price > 0 ? price : null,
     priceText: !eur && price > 0 ? cur + " " + price : "",
     oldPrice: null, stock: null, available: true,
@@ -84,8 +101,8 @@ async function run(queries, max, noCache) {
   const t0 = Date.now();
   const r = await apify.runActor(
     actor,
-    { queries: queries, maxResults: Math.max(10, max), country: String(config.apify.country || "es").toLowerCase(), language: "es", sortBy: "relevance" },
-    { op: op, estCost: 0.03 * queries.length, timeoutSec: 55, noCache: noCache }
+    { queries: queries, maxResults: Math.max(40, max), country: String(config.apify.country || "es").toLowerCase(), language: "es", sortBy: "relevance" },
+    { op: op, estCost: 0.03 * queries.length, timeoutSec: 90, noCache: noCache }
   );
   if (!r.ok) return { ok: false, reason: r.reason, detail: r.detail };
   const seen = {};
@@ -120,7 +137,7 @@ async function browse(body) {
   body = body || {};
   const max = Math.min(Math.max(parseInt(body.max || "24", 10) || 24, 6), 60);
   const queries = pick(CATEGORIES, 4, body.seed);
-  return pack(await run(queries, Math.ceil(max / 2), Boolean(body.fresh)), "browse", queries, max);
+  return pack(await run(queries, Math.max(20, Math.ceil(max / 2)), Boolean(body.fresh)), "browse", queries, max);
 }
 
 async function search(body) {

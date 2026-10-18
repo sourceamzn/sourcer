@@ -97,7 +97,36 @@ function toItem(p, info) {
   };
 }
 
+function httpHint(st, res) {
+  if (st === 401 || st === 403) {
+    return "BigBuy rechaza la clave (" + st + "). Revisa que BIGBUY_API_KEY sea solo la clave (sin comillas ni 'Bearer'), que sea de PRODUCCION y que la IP del servidor este autorizada. Respuesta: " + bodyHint(res);
+  }
+  if (st === 429) return "Limite de BigBuy superado (products: 10 peticiones/hora). Espera una hora antes de reintentar.";
+  if (st === 409) return "BigBuy aun no tiene el catalogo en cache para tu cuenta (409). Reintenta mas tarde.";
+  return bodyHint(res);
+}
+
 let cached = { items: null, at: 0 };
+
+/* Prueba de vida real: una sola peticion (pageSize=1) contra BigBuy.
+   No descarga el catalogo ni llena la cache; sirve para saber si la clave
+   vale sin gastar la cuota del snapshot. */
+async function check() {
+  if (!bigbuyReady()) return { ok: false, configured: false, reason: "bigbuy_not_configured", hint: "Configura BIGBUY_API_KEY (API de mayorista BigBuy)." };
+  const res = await bbGet("/rest/catalog/products.json?isoCode=" + encodeURIComponent(config.bigbuy.iso) + "&page=1&pageSize=1");
+  const st = res.status || null;
+  return {
+    ok: Boolean(res.ok),
+    configured: true,
+    status: st,
+    base: base(),
+    keyLength: apiKey().length,
+    keyCleaned: apiKey() !== String(config.bigbuy.apiKey || ""),
+    hint: res.ok
+      ? "Clave valida: BigBuy responde. El catalogo se descarga aparte con /sourcing/bigbuy/search."
+      : httpHint(st, res)
+  };
+}
 
 async function snapshot() {
   if (cached.items && Date.now() - cached.at < CACHE_MIN * 60000) return { ok: true, items: cached.items };
@@ -111,15 +140,7 @@ async function snapshot() {
     if (!productsRes.ok) {
       if (!fetchedAny) {
         const st = productsRes.status;
-        const hint =
-          st === 401 || st === 403
-            ? "BigBuy rechaza la clave (" + st + "). Revisa que BIGBUY_API_KEY sea solo la clave (sin comillas ni 'Bearer'), que sea de PRODUCCION y que BIGBUY_BASE no este definida como sandbox. Respuesta: " + bodyHint(productsRes)
-            : st === 429
-              ? "Limite de BigBuy superado (products: 10 peticiones/hora). Se reintentara con la cache."
-              : st === 409
-                ? "BigBuy aun no tiene el catalogo en cache para tu cuenta (409). Reintenta mas tarde."
-                : bodyHint(productsRes);
-        return { ok: false, reason: "bigbuy_http_" + st, status: st, error: productsRes.error, hint: hint };
+        return { ok: false, reason: "bigbuy_http_" + st, status: st, error: productsRes.error, hint: httpHint(st, productsRes) };
       }
       break;
     }
@@ -195,6 +216,7 @@ const bigbuy = {
         ? "Catalogo mayorista (precio neto sin IVA, EAN, stock, imagenes)."
         : "Sin BIGBUY_API_KEY: el proveedor esta apagado."
     }),
+    check,
     search
   }
 };
