@@ -13,6 +13,7 @@ const { config, discoveryReady, apifyReady } = require("../config");
 const apify = require("../lib/apify");
 const { jsonFetch } = require("../lib/http");
 const eanLib = require("../lib/ean");
+const web = require("./web");
 
 const SUPPLIER_HINTS = [
   "mayorista", "al por mayor", "por mayor", "distribuidor", "wholesale", "supplier",
@@ -51,6 +52,34 @@ function buildQuery(body) {
     .map(function (x) { return String(x == null ? "" : x).trim(); })
     .filter(Boolean);
   return { q: parts.join(" ").trim(), via: "titulo" };
+}
+
+/* Variantes de busqueda: el mismo producto desde varios angulos para que
+   Google no devuelva solo mayoristas chinos ni una unica tienda. Incluye
+   color/talla cuando el origen los conoce. */
+function queryVariants(q, body) {
+  const base = String(q || "").trim();
+  if (!base) return [];
+  const color = String((body && (body.color || (body.attrs && body.attrs.color))) || "").trim();
+  const size = String((body && (body.size || (body.attrs && body.attrs.size))) || "").trim();
+  const withVariant = [base, color, size].filter(Boolean).join(" ").trim();
+  const ean = digits(body && body.ean);
+  const queries = [];
+  function add(x) {
+    x = String(x || "").replace(/\s+/g, " ").trim();
+    if (x && queries.indexOf(x) === -1) queries.push(x);
+  }
+  add(withVariant);
+  add(base + " mayorista");
+  add(base + " distribuidor");
+  add(base + " al por mayor");
+  add(base + " proveedor");
+  add(base + " fabricante");
+  add(base + " wholesale");
+  add(base + " supplier");
+  add(base + " importador");
+  if (ean && ean.length >= 8) add(ean + " " + [body && body.brand, body && body.name].filter(Boolean).join(" ").trim());
+  return queries.slice(0, 8);
 }
 
 function toItem(r) {
@@ -99,10 +128,86 @@ async function braveSearch(q, count) {
   return { ok: true, results: results };
 }
 
+async function braveMany(q, count, body) {
+  const all = [];
+  const variants = queryVariants(q, body).slice(0, 4);
+  for (let i = 0; i < variants.length; i++) {
+    const r = await braveSearch(variants[i], count);
+    if (!r.ok) continue;
+    r.results.forEach(function (x) { all.push(x); });
+    if (all.length >= count * 2) break;
+  }
+  return all.length ? { ok: true, results: all } : { ok: false, reason: "brave_sin_resultados" };
+}
+
+function decodeEntities(s) {
+  return String(s || "")
+    .replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&nbsp;/g, " ");
+}
+
+function cleanText(s) {
+  return decodeEntities(String(s || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+}
+
+function decodeLink(href) {
+  let h = decodeEntities(href);
+  if (h.indexOf("//duckduckgo.com/l/") === 0) h = "https:" + h;
+  try {
+    const u = new URL(h);
+    const target = u.searchParams.get("uddg");
+    if (target) h = decodeURIComponent(target);
+  } catch (e) {}
+  return h;
+}
+
+function parseWebResults(html) {
+  const out = [];
+  const ddg = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = ddg.exec(html))) out.push({ url: decodeLink(m[1]), title: cleanText(m[2]), description: "" });
+  if (out.length) {
+    /* Snippets de DuckDuckGo, en el mismo orden. */
+    const sn = [];
+    const re = /<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+    while ((m = re.exec(html))) sn.push(cleanText(m[1]));
+    out.forEach(function (x, i) { if (sn[i]) x.description = sn[i]; });
+    return out;
+  }
+  const bing = /<li[^>]+class="[^"]*b_algo[^"]*"[^>]*>[\s\S]*?<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<p[^>]*>([\s\S]*?)<\/p>)?/gi;
+  while ((m = bing.exec(html))) {
+    out.push({ url: decodeLink(m[1]), title: cleanText(m[2]), description: cleanText(m[3] || "") });
+  }
+  return out;
+}
+
+/* Sin APIFY_TOKEN ni BRAVE_API_KEY no se apaga el descubrimiento: se usa la
+   busqueda web del servidor (DuckDuckGo HTML y Bing como respaldo). No es
+   Google pago, pero mantiene la busqueda abierta en todo Internet. */
+async function webMany(q, count, body) {
+  const all = [];
+  const variants = queryVariants(q, body).slice(0, 4);
+  for (let i = 0; i < variants.length; i++) {
+    let r = await web.actions.search({ query: variants[i], engine: "ddg" });
+    if (!r.ok) r = await web.actions.search({ query: variants[i], engine: "bing" });
+    if (!r.ok) continue;
+    parseWebResults(r.html).forEach(function (x) { all.push(x); });
+    if (all.length >= count * 2) break;
+  }
+  return all.length ? { ok: true, results: all, engine: "web" } : { ok: false, reason: "web_sin_resultados" };
+}
+
 /* Motor principal: Google Search Scraper de Apify. Devuelve el mismo formato
    {title,url,description} que Brave para compartir el resto del flujo. */
-async function apifySearch(q, count) {
-  const queries = [q, q + " mayorista", q + " distribuidor fabricante"].join("\n");
+function pushResult(out, o) {
+  if (!o) return;
+  const url = o.url || o.link || o.href || "";
+  if (!/^https?:\/\//i.test(String(url))) return;
+  out.push({ title: o.title || o.name || "", url: url, description: o.description || o.snippet || "" });
+}
+
+async function apifySearch(q, count, body) {
+  const queries = queryVariants(q, body).join("\n");
   const r = await apify.runActor(
     config.apify.actors.search,
     {
@@ -115,7 +220,7 @@ async function apifySearch(q, count) {
       saveHtml: false,
       saveHtmlToKeyValueStore: false
     },
-    { estCost: 0.01 }
+    { estCost: 0.02 }
   );
   let r2 = r;
   if (!r.ok && r.reason === "actor_http_400") {
@@ -125,9 +230,14 @@ async function apifySearch(q, count) {
   if (!r2.ok) return { ok: false, reason: r2.reason, status: r2.status };
   const results = [];
   r2.items.forEach(function (page) {
-    ((page && page.organicResults) || []).forEach(function (o) {
-      if (o && o.url) results.push({ title: o.title, url: o.url, description: o.description });
+    if (!page) return;
+    /* Formato del Google Search Scraper: una pagina por consulta. */
+    ((page.organicResults) || []).forEach(function (o) { pushResult(results, o); });
+    /* Tolerancia con actores que devuelven resultados planos o anidados. */
+    ["results", "items", "organic", "newsResults"].forEach(function (k) {
+      if (Array.isArray(page[k])) page[k].forEach(function (o) { pushResult(results, o); });
     });
+    if (page.url || page.link) pushResult(results, page);
   });
   return results.length ? { ok: true, results: results } : { ok: false, reason: "sin_resultados" };
 }
@@ -136,14 +246,7 @@ async function search(body) {
   body = body || {};
   const built = buildQuery(body);
   if (!built.q) return { ok: false, reason: "query_required" };
-  if (!discoveryReady()) {
-    return {
-      ok: false,
-      reason: "discovery_not_configured",
-      hint: "Configura APIFY_TOKEN (recomendado) o BRAVE_API_KEY para descubrir paginas de proveedor."
-    };
-  }
-  const max = Math.min(Math.max(parseInt((body && body.max) || "12", 10) || 12, 3), 20);
+  const max = Math.min(Math.max(parseInt((body && body.max) || "30", 10) || 30, 3), 40);
   let q = built.q;
   let via = built.via;
   /* Si arrancamos por EAN, se enriquece con marca + nombre para que aparezcan
@@ -158,12 +261,16 @@ async function search(body) {
   let r = { ok: false, reason: "sin_motor" };
   let engine = "";
   if (apifyReady()) {
-    r = await apifySearch(q, Math.min(max * 2, 20));
+    r = await apifySearch(q, Math.min(max * 2, 40), body);
     engine = "apify";
   }
   if (!r.ok && config.discovery.apiKey) {
-    r = await braveSearch(q, Math.min(max * 2, 20));
+    r = await braveMany(q, Math.min(max * 2, 40), body);
     engine = "brave";
+  }
+  if (!r.ok) {
+    r = await webMany(q, Math.min(max * 2, 40), body);
+    engine = "web";
   }
   if (!r.ok) return { ok: false, reason: r.reason, status: r.status };
   const seen = {};
@@ -176,12 +283,13 @@ async function search(body) {
       return true;
     })
     .map(toItem);
-  /* El buscador devuelve tiendas, blogs y paginas que no son proveedores.
-     Se priorizan las que tienen senales de mayorista/distribuidor/fabricante
-     (matchedHint) y se descarta el ruido; si ninguna la tiene, se conservan las
-     primeras como ultimo recurso para no dejar la fuente vacia. */
+  /* Se conservan todas las paginas unicas (una por dominio), primero las que
+     tienen senales de mayorista/distribuidor/fabricante. El cotejo posterior
+     (ficha, foto, caracteristicas) decide cuales son el mismo producto; no se
+     descartan aqui por no llevar la palabra "mayorista" en el snippet. */
   const hinted = items.filter(function (x) { return x.matchedHint; });
-  const kept = (hinted.length ? hinted : items.slice(0, 3)).slice(0, max);
+  const rest = items.filter(function (x) { return !x.matchedHint; });
+  const kept = hinted.concat(rest).slice(0, max);
   return {
     ok: kept.length > 0,
     reason: kept.length ? null : "discovery_sin_resultados",
@@ -196,13 +304,13 @@ const discovery = {
   supplier: true,
   actions: {
     ping: async () => ({
-      ok: discoveryReady(),
-      configured: discoveryReady(),
-      reason: discoveryReady() ? null : "apify_not_configured",
-      mode: apifyReady() ? "apify_google_search" : discoveryReady() ? "brave_search" : "sin_clave",
-      note: discoveryReady()
+      ok: true,
+      configured: true,
+      reason: null,
+      mode: apifyReady() ? "apify_google_search" : discoveryReady() ? "brave_search" : "web_fallback",
+      note: apifyReady() || discoveryReady()
         ? "Descubre paginas de proveedor por EAN o marca + modelo."
-        : "Sin APIFY_TOKEN ni BRAVE_API_KEY: el descubrimiento esta apagado."
+        : "Sin APIFY_TOKEN ni BRAVE_API_KEY: usa DuckDuckGo/Bing en el servidor como respaldo."
     }),
     lookup: async (body) => await eanLib.lookup(body && body.ean),
     search

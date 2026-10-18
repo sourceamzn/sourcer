@@ -39,7 +39,7 @@ function moqOf(v) {
 }
 
 function imageOf(o) {
-  const v = first(o, ["image", "imageUrl", "image_url", "img", "mainImage", "thumbnail", "picUrl", "pic", "images"]);
+  const v = first(o, ["image", "imageUrl", "image_url", "img", "mainImage", "thumbnail", "thumbnail_url", "thumbnailUrl", "product_image", "picUrl", "pic", "images"]);
   if (Array.isArray(v)) return String((v[0] && (v[0].url || v[0])) || "");
   return v ? String(v.url || v) : "";
 }
@@ -54,10 +54,10 @@ function isEur(cur, id) {
 }
 
 function toItem(o, id, label, candidate) {
-  const url = String(first(o, ["product_url", "url", "link", "productUrl", "detailUrl", "itemUrl", "href"]) || "");
-  const supplier = String(first(o, ["company_name", "shop_name", "supplier", "supplierName", "companyName", "sellerName", "seller_name", "seller", "merchant", "store", "source"]) || label);
+  const url = String(first(o, ["product_url", "url", "link", "productUrl", "productLink", "detailUrl", "itemUrl", "href", "source_url"]) || "");
+  const supplier = String(first(o, ["company_name", "shop_name", "supplier", "supplierName", "companyName", "sellerName", "seller_name", "seller", "merchant", "merchant_name", "merchantName", "store", "source", "source_name"]) || label);
   const cur = currencyOf(o);
-  const lo = priceOf(first(o, ["priceNumeric", "min_price", "price_min", "price", "priceMin", "minPrice", "unitPrice", "salePrice", "extractedPrice", "priceRange"]));
+  const lo = priceOf(first(o, ["priceNumeric", "min_price", "price_min", "price", "priceMin", "minPrice", "unitPrice", "salePrice", "extractedPrice", "extracted_price", "priceRange"]));
   const hi = priceOf(first(o, ["max_price", "price_max", "priceMax", "maxPrice"]));
   const eur = isEur(cur, id);
   let priceText = "";
@@ -69,7 +69,7 @@ function toItem(o, id, label, candidate) {
   const platform = String(first(o, ["provider", "platform", "marketplace"]) || id);
   return {
     source: id,
-    name: String(first(o, ["title", "product_name", "name", "subject", "productName", "productTitle"]) || "").slice(0, 180),
+    name: String(first(o, ["title", "product_name", "product_title", "name", "subject", "productName", "productTitle"]) || "").slice(0, 180),
     brand: "",
     model: "",
     reference: "",
@@ -94,6 +94,28 @@ function toItem(o, id, label, candidate) {
     },
     capturedAt: new Date().toISOString()
   };
+}
+
+/* Algunos actores devuelven una fila por consulta con los productos dentro
+   (shoppingResults, products, results...). Se aplana para no perder tarjetas
+   que si existen, sin inventar nada. */
+function flatten(items, depth) {
+  depth = depth || 0;
+  const out = [];
+  (Array.isArray(items) ? items : []).forEach(function (o) {
+    if (!o || typeof o !== "object") return;
+    const keys = ["shoppingResults", "productResults", "products", "results", "items", "data"];
+    let nested = false;
+    keys.forEach(function (k) {
+      if (Array.isArray(o[k]) && depth < 2) {
+        nested = true;
+        flatten(o[k], depth + 1).forEach(function (x) { out.push(x); });
+      }
+    });
+    /* La fila contenedora tambien puede ser un producto. */
+    if (!nested || o.title || o.product_name || o.product_title || o.url || o.product_url) out.push(o);
+  });
+  return out;
 }
 
 function dedupe(items, max) {
@@ -142,7 +164,7 @@ function makeAdapter(def) {
     const op = (body && body.__op) || apify.newOp();
     const r = await apify.runActor(actorId(), BUILDERS[def.actor](q, max), { op: op, estCost: def.estCost || 0.03, timeoutSec: def.timeoutSec || 40 });
     if (!r.ok) return { ok: false, reason: r.reason, detail: r.detail };
-    const items = dedupe(r.items.map(function (o) { return toItem(o, id, def.label, def.candidate); }), max);
+    const items = dedupe(flatten(r.items).map(function (o) { return toItem(o, id, def.label, def.candidate); }), max);
     return {
       ok: items.length > 0,
       reason: items.length ? null : "sin_resultados",

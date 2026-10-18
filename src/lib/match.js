@@ -12,8 +12,9 @@
 
 const gtin = require("./gtin");
 const identity = require("./identity");
+const specsLib = require("./specs");
 
-const WEIGHTS = { model: 55, brand: 20, type: 15, measure: 8, pack: 8, color: 4 };
+const WEIGHTS = { model: 55, brand: 20, type: 15, measure: 8, pack: 8, color: 4, spec: 10 };
 const BANDS = { verified: 80, review: 45 };
 
 function norm(s) {
@@ -172,12 +173,36 @@ function score(src, offer, ctx) {
     }
   } else add(checks, notes, "color", "Color", sColor, oColor, "na", "");
 
+  /* Caracteristicas tecnicas (material, capacidad, peso, potencia, voltaje,
+     bateria, conectividad...). Solo hay conflicto si ambos declaran la misma
+     caracteristica con la misma unidad y un valor numerico distinto. */
+  const sSpecs = ctx.specs || {};
+  const oSpecs = specsLib.fromSource(offer);
+  let specConflict = false;
+  if (Object.keys(sSpecs).length || Object.keys(oSpecs).length) {
+    const sc = specsLib.compare(sSpecs, oSpecs);
+    sc.checks.forEach(function (c) { checks.push(c); });
+    if (sc.okCount) {
+      points += Math.min(WEIGHTS.spec, sc.okCount * 5);
+      notes.push({ state: "ok", text: "Caracteristicas coincidentes: " + sc.checks.filter(function (c) { return c.state === "ok"; }).map(function (c) { return c.label; }).join(", ") });
+    }
+    if (sc.conflicts.length) {
+      specConflict = true;
+      points -= 8 * sc.conflicts.length;
+      notes.push({ state: "fail", text: "Caracteristica distinta: " + sc.conflicts.map(function (c) {
+        return c.label + " origen " + c.source + " y oferta " + c.offer;
+      }).join("; ") });
+    } else if (!sc.okCount && Object.keys(sSpecs).length) {
+      notes.push({ state: "na", text: "La oferta no declara caracteristicas comparables." });
+    }
+  }
+
   points = Math.max(0, Math.min(100, Math.round(points)));
   let band;
   if (strong) {
     band = "descartar";
     points = 0;
-  } else if (brandOk && modelOk && sModels.length && oModels.length) {
+  } else if (brandOk && modelOk && sModels.length && oModels.length && !specConflict) {
     /* Marca+modelo sin conflicto: unica via a "verificado" sin EAN. */
     band = "verificado";
     points = Math.max(points, BANDS.verified);
@@ -203,7 +228,7 @@ function score(src, offer, ctx) {
     score: points, band: band,
     reasons: ordered(notes).concat(cjkOnly && !strong ? ["Titulo en chino: compara la foto antes de comprar."] : []),
     checks: checks,
-    strongConflict: strong, eanOk: false, brandOk: brandOk, modelOk: modelOk, noTextMatch: cjkOnly
+    strongConflict: strong, eanOk: false, brandOk: brandOk, modelOk: modelOk, noTextMatch: cjkOnly, specConflict: specConflict
   };
 }
 

@@ -60,18 +60,32 @@ function modelsOf(t) {
   return Array.from(new Set(out));
 }
 
+/* Talla declarada en un campo (M, XL, 42...), no solo "talla M" dentro del
+   titulo. Se usa para no comparar una prenda M con una L como si fuera igual. */
+function sizeField(v) {
+  const s = norm(v);
+  if (!s) return [];
+  if (/^(xxs|xs|s|m|l|xl|xxl|xxxl|2xl|3xl|4xl|5xl|6xl|\d{1,3}(?:[.,]\d+)?)$/.test(s)) {
+    return ["talla" + s.replace(",", ".")];
+  }
+  return sizesOf(s);
+}
+
 function identityOf(o) {
   o = o || {};
-  const text = [o.brand, o.model, o.name || o.title].filter(Boolean).join(" ");
   const attrs = o.attrs || {};
+  const base = [o.brand, o.model, o.name || o.title].filter(Boolean).join(" ");
+  const sizeText = [o.size, attrs.size, attrs.talla, attrs.dimensions, attrs.dimensiones, attrs.medidas, base].filter(Boolean).join(" ");
+  const explicitColor = colorOf(String(o.color || attrs.color || attrs.colour || ""));
+  const sizes = sizesOf(sizeText).concat(sizeField(o.size || attrs.size || attrs.talla || ""));
   return {
     ean: String(o.ean || "").replace(/\D+/g, ""),
     eans: gtin.normalizeAll([].concat(o.eans || [], o.ean || [])),
     brand: String(o.brand || attrs.brand || "").trim(),
     models: modelsOf((o.model ? o.model + " " : "") + String(o.name || o.title || "")),
     quantity: quantityOf(o.name || o.title),
-    sizes: sizesOf(text),
-    color: colorOf(o.name || o.title)
+    sizes: Array.from(new Set(sizes)),
+    color: explicitColor || colorOf(base)
   };
 }
 
@@ -94,7 +108,7 @@ function compare(src, offer) {
     else add("ean", "EAN/UPC", sEan || sEans[0], oEan, "fail");
   } else add("ean", "EAN/UPC", sEan, oEan, "na");
 
-  const oText = String(offer.name || "") + " " + String(offer.brand || "");
+  const oText = [offer.name, offer.brand, offer.model].filter(Boolean).join(" ");
   const oNorm = norm(oText);
   if (src.brand) {
     const b = norm(src.brand);
@@ -107,24 +121,25 @@ function compare(src, offer) {
     add("model", "Modelo", src.models.join(", "), oModels.join(", "), hit ? "ok" : "fail");
   } else add("model", "Modelo", src.models.join(", "), oModels.join(", "), "na");
 
+  const oId = identityOf(offer);
   const oQty = quantityOf(oText);
   if (src.quantity && oQty) add("quantity", "Pack/cantidad", src.quantity, oQty, src.quantity === oQty ? "ok" : "fail");
   else if (src.quantity && !oQty && src.quantity !== "1") add("quantity", "Pack/cantidad", src.quantity, "", "na");
   else if (!src.quantity && oQty && oQty !== "1") add("quantity", "Pack/cantidad", "", oQty, "na");
   else add("quantity", "Pack/cantidad", src.quantity, oQty, "na");
 
-  const oSizes = sizesOf(oText);
+  const oSizes = oId.sizes;
   if (src.sizes.length && oSizes.length) {
     const common = src.sizes.filter(function (z) { return oSizes.indexOf(z) !== -1; });
-    /* Mismo tipo de medida (misma unidad) con valores distintos = conflicto. */
-    const unit = function (z) { return z.replace(/^[\dx.]+/, ""); };
+    /* Mismo tipo de medida (misma unidad o misma talla) con valores distintos = conflicto. */
+    const unit = function (z) { return z.indexOf("talla") === 0 ? "talla" : z.replace(/^[\dx.]+/, ""); };
     const sameUnitDiff = src.sizes.some(function (z) {
       return oSizes.some(function (y) { return unit(z) === unit(y) && z !== y; }) && !oSizes.some(function (y) { return y === z; });
     });
     add("size", "Medida/talla", src.sizes.join(", "), oSizes.join(", "), common.length && !sameUnitDiff ? "ok" : (sameUnitDiff ? "fail" : "na"));
   } else add("size", "Medida/talla", src.sizes.join(", "), oSizes.join(", "), "na");
 
-  const oColor = colorOf(oText);
+  const oColor = oId.color;
   if (src.color && oColor) add("color", "Color", src.color, oColor, src.color === oColor ? "ok" : "fail");
   else add("color", "Color", src.color, oColor, "na");
 

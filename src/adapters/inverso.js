@@ -284,6 +284,8 @@ async function keepaFinder(body) {
 const identity = require("../lib/identity");
 const matchLib = require("../lib/match");
 const enrichLib = require("../lib/enrich");
+const specsLib = require("../lib/specs");
+const imageLib = require("../lib/imagecheck");
 const MARKET = "https://www.amazon.es";
 function supplierQuery(body) {
   /* Primera consulta de la cascada (la lista completa la monta queries.buildQueries). */
@@ -362,7 +364,7 @@ async function searchSuppliers(body, priceMax, hooks) {
   });
   /* Ficha de Amazon: si el frontend no manda EAN/modelo/referencia, se leen de Keepa (1 llamada). */
   let kpProd = null;
-  if (body && body.asin && keepaReady() && (!body.ean || !body.model || !body.partNumber || !body.categoryTree)) {
+  if (body && body.asin && keepaReady() && (!body.ean || !body.model || !body.partNumber || !body.categoryTree || !body.image)) {
     try {
       const kp = await withTimeout(keepaProductsByAsins([String(body.asin).toUpperCase()], 0), 6000);
       kpProd = (kp && kp.products && kp.products[0]) || null;
@@ -377,7 +379,12 @@ async function searchSuppliers(body, priceMax, hooks) {
       model: body.model || f.model || "",
       partNumber: body.partNumber || f.partNumber || "",
       brand: body.brand || String(kpProd.brand || ""),
-      categoryTree: body.categoryTree || kpProd.categoryTree || null
+      categoryTree: body.categoryTree || kpProd.categoryTree || null,
+      image: body.image || keepaImageUrl(kpProd),
+      features: (body.features && body.features.length) ? body.features : (f.features || []),
+      description: body.description || f.description || "",
+      color: body.color || f.color || "",
+      size: body.size || f.size || ""
     });
     try { events.add("job", { phase: "ficha", asin: body.asin, eans: (body.eans || []).length, model: body.model, partNumber: body.partNumber, missing: fx.missing.join(",") }); } catch (e) {}
   }
@@ -388,6 +395,7 @@ async function searchSuppliers(body, priceMax, hooks) {
   const qTokens = tokensOf([body && body.brand, body && body.model, body && body.name].filter(Boolean).join(" ") || sq.q);
   const q = sq.q;
   const srcId = identity.freezeCard(identity.identityOf(body || {}), body || {});
+  const srcSpecs = specsLib.fromSource(body || {});
   const ptype = require("../lib/ptype");
   const srcText = [body && body.name, body && body.title, body && body.query].filter(Boolean).join(" ");
   /* Puerta de tipo de producto: palabras que dicen QUE es (telefonillo, teclado...),
@@ -465,7 +473,9 @@ async function searchSuppliers(body, priceMax, hooks) {
       /* Cascada de consultas: se prueban en orden hasta tener suficientes resultados utiles.
          Las fuentes de pago (Apify) usan pocas; las que ya traducen su consulta, solo una. */
       const paid = open;
-      const budgetQ = adapters[id].ownQuery ? 1 : (paid ? cfgS.maxQueriesPaid : cfgS.maxQueries);
+      /* El descubrimiento ya expande cada consulta a varios angulos dentro de
+         Google; una sola llamada basta y evita multiplicar el coste/tiempo. */
+      const budgetQ = adapters[id].ownQuery ? 1 : (id === "discovery" ? 1 : (paid ? cfgS.maxQueriesPaid : cfgS.maxQueries));
       const plan = [];
       for (let qi = 0; qi < qlist.length && plan.length < budgetQ; qi++) {
         const qq = qlist[qi];
@@ -565,6 +575,13 @@ async function searchSuppliers(body, priceMax, hooks) {
         const rec = {
           source: id, sourceLabel: label,
           name: it.name || "", brand: it.brand || "", ean: it.ean || "",
+          model: it.model || (it.attrs && (it.attrs.model || it.attrs.reference)) || "",
+          description: it.description || (it.attrs && it.attrs.description) || "",
+          specs: it.specs || [], features: it.features || [],
+          color: it.color || (it.attrs && (it.attrs.color || it.attrs.colour)) || "",
+          size: it.size || (it.attrs && it.attrs.size) || "",
+          material: it.material || (it.attrs && it.attrs.material) || "",
+          weight: it.weight || (it.attrs && it.attrs.weight) || "",
           price: price || null, oldPrice: num(it.oldPrice) || null,
           shipping: num(it.shipping) || null, stock: it.stock == null ? null : num(it.stock),
           limit: it.limit == null ? null : num(it.limit),
@@ -581,27 +598,40 @@ async function searchSuppliers(body, priceMax, hooks) {
         rec.role = roleOf(adapters[id], rec);
         /* Fase 4: puntuacion 0-100. Solo el conflicto fuerte (EAN, pack o
            modelo distintos) descarta; el resto queda "a revisar". */
-        const mt = matchLib.score(srcId, { name: it.name, brand: it.brand, ean: it.ean }, { typeOk: it.__typeOk, typeReason: it.__typeReason });
+        const mt = matchLib.score(srcId, {
+          name: it.name, brand: it.brand, ean: it.ean,
+          model: rec.model,
+          specs: rec.specs, features: rec.features, description: rec.description,
+          color: rec.color, size: rec.size, material: rec.material, weight: rec.weight,
+          attrs: it.attrs
+        }, { typeOk: it.__typeOk, typeReason: it.__typeReason, specs: srcSpecs });
         rec.matchScore = mt.score;
         rec.matchBand = mt.band;
         rec.matchReasons = mt.reasons;
         rec.matchChecks = mt.checks;
         rec.__typeOk = it.__typeOk === true;
-        if (mt.strongConflict || mt.band === "descartar") {
+        /* Los descubrimientos web llegan solo con titulo + URL: no se pueden
+           juzgar hasta abrir la ficha. Se conservan como provisionales y el
+           cotejo posterior (JSON-LD/Open Graph + foto) decide. El resto de
+           fuentes mantiene el descarte inmediato ante conflicto. */
+        if (mt.strongConflict || (mt.band === "descartar" && id !== "discovery")) {
           rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: mt.reasons[0] || "Coincidencia insuficiente.", score: mt.score });
           return;
         }
-        const cmp = identity.compare(srcId, { name: it.name, brand: it.brand, ean: it.ean });
+        const cmp = identity.compare(srcId, { name: it.name, brand: it.brand, ean: it.ean, model: rec.model, color: rec.color, size: rec.size, attrs: it.attrs });
         rec.match = mt.band === "verificado" ? (mt.eanOk ? "exacto" : "probable") : "equivalente";
         rec.identity = { verdict: cmp.verdict, reason: mt.reasons.join(" · ") || cmp.reason, checks: mt.checks, score: mt.score, matching: cmp.matching, conflicting: cmp.conflicting };
         rec.imageOk = /^https?:\/\//i.test(String(rec.image || ""));
         if (titlePrice) { rec.priceFromTitle = true; rec.priceText = "desde " + price.toFixed(2).replace(".", ",") + " € (leído del título, confirmar)"; }
         if (price <= 0) { rec.noPrice = true; rec.priceText = rec.priceText || "Contactar para precio"; }
-        if (mt.band === "revisar") {
+        if (mt.band === "revisar" || (id === "discovery" && mt.band === "descartar")) {
           rec.review = true;
+          rec.provisional = id === "discovery" && mt.band === "descartar";
           rec.reviewNote = mt.noTextMatch
             ? "Candidato a revisar: titulo en chino, compara la foto con la tuya."
-            : "Candidato a revisar: coincidencia " + mt.score + "/100; compara la foto con la tuya.";
+            : (rec.provisional
+              ? "Descubierto en la web: se abre su ficha para cotejar el producto."
+              : "Candidato a revisar: coincidencia " + mt.score + "/100; compara la foto con la tuya.");
         }
         if (weakId) { rec.review = true; rec.reviewNote = rec.reviewNote || "Identidad de origen débil: candidato a revisar."; }
         rec.state = mt.band === "verificado" ? "verificado" : "candidato";
@@ -633,39 +663,173 @@ async function searchSuppliers(body, priceMax, hooks) {
      (JSON-LD: gtin/mpn/sku/marca) y se vuelven a puntuar. Si el EAN leido es
      distinto al de Amazon, caen como conflicto fuerte. */
   const cfgM = config.match || {};
-  const enrichMax = cfgM.enrichMax == null ? 6 : cfgM.enrichMax;
+  const enrichMax = cfgM.enrichMax == null ? 12 : cfgM.enrichMax;
   if (enrichMax > 0) {
     const targets = matches.filter(function (r) {
-      return r.matchBand === "revisar" && !r.ean && /^https?:\/\//i.test(String(r.url || ""));
-    }).sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); }).slice(0, enrichMax);
+      return !r.ean && /^https?:\/\//i.test(String(r.url || ""));
+    }).sort(function (a, b) {
+      /* Primero lo descubierto en la web abierta y lo que no trae precio:
+         ahi esta la informacion que falta. */
+      const da = a.source === "discovery" ? 0 : 1;
+      const db = b.source === "discovery" ? 0 : 1;
+      if (da !== db) return da - db;
+      const pa = a.price > 0 ? 1 : 0;
+      const pb = b.price > 0 ? 1 : 0;
+      if (pa !== pb) return pa - pb;
+      return (b.matchScore || 0) - (a.matchScore || 0);
+    }).slice(0, enrichMax);
     if (targets.length) {
       try {
-        const got = await enrichLib.enrich(targets, { max: enrichMax, timeoutMs: cfgM.enrichMs || 6000 });
+        await enrichLib.enrich(targets, { max: targets.length, concurrency: 4, timeoutMs: cfgM.enrichMs || 6000 });
         const removed = [];
         targets.forEach(function (rec) {
-          if (!rec.enriched) return;
-          const mt = matchLib.score(srcId, { name: rec.name, brand: rec.brand, ean: rec.enriched.gtin || "" }, { typeOk: rec.__typeOk });
+          const d = rec.enriched;
+          if (!d) return;
+          const offerName = d.name || rec.name;
+          /* Rellenar los datos que la fuente no publicaba. Nunca se sobrescribe
+             un dato que ya venia de la oferta. */
+          if (!rec.brand && d.brand) rec.brand = d.brand;
+          if (!rec.model && (d.mpn || d.sku)) rec.model = d.mpn || d.sku;
+          if (!rec.description && d.description) rec.description = d.description;
+          if (!rec.specs && d.specs && d.specs.length) rec.specs = d.specs;
+          if (!rec.features && d.features && d.features.length) rec.features = d.features;
+          if (!rec.color && d.color) rec.color = d.color;
+          if (!rec.size && d.size) rec.size = d.size;
+          if (!rec.material && d.material) rec.material = d.material;
+          if (!rec.weight && d.weight) rec.weight = d.weight;
+          if (!rec.image && d.images && d.images.length) { rec.image = d.images[0]; rec.imageOk = true; }
+          if (!(rec.price > 0) && d.price > 0) {
+            rec.price = d.price;
+            rec.priceFromPage = true;
+            rec.currency = d.currency || rec.currency || "EUR";
+            rec.under = priceMax > 0 ? rec.price <= priceMax : null;
+            rec.meetsMax = priceMax > 0 ? rec.price <= priceMax : null;
+          }
+          if (!rec.name || rec.name.length < 8) rec.name = offerName || rec.name;
+          const mt = matchLib.score(srcId, {
+            name: offerName, brand: rec.brand, ean: d.gtin || rec.ean,
+            model: rec.model || d.mpn || d.sku || "",
+            specs: rec.specs, features: rec.features, description: rec.description || "",
+            color: rec.color || "", size: rec.size || "", material: rec.material || "", weight: rec.weight || "",
+            attrs: d
+          }, { typeOk: rec.__typeOk, specs: srcSpecs });
           rec.matchScore = mt.score;
           rec.matchBand = mt.band;
           rec.matchReasons = mt.reasons;
           rec.matchChecks = mt.checks;
-          if (rec.enriched.gtin) rec.ean = rec.enriched.gtin;
+          if (d.gtin) rec.ean = d.gtin;
           rec.match = mt.band === "verificado" ? (mt.eanOk ? "exacto" : "probable") : "equivalente";
           rec.state = mt.band === "verificado" ? "verificado" : "candidato";
           rec.review = mt.band !== "verificado";
-          rec.matchEnriched = { gtin: rec.enriched.gtin || "", mpn: rec.enriched.mpn || "", sku: rec.enriched.sku || "" };
+          rec.matchEnriched = {
+            gtin: d.gtin || "", mpn: d.mpn || "", sku: d.sku || "",
+            price: d.price || null, currency: d.currency || "",
+            color: d.color || "", size: d.size || "", material: d.material || "", weight: d.weight || "",
+            specs: d.specs ? d.specs.length : 0, description: Boolean(d.description)
+          };
+          const cmp2 = identity.compare(srcId, {
+            name: offerName, brand: rec.brand, ean: rec.ean, model: rec.model,
+            color: rec.color, size: rec.size, attrs: d
+          });
+          rec.identity = {
+            verdict: cmp2.verdict, reason: mt.reasons.join(" | ") || cmp2.reason,
+            checks: mt.checks, score: mt.score, matching: cmp2.matching, conflicting: cmp2.conflicting
+          };
           if (mt.strongConflict || mt.band === "descartar") removed.push(rec);
+          else if (priceMax > 0 && rec.price > priceMax) {
+            /* La ficha decia un precio distinto: ya no cumple el maximo. No se
+               borra, se devuelve como referencia por encima del maximo. */
+            removed.push(rec);
+            above.push(rec);
+          }
         });
         removed.forEach(function (rec) {
           const i = matches.indexOf(rec);
           if (i !== -1) matches.splice(i, 1);
-          rejected.push({ source: rec.source, kind: "identidad", name: String(rec.name || "").slice(0, 80), reason: (rec.matchReasons && rec.matchReasons[0]) || "EAN distinto leido en la ficha del proveedor.", score: rec.matchScore });
+          if (rec.matchBand === "descartar" || rec.matchScore === 0) {
+            rejected.push({ source: rec.source, kind: "identidad", name: String(rec.name || "").slice(0, 80), reason: (rec.matchReasons && rec.matchReasons[0]) || "EAN distinto leido en la ficha del proveedor.", score: rec.matchScore });
+          }
         });
         try { events.add("job", { phase: "match_enrich", tried: targets.length, found: targets.filter(function (r) { return r.enriched; }).length, discarded: removed.length }); } catch (e) {}
       } catch (e) {}
     }
   }
-  matches.forEach(function (r) { delete r.__typeOk; });
+  /* Descubrimientos cuya ficha no se pudo leer y que siguen sin evidencia:
+     no se muestran como si se hubieran cotejado. */
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const r = matches[i];
+    if (r.provisional && r.matchBand === "descartar" && !r.enriched) {
+      matches.splice(i, 1);
+      rejected.push({ source: r.source, kind: "identidad", name: String(r.name || "").slice(0, 80), reason: "No se pudo abrir su ficha para cotejar el producto.", score: r.matchScore });
+    }
+  }
+  /* Fase 4b · contraste de fotos: misma URL/CDN, misma huella o misma
+     proporcion. No asciende a "verificado": es una prueba adicional para las
+     ofertas que ya estan "a revisar". */
+  const imageMax = cfgM.imageMax == null ? 8 : Math.max(0, Math.min(parseInt(cfgM.imageMax, 10) || 0, 20));
+  if (imageMax > 0 && /^https?:\/\//i.test(String(body.image || ""))) {
+    const imageTargets = matches.filter(function (r) {
+      return /^https?:\/\//i.test(String(r.image || ""));
+    }).sort(function (a, b) {
+      /* Primero las ofertas a revisar: son las que mas necesitan la foto. */
+      const ra = a.matchBand === "revisar" ? 0 : 1;
+      const rb = b.matchBand === "revisar" ? 0 : 1;
+      if (ra !== rb) return ra - rb;
+      return (b.matchScore || 0) - (a.matchScore || 0);
+    }).slice(0, imageMax);
+    if (imageTargets.length) {
+      let ii = 0;
+      async function imageWorker() {
+        while (ii < imageTargets.length) {
+          const rec = imageTargets[ii++];
+          try {
+            const res = await imageLib.compareImages(body.image, rec.image, { timeoutMs: cfgM.imageMs || 5000 });
+            rec.imageCheck = { state: res.state, same: Boolean(res.same), reason: res.reason };
+            rec.imageSame = Boolean(res.same);
+            if (res.same) rec.reviewNote = "La foto es la misma que la de Amazon. " + (rec.reviewNote || "");
+            else if (res.state === "compatible") rec.reviewNote = "Foto con la misma proporcion que la de Amazon. " + (rec.reviewNote || "");
+            else if (res.state === "warn") rec.reviewNote = res.reason + " " + (rec.reviewNote || "");
+          } catch (e) {}
+        }
+      }
+      const iw = [];
+      for (let n = 0; n < Math.min(4, imageTargets.length); n++) iw.push(imageWorker());
+      await Promise.all(iw);
+      try {
+        events.add("job", {
+          phase: "image_check",
+          tried: imageTargets.length,
+          same: imageTargets.filter(function (r) { return r.imageSame; }).length,
+          compatible: imageTargets.filter(function (r) { return r.imageCheck && r.imageCheck.state === "compatible"; }).length,
+          warn: imageTargets.filter(function (r) { return r.imageCheck && r.imageCheck.state === "warn"; }).length
+        });
+      } catch (e) {}
+    }
+  }
+
+  function crossCheckOf(r) {
+    const specs = (r.specs && r.specs.length) || (r.enriched && r.enriched.specs && r.enriched.specs.length) || 0;
+    const photo = r.imageCheck
+      ? (r.imageSame ? "identica" : (r.imageCheck.state || "sin_verificar"))
+      : (r.image ? "sin_verificar" : "sin_foto");
+    return {
+      photo: photo,
+      photoReason: (r.imageCheck && r.imageCheck.reason) || "",
+      title: Boolean(r.name),
+      brand: Boolean(r.brand || (r.enriched && r.enriched.brand)),
+      model: Boolean(r.model || (r.matchEnriched && r.matchEnriched.mpn)),
+      ean: Boolean(r.ean),
+      description: Boolean(r.description || (r.enriched && r.enriched.description)),
+      specs: specs,
+      color: Boolean(r.color || (r.enriched && r.enriched.color)),
+      size: Boolean(r.size || (r.enriched && r.enriched.size)),
+      material: Boolean(r.material || (r.enriched && r.enriched.material)),
+      weight: Boolean(r.weight || (r.enriched && r.enriched.weight)),
+      price: r.price > 0,
+      url: Boolean(r.url)
+    };
+  }
+  matches.forEach(function (r) { r.crossCheck = crossCheckOf(r); delete r.__typeOk; });
 
   /* Con precio en EUR: de mas barato a mas caro. Sin precio (enlaces de
      fabricante/mayorista, candidatos en USD/CNY): por relevancia, detras. */
@@ -682,7 +846,7 @@ async function searchSuppliers(body, priceMax, hooks) {
   let extra = [];
   if (!matches.length && priceMax > 0 && above.length) {
     above.sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); });
-    extra = above.slice(0, 8).map(function (x) { return Object.assign({}, x, { over: true }); });
+    extra = above.slice(0, 8).map(function (x) { return Object.assign({}, x, { over: true, crossCheck: x.crossCheck || crossCheckOf(x) }); });
   }
   const coverage = coverageLib.buildCoverage({
     searched: searched, rejected: rejected, matches: matches.concat(extra),
@@ -948,7 +1112,7 @@ const inverso = {
           amazon: amazon, googleShopping: google, wholesaleDraft: wholesaleDraft,
           cheapestVerified: cheapestVerified(out.matches), cheapestProbable: cheapestVerified(out.matches, ["probable"]), identity: out.identity, rejected: out.rejected,
           coverage: out.coverage,
-          scope: { sourcesQueried: (out.searched || []).length, sourcesWithData: (out.searched || []).filter(function (x) { return x.ok; }).length, note: "Solo las fuentes listadas en searched; no equivale a todo Internet." }
+          scope: { sourcesQueried: (out.searched || []).length, sourcesWithData: (out.searched || []).filter(function (x) { return x.ok; }).length, note: "Fuentes listadas y paginas descubiertas en Google; puede haber proveedores no indexados." }
         }
       };
     }

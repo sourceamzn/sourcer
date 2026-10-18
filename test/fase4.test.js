@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 const identity = require("../src/lib/identity");
 const match = require("../src/lib/match");
 const enrich = require("../src/lib/enrich");
+const specs = require("../src/lib/specs");
+const image = require("../src/lib/imagecheck");
 
 function card(o) {
   return identity.identityOf(o || {});
@@ -153,4 +155,106 @@ test("enrich: respeta el maximo de fichas por busqueda", async () => {
   const r = await enrich.enrich(offers, { max: 1, fetchPage: fake });
   assert.equal(r.tried, 1);
   assert.equal(calls, 1);
+});
+
+test("specs: lee additionalProperty, features y descripcion", () => {
+  const s = specs.fromSource({
+    features: ["Material: acero inoxidable", "Capacidad: 1,5 l"],
+    description: "Potencia: 800 W. Voltaje: 220 V."
+  });
+  assert.equal(s.material.value.text, "acero inoxidable");
+  assert.equal(s.capacity.value.n, 1500);
+  assert.equal(s.capacity.value.unit, "volume");
+  assert.equal(s.power.value.n, 800);
+  assert.equal(s.voltage.value.n, 220);
+  const ap = specs.fromSource({ additionalProperty: [{ name: "Peso", value: "1,2 kg" }] });
+  assert.equal(ap.weight.value.n, 1200);
+  assert.equal(ap.weight.value.unit, "mass");
+});
+
+test("match: caracteristica numerica distinta bloquea verificado", () => {
+  const src = card({ brand: "Acme", model: "ZX-200", name: "Acme ZX-200", features: ["Capacidad: 500 ml"] });
+  const s = specs.fromSource({ features: ["Capacidad: 500 ml"] });
+  const r = match.score(src, { name: "Acme ZX-200", features: ["Capacidad: 750 ml"] }, { typeOk: true, specs: s });
+  assert.equal(r.specConflict, true);
+  assert.equal(r.band, "revisar");
+  assert.ok(r.reasons.some(function (x) { return /Caracteristica distinta/i.test(x); }));
+});
+
+test("match: caracteristica coincidente suma y no bloquea", () => {
+  const src = card({ brand: "Acme", model: "ZX-200", name: "Acme ZX-200", features: ["Capacidad: 500 ml"] });
+  const s = specs.fromSource({ features: ["Capacidad: 500 ml"] });
+  const r = match.score(src, { name: "Acme ZX-200", features: ["Capacidad: 500 ml"] }, { typeOk: true, specs: s });
+  assert.equal(r.specConflict, false);
+  assert.equal(r.band, "verificado");
+  assert.ok(r.checks.some(function (c) { return c.key === "spec_capacity" && c.state === "ok"; }));
+});
+
+test("imagecheck: misma imagen de Amazon con distinto transform", () => {
+  const a = image.imageRef("https://m.media-amazon.com/images/I/71abcL._AC_SL1500_.jpg");
+  const b = image.imageRef("https://m.media-amazon.com/images/I/71abcL._AC_SX679_.jpg");
+  assert.equal(a.key, "amazon:71abcl");
+  assert.equal(a.key, b.key);
+});
+
+test("imagecheck: lee dimensiones PNG", () => {
+  const b = Buffer.alloc(24);
+  b[0] = 0x89; b.write("PNG", 1, "ascii"); b.writeUInt32BE(800, 16); b.writeUInt32BE(600, 20);
+  const d = image.imageSize(b);
+  assert.equal(d.width, 800);
+  assert.equal(d.height, 600);
+});
+
+test("imagecheck: misma huella con URLs distintas = foto identica", async () => {
+  const b = Buffer.alloc(24);
+  b[0] = 0x89; b.write("PNG", 1, "ascii"); b.writeUInt32BE(800, 16); b.writeUInt32BE(600, 20);
+  const fake = async function () {
+    return { ok: true, status: 200, headers: { get: function () { return String(b.length); } }, arrayBuffer: async function () { return b; } };
+  };
+  const r = await image.compareImages("https://a.example/p.jpg", "https://b.example/q.jpg", { fetch: fake });
+  assert.equal(r.state, "ok");
+  assert.equal(r.same, true);
+});
+
+test("enrich: ficha de proveedor sin gtin pero con oferta, descripcion, color y talla", () => {
+  const html = '<script type="application/ld+json">' + JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: "Camiseta Acme modelo ZX",
+    brand: { name: "Acme" },
+    color: "negro",
+    size: "M",
+    description: "Camiseta de algodon.",
+    image: ["https://cdn.example/1.jpg"],
+    offers: { "@type": "Offer", price: "19,95", priceCurrency: "EUR", availability: "https://schema.org/InStock" }
+  }) + "</script>";
+  const d = enrich.parseJsonLd(html, { allowNoId: true });
+  assert.equal(d.name, "Camiseta Acme modelo ZX");
+  assert.equal(d.brand, "Acme");
+  assert.equal(d.color, "negro");
+  assert.equal(d.size, "M");
+  assert.equal(d.price, 19.95);
+  assert.equal(d.currency, "EUR");
+  assert.equal(d.availability, "InStock");
+});
+
+test("enrich: respaldo Open Graph cuando no hay JSON-LD de producto", () => {
+  const html = '<html><head><meta property="og:title" content="Producto OG"><meta property="og:description" content="Descripcion OG"><meta property="og:image" content="https://cdn.example/og.jpg"><meta property="product:price:amount" content="12.50"><meta property="product:price:currency" content="EUR"></head></html>';
+  const d = enrich.parseJsonLd(html, { allowNoId: true });
+  assert.equal(d.name, "Producto OG");
+  assert.equal(d.price, 12.5);
+  assert.equal(d.currency, "EUR");
+  assert.deepEqual(d.images, ["https://cdn.example/og.jpg"]);
+});
+
+test("identity: color y talla en campos aparte se comparan", () => {
+  const src = identity.identityOf({ name: "Camiseta Acme", color: "negro", size: "M" });
+  assert.equal(src.color, "negro");
+  assert.ok(src.sizes.indexOf("talla m") !== -1 || src.sizes.indexOf("tallam") !== -1);
+  const same = identity.compare(src, { name: "Camiseta Acme", color: "negro", size: "M" });
+  assert.equal(same.conflicts.length, 0);
+  const diff = identity.compare(src, { name: "Camiseta Acme", color: "blanco", size: "L" });
+  assert.equal(diff.verdict, "variante");
+  assert.ok(diff.conflicts.indexOf("color") !== -1);
+  assert.ok(diff.conflicts.indexOf("size") !== -1);
 });

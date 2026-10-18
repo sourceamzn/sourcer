@@ -109,8 +109,12 @@ const config = {
   /* Fase 4 · puntuacion de coincidencia. Enriquecimiento de ofertas "a
      revisar" sin EAN: cuantas fichas se abren por busqueda y con que timeout. */
   match: {
-    enrichMax: Math.min(Math.max(parseInt(clean(process.env.MATCH_ENRICH_MAX) || "6", 10) || 0, 0), 12),
-    enrichMs: Math.min(Math.max(parseInt(clean(process.env.MATCH_ENRICH_MS) || "6000", 10) || 6000, 1000), 20000)
+    /* Cotejo previo a mostrar resultados: se abren fichas de proveedor para
+       leer precio, foto, descripcion, color, talla y caracteristicas. */
+    enrichMax: Math.min(Math.max(parseInt(clean(process.env.MATCH_ENRICH_MAX) || "12", 10) || 0, 0), 20),
+    enrichMs: Math.min(Math.max(parseInt(clean(process.env.MATCH_ENRICH_MS) || "6000", 10) || 6000, 1000), 20000),
+    imageMax: Math.min(Math.max(parseInt(clean(process.env.MATCH_IMAGE_MAX) || "8", 10) || 0, 0), 20),
+    imageMs: Math.min(Math.max(parseInt(clean(process.env.MATCH_IMAGE_MS) || "5000", 10) || 5000, 1000), 15000)
   },
   /* Regla Buy Box 90 d: umbrales en % y numero de vendedores cuyo nombre se
      consulta en Keepa para separar fabricante de terceros. */
