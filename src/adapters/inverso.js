@@ -599,7 +599,9 @@ async function searchSuppliers(body, priceMax, hooks) {
         if (price <= 0) { rec.noPrice = true; rec.priceText = rec.priceText || "Contactar para precio"; }
         if (mt.band === "revisar") {
           rec.review = true;
-          rec.reviewNote = "Candidato a revisar: coincidencia " + mt.score + "/100; compara la foto con la tuya.";
+          rec.reviewNote = mt.noTextMatch
+            ? "Candidato a revisar: titulo en chino, compara la foto con la tuya."
+            : "Candidato a revisar: coincidencia " + mt.score + "/100; compara la foto con la tuya.";
         }
         if (weakId) { rec.review = true; rec.reviewNote = rec.reviewNote || "Identidad de origen débil: candidato a revisar."; }
         rec.state = mt.band === "verificado" ? "verificado" : "candidato";

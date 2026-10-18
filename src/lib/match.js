@@ -189,9 +189,21 @@ function score(src, offer, ctx) {
     band = "descartar";
   }
 
+  /* 1688 y otros mercados chinos: el titulo no tiene alfabeto latino y no se
+     puede comparar por texto. No es "otro producto": es un candidato que hay
+     que validar con la foto. Solo se descarta si hay conflicto fuerte. */
+  const text = String(offer.name || "");
+  const cjkOnly = /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(text) && !/[a-zA-Z]/.test(text);
+  if (cjkOnly && !strong && band === "descartar") {
+    band = "revisar";
+    notes.push({ state: "na", text: "Titulo en chino: compara la foto antes de comprar." });
+  }
+
   return {
-    score: points, band: band, reasons: ordered(notes), checks: checks,
-    strongConflict: strong, eanOk: false, brandOk: brandOk, modelOk: modelOk
+    score: points, band: band,
+    reasons: ordered(notes).concat(cjkOnly && !strong ? ["Titulo en chino: compara la foto antes de comprar."] : []),
+    checks: checks,
+    strongConflict: strong, eanOk: false, brandOk: brandOk, modelOk: modelOk, noTextMatch: cjkOnly
   };
 }
 

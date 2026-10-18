@@ -78,6 +78,22 @@ test("match: sin ninguna evidencia se descarta", () => {
   assert.equal(r.strongConflict, false);
 });
 
+test("match: titulo solo en chino (1688) queda a revisar, no se descarta", () => {
+  const src = card({ brand: "LEGO", model: "42151", name: "LEGO Technic 42151 Bugatti Bolide" });
+  const r = match.score(src, { name: "乐高积木玩具赛车模型 儿童益智拼装玩具" }, { typeOk: true });
+  assert.equal(r.strongConflict, false);
+  assert.equal(r.band, "revisar");
+  assert.equal(r.noTextMatch, true);
+  assert.ok(r.reasons.some(function (x) { return /chino/i.test(x); }));
+});
+
+test("match: chino con EAN distinto sigue descartando", () => {
+  const src = card({ ean: "5702017399573", brand: "LEGO", model: "42151", name: "LEGO Technic 42151" });
+  const r = match.score(src, { name: "乐高积木玩具 42151", ean: "8412345678905" }, { typeOk: true });
+  assert.equal(r.strongConflict, true);
+  assert.equal(r.band, "descartar");
+});
+
 test("enrich: lee JSON-LD Product simple (gtin, mpn, brand)", () => {
   const html = '<html><script type="application/ld+json">' + JSON.stringify({
     "@context": "https://schema.org",
