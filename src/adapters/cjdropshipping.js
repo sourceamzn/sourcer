@@ -45,10 +45,10 @@ async function accessToken() {
 
 function mapCj(p) {
   const price = num(p.sellPrice) || num(p.nowPrice) || num(p.price) || null;
-  const pid = String(p.pid || p.productId || "");
+  const pid = String(p.pid || p.productId || p.id || "");
   return {
     source: "cjdropshipping",
-    name: String(p.productNameEn || p.productName || "").slice(0, 200),
+    name: String(p.productNameEn || p.productName || p.nameEn || p.name || "").slice(0, 200),
     brand: "",
     model: "",
     reference: String(p.productSku || p.sku || ""),
@@ -58,10 +58,19 @@ function mapCj(p) {
     stock: null,
     available: true,
     url: pid ? "https://www.cjdropshipping.com/product/" + encodeURIComponent(pid) + ".html" : "https://www.cjdropshipping.com/",
-    image: String(p.productImage || (p.productImageSet && p.productImageSet[0]) || ""),
+    image: String(p.productImage || p.bigImage || p.image || (p.productImageSet && p.productImageSet[0]) || ""),
     attrs: { description: "", currency: "USD", platform: "cj" },
     capturedAt: new Date().toISOString()
   };
+}
+
+async function cjGet(url, token) {
+  const res = await jsonFetch(url, { method: "GET", headers: { "CJ-Access-Token": token } }, 30000);
+  const d = res.data || {};
+  const ok = res.ok && (d.code == null || Number(d.code) === 200) && d.result !== false;
+  const dd = (d && d.data) || {};
+  const list = !ok ? [] : (Array.isArray(dd) ? dd : (dd.productList || dd.list || dd.content || dd.products || []));
+  return { ok: ok, status: res.status || 0, message: d.message || res.error || "", data: dd, list: list };
 }
 
 async function search(body) {
@@ -71,31 +80,32 @@ async function search(body) {
   const auth = await accessToken();
   if (!auth.ok) return { ok: false, reason: auth.reason, status: auth.status, detail: auth.detail, hint: auth.hint };
   const max = Math.min(Math.max(parseInt((body && body.max) || "12", 10) || 12, 1), 50);
-  const qs = new URLSearchParams({ page: "1", size: String(max), keyWord: q });
-  const res = await jsonFetch(
-    base() + "/product/listV2?" + qs.toString(),
-    { method: "GET", headers: { "CJ-Access-Token": auth.token } },
-    30000
+  const v2 = await cjGet(
+    base() + "/product/listV2?" + new URLSearchParams({ page: "1", size: String(max), keyWord: q }).toString(),
+    auth.token
   );
-  const d = res.data || {};
-  if (!res.ok || (d.code != null && Number(d.code) !== 200) || d.result === false) {
-    return { ok: false, reason: "cj_http_" + (res.status || 0), status: res.status, detail: (d && d.message) || res.error || "" };
+  if (!v2.ok) {
+    return { ok: false, reason: "cj_http_" + (v2.status || 0), status: v2.status, detail: v2.message };
   }
-  const dd = d.data || {};
-  const list = Array.isArray(dd) ? dd : (dd.productList || dd.list || dd.content || dd.products || []);
-  const items = list.map(mapCj).filter(function (it) { return it.name || it.reference; });
-  if (!items.length) {
-    return {
-      ok: false,
-      reason: "cj_sin_resultados",
-      detail: "total=" + (dd.total != null ? dd.total : "?") + " keys=" + Object.keys(dd).join(","),
-      data: { source: "cjdropshipping", query: q, count: 0, items: [] }
-    };
-  }
+  let items = v2.list.map(mapCj).filter(function (it) { return it.name || it.reference; });
+  if (items.length) return { ok: true, reason: null, data: { source: "cjdropshipping", query: q, count: items.length, items: items } };
+
+  const legacy = await cjGet(
+    base() + "/product/list?" + new URLSearchParams({ pageNum: "1", pageSize: String(max), productNameEn: q }).toString(),
+    auth.token
+  );
+  items = legacy.list.map(mapCj).filter(function (it) { return it.name || it.reference; });
+  if (items.length) return { ok: true, reason: null, data: { source: "cjdropshipping", query: q, count: items.length, items: items } };
+
+  const first = v2.list[0] ? Object.keys(v2.list[0]).slice(0, 20).join("|") : (legacy.list[0] ? Object.keys(legacy.list[0]).slice(0, 20).join("|") : "-");
   return {
-    ok: items.length > 0,
-    reason: items.length ? null : "cj_sin_resultados",
-    data: { source: "cjdropshipping", query: q, count: items.length, items: items }
+    ok: false,
+    reason: "cj_sin_resultados",
+    detail: "v2 total=" + (v2.data.totalRecords != null ? v2.data.totalRecords : (v2.data.total != null ? v2.data.total : "?")) +
+      " keys=" + Object.keys(v2.data).join(",") + " first=" + first +
+      " | list ok=" + legacy.ok + " total=" + (legacy.data.total != null ? legacy.data.total : "?") +
+      " keys=" + Object.keys(legacy.data).join(","),
+    data: { source: "cjdropshipping", query: q, count: 0, items: [] }
   };
 }
 
