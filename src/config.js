@@ -122,6 +122,12 @@ const config = {
   /* Fase 4 · puntuacion de coincidencia. Enriquecimiento de ofertas "a
      revisar" sin EAN: cuantas fichas se abren por busqueda y con que timeout. */
   match: {
+    /* Politica de identidad de /suppliers: "cascade" = EAN exacto y, solo si
+       no hay coincidencias verificadas, marca+modelo+titulo+specs. "exact"
+       mantiene el comportamiento anterior (solo EAN). */
+    policy: (clean(process.env.MATCH_POLICY) || "cascade").toLowerCase(),
+    allowKeyword: clean(process.env.MATCH_ALLOW_KEYWORD || "1") !== "0",
+    reviewVisible: clean(process.env.MATCH_REVIEW_VISIBLE || "1") !== "0",
     /* Cotejo previo a mostrar resultados: se abren fichas de proveedor para
        leer precio, foto, descripcion, color, talla y caracteristicas. */
     enrichMax: Math.min(Math.max(parseInt(clean(process.env.MATCH_ENRICH_MAX) || "24", 10) || 0, 0), 60),

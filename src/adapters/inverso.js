@@ -60,6 +60,7 @@ const tierFor = planLib.tierFor;
 const planFor = planLib.planFor;
 const buybox = require("../lib/buybox");
 const coverageLib = require("../lib/coverage");
+const cascadeLib = require("../lib/cascade");
 const keepaFicha = require("../lib/keepaficha");
 const events = require("../lib/events");
 const gtinLib = require("../lib/gtin");
@@ -331,6 +332,19 @@ function cheapestVerified(matches, kinds) {
   const c = (matches || []).filter(function (m) { return m.price > 0 && !m.over && kinds.indexOf(m.match) !== -1 && (!m.currency || m.currency === "EUR"); });
   c.sort(function (a, b) { return a.price - b.price; });
   return c[0] || null;
+}
+/* Candidato de la fase 2 que no se pudo verificar. Se devuelve aparte para
+   enseñarlo como "no verificado": nunca cuenta como proveedor ni entra en el
+   precio mas barato. */
+function reviewRec(r) {
+  return {
+    source: r.source, sourceLabel: r.sourceLabel || r.source,
+    name: String(r.name || "").slice(0, 140), price: r.price, currency: r.currency || "",
+    url: r.url, image: r.image || "", brand: r.brand || "", ean: r.ean || "", model: r.model || "",
+    matchScore: r.matchScore, matchBand: r.matchBand,
+    reviewNote: String(r.reviewNote || "").slice(0, 220),
+    matchReasons: (r.matchReasons || []).slice(0, 3)
+  };
 }
 /* Tipo de proveedor segun la fuente y los datos de la oferta. */
 function roleOf(adapter, rec) {
@@ -707,6 +721,8 @@ function buildSourcesPayload(out, body, priceMax) {
       priceMax: round2(priceMax),
       matches: out.matches || [], searched: out.searched || [],
       overMax: out.overMax || [], diagnosis: out.diagnosis || null, summary: out.summary || null,
+      review: out.review || [], phases: out.phases || null, policy: out.policy || "",
+      queries: out.queries || [],
       amazon: amazon, googleShopping: google, wholesaleDraft: wholesaleDraft,
       cheapestVerified: out.cheapestVerified || cheapestVerified(out.matches),
       cheapestProbable: cheapestVerified(out.matches, ["probable"]),
@@ -766,6 +782,12 @@ async function searchSuppliers(body, priceMax, hooks) {
     try { events.add("job", { phase: "ficha", asin: body.asin, eans: (body.eans || []).length, model: body.model, partNumber: body.partNumber, missing: fx.missing.join(",") }); } catch (e) {}
   }
   const srcEans = gtinLib.normalizeAll([].concat((body && body.eans) || [], (body && body.ean) || []));
+  /* Politica de identidad: "cascade" (por defecto en la 0.27) intenta EAN
+     exacto y, solo si no queda nada verificado, marca+modelo+titulo+specs.
+     "exact" conserva el comportamiento anterior. */
+  const explicitPolicy = String((body && body.policy) || "").toLowerCase();
+  const policy = explicitPolicy || ((body && body.eanOnly === true) ? "exact" : ((body && body.eanOnly === false) ? "keyword" : (config.match.policy || "exact")));
+  if (policy === "cascade") return cascadeSuppliers(body, priceMax, hooks, srcEans);
   /* Modo exacto por defecto: sin EAN no se buscan parecidos. */
   if ((body && body.eanOnly) !== false) {
     if (!srcEans.length) {
@@ -811,7 +833,7 @@ async function searchSuppliers(body, priceMax, hooks) {
   }
   const srcCodes = modelCodes((body && body.model || "") + " " + srcText);
   const rejected = [];
-  const matches = [], above = [], searched = [];
+  const matches = [], above = [], searched = [], review = [];
   if (!q) return { q: "", via: "", matches: matches, searched: searched, coverage: coverageLib.buildCoverage({ searched: searched, rejected: rejected, matches: matches }) };
   /* Perfil de tipo generico: categoria Keepa (hoja) + sustantivo del titulo, traducidos. Sin listas. */
   const typeprofile = require("../lib/typeprofile");
@@ -1131,6 +1153,8 @@ async function searchSuppliers(body, priceMax, hooks) {
             verdict: cmp2.verdict, reason: mt.reasons.join(" | ") || cmp2.reason,
             checks: mt.checks, score: mt.score, matching: cmp2.matching, conflicting: cmp2.conflicting
           };
+          rec.strongConflict = Boolean(mt.strongConflict || mt.typeConflict);
+          if (mt.band === "revisar" && !rec.strongConflict && !rec.imageConflict) review.push(rec);
           if (mt.strongConflict || mt.typeConflict || mt.band !== "verificado") removed.push(rec);
           else if (priceMax > 0 && rec.price > priceMax) {
             /* La ficha decia un precio distinto: ya no cumple el maximo. No se
@@ -1251,6 +1275,7 @@ async function searchSuppliers(body, priceMax, hooks) {
   for (let i = matches.length - 1; i >= 0; i--) {
     const r = matches[i];
     if (r.matchBand !== "verificado") {
+      if (r.matchBand === "revisar" && !r.strongConflict && !r.imageConflict) review.push(r);
       matches.splice(i, 1);
       rejected.push({
         source: r.source, kind: "identidad", name: String(r.name || "").slice(0, 80),
@@ -1326,6 +1351,93 @@ async function searchSuppliers(body, priceMax, hooks) {
     matches: matches.concat(extra), overMax: overMax,
     searched: searched, identity: srcId,
     rejected: rejected.slice(0, 120), rejectedBySource: rejectedBySource,
+    review: config.match.reviewVisible === false ? [] : cascadeLib.dedupe(review.map(reviewRec), function (r) {
+      return r.source + "|" + (r.url || r.name);
+    }).slice(0, 40),
+    queries: qlist.map(function (x) { return x.q; }).slice(0, 8),
+    policy: "keyword",
+    coverage: coverage
+  };
+}
+
+/* ---------- Cascada de identidad ----------
+   Un solo boton para el usuario:
+     Fase 1. EAN/UPC exacto en todas las fuentes que publican codigo de barras.
+     Fase 2. Solo si la fase 1 no dejo ninguna oferta verificada: marca+modelo
+             y despues titulo+specs en catalogos/marketplaces que no publican
+             EAN (CJ, AliExpress, 1688, Alibaba...). Cada candidato se coteja
+             con la ficha de Amazon; los dudosos van a `review` y NUNCA cuentan
+             como proveedor ni entran en el precio mas barato. */
+async function cascadeSuppliers(body, priceMax, hooks, srcEans) {
+  body = Object.assign({}, body || {});
+  hooks = hooks || {};
+  const allowKeyword = config.match.allowKeyword !== false;
+  const totalMs = clampInt(body.budgetMs, 150000, 45000, 200000);
+  const t0 = Date.now();
+  let p1 = null, p1err = "", p2 = null, p2err = "";
+  if (srcEans.length) {
+    try {
+      p1 = await searchSuppliersEan(Object.assign({}, body, {
+        budgetMs: Math.min(60000, Math.max(25000, Math.round(totalMs * 0.4)))
+      }), priceMax, hooks, srcEans);
+    } catch (e) { p1err = String((e && e.message) || e); }
+  }
+  const p1matches = p1 && p1.matches ? p1.matches.filter(function (r) { return !r.over; }) : [];
+  const p1count = p1matches.length;
+  if (allowKeyword && (!p1count || body.expand === true)) {
+    const left = Math.max(30000, totalMs - (Date.now() - t0));
+    try {
+      p2 = await searchSuppliers(Object.assign({}, body, {
+        eanOnly: false, policy: "keyword", budgetMs: left
+      }), priceMax, hooks);
+    } catch (e) { p2err = String((e && e.message) || e); }
+  }
+  const srcId = (p1 && p1.identity) || (p2 && p2.identity) ||
+    identity.freezeCard(identity.identityOf(body), body);
+  const searched = cascadeLib.mergeSearched(
+    ((p1 && p1.searched) || []).map(function (e) { return Object.assign({ phase: 1 }, e); }),
+    ((p2 && p2.searched) || []).map(function (e) { return Object.assign({ phase: 2 }, e); })
+  );
+  const p2matches = p2 && p2.matches ? p2.matches.filter(function (r) { return !r.over; }) : [];
+  const p2count = p2matches.length;
+  const matches = cascadeLib.mergeMatches(p1matches, p2matches);
+  const overMax = cascadeLib.dedupe([].concat((p1 && p1.overMax) || [], (p2 && p2.overMax) || [])).slice(0, 12);
+  const rejected = [].concat((p1 && p1.rejected) || [], (p2 && p2.rejected) || []).slice(0, 120);
+  const review = config.match.reviewVisible === false ? [] : ((p2 && p2.review) || []).slice(0, 40);
+  const rejectedBySource = {};
+  rejected.forEach(function (x) { rejectedBySource[x.source] = (rejectedBySource[x.source] || 0) + 1; });
+  const phases = {
+    exact: { ran: srcEans.length > 0, matches: p1count, error: p1err || undefined },
+    keyword: { ran: Boolean(p2), matches: p2count, error: p2err || undefined },
+    elapsedMs: Date.now() - t0
+  };
+  const summary = cascadeLib.summarize((p1 && p1.summary) || (p2 && p2.summary), p1count, p2count);
+  let diagnosis = null;
+  if (!matches.length) {
+    if (!srcEans.length && !allowKeyword) {
+      diagnosis = { reason: "producto_sin_ean", message: "El producto no tiene EAN/UPC y la busqueda por marca/modelo esta desactivada." };
+    } else if (review.length) {
+      diagnosis = { reason: "solo_revisar", message: "Hay " + review.length + " candidato(s) parecido(s) por marca/modelo/titulo, pero ninguno se pudo verificar como el mismo producto. No cuentan como proveedor." };
+    } else if (!srcEans.length) {
+      diagnosis = { reason: "sin_coincidencias", message: "Sin EAN/UPC no hay coincidencia exacta; la busqueda por marca+modelo y titulo+specs tampoco encontro ofertas verificables." };
+    } else {
+      diagnosis = { reason: "sin_coincidencias", message: "Ninguna fuente devolvio el EAN exacto" + (allowKeyword ? " y la busqueda por marca+modelo/titulo no encontro una coincidencia verificable." : ".") };
+    }
+  }
+  let coverage = (p1 && p1.coverage) || (p2 && p2.coverage) || null;
+  try {
+    coverage = coverageLib.buildCoverage({
+      searched: searched, rejected: rejected, matches: matches,
+      queries: [].concat(srcEans.map(function (e) { return { via: "ean", q: e }; }), (p2 && p2.queries) || []),
+      identity: srcId, candidates: (coverage && coverage.candidates) || 0
+    });
+  } catch (e) {}
+  return {
+    q: (p1 && p1.q) || (p2 && p2.q) || "", via: "cascade", policy: "cascade",
+    priceMax: round2(priceMax), matches: matches, overMax: overMax, searched: searched,
+    identity: srcId, rejected: rejected, rejectedBySource: rejectedBySource,
+    review: review, queries: (p2 && p2.queries) || [], phases: phases,
+    summary: summary, diagnosis: diagnosis, cheapestVerified: cheapestVerified(matches),
     coverage: coverage
   };
 }
