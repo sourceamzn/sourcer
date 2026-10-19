@@ -101,6 +101,7 @@ test("google EAN: el adaptador pide gtins e includeOffers", async () => {
     assert.equal(captured.actor, "scrapewise/google-shopping");
     assert.deepEqual(captured.input.gtins, [EAN]);
     assert.equal(captured.input.includeOffers, true);
+    assert.equal(captured.input.includeStoreLink, true);
     assert.equal(captured.input.country, config.apify.country);
   } finally {
     apify.runActor = original;

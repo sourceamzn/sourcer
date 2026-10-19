@@ -26,6 +26,7 @@
 
 const { config, keepaReady, amazonReady } = require("../config");
 const { jsonFetch } = require("../lib/http");
+const store = require("../lib/store");
 
 const KEEPA = "https://api.keepa.com/";
 
@@ -462,7 +463,7 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
   const enrichMax = cfgEnrich > 0 ? Math.min(Math.max(cfgEnrich, 24), 60) : 0;
 
   function accept(rec, entry, recsOut) {
-    const k = String(rec.url || "") + "|" + String(rec.price || "");
+    const k = String(rec.dedupeKey || (String(rec.url || "") + "|" + String(rec.price || "")));
     if (k !== "|" && seenKeys[k]) return;
     if (k !== "|") seenKeys[k] = 1;
     entry.count++;
@@ -500,7 +501,7 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
         brand: (body && body.brand) || "",
         model: (body && body.model) || "",
         name: (body && body.name) || ""
-      }), Math.min(Math.max(5000, deadline - Date.now()), 110000));
+      }), Math.min(Math.max(5000, deadline - Date.now()), sourceCap(adapters[id].kind)));
       const data = r && r.ok ? r.data : null;
       const items = (data && data.items) || [];
       entry.rawCount = items.length;
@@ -545,6 +546,42 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
     })());
   }
   await Promise.all(workers);
+
+  /* Tarifas/liquidaciones importadas por el usuario: cruce directo por EAN
+     contra el almacen. Es la via que hace que una tarifa subida aparezca en la
+     busqueda inversa sin depender de que la web del proveedor este indexada. */
+  try {
+    const rows = await store.tariffFind(srcEans);
+    if (rows.length) {
+      const entry = {
+        source: "tarifas", sourceLabel: "Tarifas importadas", ok: false,
+        count: 0, rawCount: rows.length, withEan: rows.length, differentEan: 0, noEan: 0,
+        queryStats: [], startedAt: new Date().toISOString(), ms: 0
+      };
+      const recsOut = [];
+      rows.forEach(function (row) {
+        const it = {
+          name: row.name || "", brand: row.brand || "", ean: row.ean,
+          model: row.model || row.reference || "", reference: row.reference || "",
+          price: row.net != null ? row.net : row.price,
+          url: row.url || "", stock: row.stock == null ? null : row.stock,
+          attrs: { ean: row.ean, reference: row.reference || "" },
+          __via: "tarifa"
+        };
+        if (!(num(it.price) > 0)) return;
+        const rec = eanRecFromItem("tarifas", "Tarifa importada: " + String(row.source || ""), it, srcEans, priceMax);
+        rec.source = "tarifas";
+        rec.sourceLabel = "Tarifa importada: " + String(row.source || "");
+        rec.supplier = String(row.source || "");
+        rec.dedupeKey = "tarifa|" + String(row.source || "") + "|" + row.ean;
+        accept(rec, entry, recsOut);
+      });
+      entry.ok = entry.count > 0;
+      if (!entry.ok) entry.reason = "sin_precio";
+      searched.push(entry);
+      if (entry.ok && hooks.onSource) { try { hooks.onSource(entry, recsOut); } catch (e) {} }
+    }
+  } catch (e) { /* el almacen es opcional */ }
 
   /* Enriquecer las fichas sin EAN: si al abrirlas aparece el mismo codigo, se
      aceptan; si no, se rechazan. Nunca se acepta por parecido.
@@ -648,6 +685,42 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
     summary: { exact: exactTotal, raw: raw, withEan: withEan, differentEan: differentEan, noEan: noEan, sourcesWithEan: sourcesWithEan, sourcesNoEan: sourcesNoEan },
     diagnosis: diagnosis
   };
+}
+
+/* Respuesta de la fase 2 (proveedores). Conserva TODO lo que la UI necesita
+   para explicar un cero: ofertas por encima del precio maximo, diagnostico y
+   contadores por fuente. Antes se perdian y la pantalla decia "0 proveedores"
+   sin motivo aparente. */
+function buildSourcesPayload(out, body, priceMax) {
+  out = out || {};
+  const amazon = (body && body.asin) ? (MARKET + "/dp/" + String(body.asin).toUpperCase()) : "";
+  const google = out.q ? ("https://www.google.com/search?tbm=shop&q=" + encodeURIComponent(out.q)) : "";
+  const wholesaleDraft = body && body.brand
+    ? ("Hola,\n\nSomos una tienda online y nos interesa distribuir productos de " + body.brand +
+       ". Querriamos conocer sus condiciones mayoristas (precio neto, pedido minimo, plazos) para la referencia '" +
+       (body.model || body.name || "") + "'.\n\nGracias.")
+    : "";
+  return {
+    ok: true,
+    data: {
+      source: "inverso", kind: "sources", query: out.q, via: out.via,
+      priceMax: round2(priceMax),
+      matches: out.matches || [], searched: out.searched || [],
+      overMax: out.overMax || [], diagnosis: out.diagnosis || null, summary: out.summary || null,
+      amazon: amazon, googleShopping: google, wholesaleDraft: wholesaleDraft,
+      cheapestVerified: out.cheapestVerified || cheapestVerified(out.matches),
+      cheapestProbable: cheapestVerified(out.matches, ["probable"]),
+      identity: out.identity, rejected: out.rejected, coverage: out.coverage,
+      scope: { sourcesQueried: (out.searched || []).length, sourcesWithData: (out.searched || []).filter(function (x) { return x.ok; }).length, note: "Fuentes listadas y paginas descubiertas en Google; puede haber proveedores no indexados." }
+    }
+  };
+}
+
+/* Las webs de catalogo fijo (scraping/mayoristas) no deben comerse el
+   presupuesto de la busqueda: se cortan a 25 s. El resto conserva el margen
+   completo para actores lentos (Apify, descubrimiento). */
+function sourceCap(kind) {
+  return (kind === "scraping" || kind === "wholesale") ? 25000 : 110000;
 }
 
 async function searchSuppliers(body, priceMax, hooks) {
@@ -825,7 +898,7 @@ async function searchSuppliers(body, priceMax, hooks) {
             name: (body && body.name) || ""
           }),
           /* Las webs de catalogo fijo se cortan a 20 s; las que buscan en toda la red, al presupuesto. */
-          Math.min(Math.max(5000, deadline - Date.now()), rank[adapters[id].kind] != null ? 100000 : 20000)
+          Math.min(Math.max(5000, deadline - Date.now()), sourceCap(adapters[id].kind))
         );
         const data = r && r.ok ? r.data : null;
         const got = (data && data.items) || [];
@@ -1725,27 +1798,12 @@ const inverso = {
     sources: async function (body, ctx, hooks) {
       const priceMax = num(body && (body.priceMax || body.maxPrice));
       const out = await searchSuppliers(body || {}, priceMax, hooks);
-      const amazon = (body && body.asin) ? (MARKET + "/dp/" + String(body.asin).toUpperCase()) : "";
-      const google = out.q ? ("https://www.google.com/search?tbm=shop&q=" + encodeURIComponent(out.q)) : "";
-      const wholesaleDraft = body && body.brand
-        ? ("Hola,\n\nSomos una tienda online y nos interesa distribuir productos de " + body.brand +
-           ". Querriamos conocer sus condiciones mayoristas (precio neto, pedido minimo, plazos) para la referencia '" +
-           (body.model || body.name || "") + "'.\n\nGracias.")
-        : "";
-      return {
-        ok: true,
-        data: {
-          source: "inverso", kind: "sources", query: out.q, via: out.via,
-          priceMax: round2(priceMax), matches: out.matches, searched: out.searched,
-          amazon: amazon, googleShopping: google, wholesaleDraft: wholesaleDraft,
-          cheapestVerified: cheapestVerified(out.matches), cheapestProbable: cheapestVerified(out.matches, ["probable"]), identity: out.identity, rejected: out.rejected,
-          coverage: out.coverage,
-          scope: { sourcesQueried: (out.searched || []).length, sourcesWithData: (out.searched || []).filter(function (x) { return x.ok; }).length, note: "Fuentes listadas y paginas descubiertas en Google; puede haber proveedores no indexados." }
-        }
-      };
+      return buildSourcesPayload(out, body, priceMax);
     }
   }
 };
+
+inverso.buildSourcesPayload = buildSourcesPayload;
 
 module.exports = inverso;
 module.exports.planFor = planFor;

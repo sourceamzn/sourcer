@@ -460,6 +460,9 @@ const gshoppingEan = {
         language: "es",
         includeOffers: true,
         includeDetails: false,
+        /* Sin esto el actor devuelve redirecciones de Google en vez del
+           enlace directo de cada tienda (`storeUrl`). */
+        includeStoreLink: true,
         maxItems: max
       }, { op: op, estCost: 0.06, timeoutSec: 100 });
       if (!r.ok) return { ok: false, reason: r.reason, detail: r.detail };
