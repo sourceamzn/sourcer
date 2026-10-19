@@ -71,20 +71,17 @@ async function search(body) {
   const auth = await accessToken();
   if (!auth.ok) return { ok: false, reason: auth.reason, status: auth.status, detail: auth.detail, hint: auth.hint };
   const max = Math.min(Math.max(parseInt((body && body.max) || "12", 10) || 12, 1), 50);
+  const qs = new URLSearchParams({ page: "1", size: String(max), keyWord: q, countryCode: "ES" });
   const res = await jsonFetch(
-    base() + "/product/query",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "CJ-Access-Token": auth.token },
-      body: JSON.stringify({ pageNum: 1, pageSize: max, keyWord: q, countryCode: "ES" })
-    },
+    base() + "/product/listV2?" + qs.toString(),
+    { method: "GET", headers: { "CJ-Access-Token": auth.token } },
     30000
   );
   const d = res.data || {};
-  if (!res.ok || (d.code != null && Number(d.code) !== 200)) {
+  if (!res.ok || (d.code != null && Number(d.code) !== 200) || d.result === false) {
     return { ok: false, reason: "cj_http_" + (res.status || 0), status: res.status, detail: (d && d.message) || res.error || "" };
   }
-  const list = (d.data && (d.data.list || d.data.content || d.data.productList)) || [];
+  const list = (d.data && (d.data.productList || d.data.list || d.data.content)) || [];
   const items = list.map(mapCj).filter(function (it) { return it.name; });
   return {
     ok: items.length > 0,
