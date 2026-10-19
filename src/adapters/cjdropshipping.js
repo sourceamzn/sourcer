@@ -71,7 +71,7 @@ async function search(body) {
   const auth = await accessToken();
   if (!auth.ok) return { ok: false, reason: auth.reason, status: auth.status, detail: auth.detail, hint: auth.hint };
   const max = Math.min(Math.max(parseInt((body && body.max) || "12", 10) || 12, 1), 50);
-  const qs = new URLSearchParams({ page: "1", size: String(max), keyWord: q, countryCode: "ES" });
+  const qs = new URLSearchParams({ page: "1", size: String(max), keyWord: q });
   const res = await jsonFetch(
     base() + "/product/listV2?" + qs.toString(),
     { method: "GET", headers: { "CJ-Access-Token": auth.token } },
@@ -81,8 +81,17 @@ async function search(body) {
   if (!res.ok || (d.code != null && Number(d.code) !== 200) || d.result === false) {
     return { ok: false, reason: "cj_http_" + (res.status || 0), status: res.status, detail: (d && d.message) || res.error || "" };
   }
-  const list = (d.data && (d.data.productList || d.data.list || d.data.content)) || [];
-  const items = list.map(mapCj).filter(function (it) { return it.name; });
+  const dd = d.data || {};
+  const list = Array.isArray(dd) ? dd : (dd.productList || dd.list || dd.content || dd.products || []);
+  const items = list.map(mapCj).filter(function (it) { return it.name || it.reference; });
+  if (!items.length) {
+    return {
+      ok: false,
+      reason: "cj_sin_resultados",
+      detail: "total=" + (dd.total != null ? dd.total : "?") + " keys=" + Object.keys(dd).join(","),
+      data: { source: "cjdropshipping", query: q, count: 0, items: [] }
+    };
+  }
   return {
     ok: items.length > 0,
     reason: items.length ? null : "cj_sin_resultados",
