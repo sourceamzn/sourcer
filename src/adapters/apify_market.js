@@ -246,7 +246,12 @@ function mapEanRows(rows, ean, max) {
         const shipping = priceOf(o.shippingPrice != null ? o.shippingPrice : o.shipping);
         const total = priceOf(o.totalPrice);
         const store = String(o.store || o.sellerName || o.merchant || row.store || "");
-        const url = String(o.url || o.sellerReference || row.productUrl || "");
+        /* El actor trae el enlace directo de la tienda en `storeUrl`; `url`
+           suele ser una redireccion de Google. Se prefiere el directo. */
+        const directUrl = String(o.storeUrl || o.storeURL || o.store_url || o.retailerUrl || o.retailerURL ||
+          o.merchantUrl || o.merchantURL || o.directUrl || o.directURL || "");
+        const url = String(directUrl || o.url || o.link || o.productUrl || o.sellerReference ||
+          row.storeUrl || row.storeURL || row.productUrl || "");
         const name = String(o.offerTitle || row.title || "").slice(0, 180);
         if (!name && !url) return;
         const k = url + "|" + (price == null ? "" : price.toFixed(2)) + "|" + store;
@@ -264,6 +269,7 @@ function mapEanRows(rows, ean, max) {
           supplier: store,
           attrs: Object.assign({}, base.attrs, {
             store: store,
+            storeUrl: directUrl,
             shipping: shipping,
             totalPrice: total,
             condition: String(o.condition || ""),

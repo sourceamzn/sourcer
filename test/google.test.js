@@ -34,6 +34,20 @@ test("google EAN: convierte ofertas en resultados con precio, envio y stock", ()
   assert.equal(items[0].attrs.gtinMatches, null);
 });
 
+test("google EAN: usa el enlace directo de la tienda, no la redireccion de Google", () => {
+  const row = Object.assign({}, ROW, {
+    offers: [
+      { store: "Tienda C", price: "10.00", storeUrl: "https://c.example/p", url: "https://www.google.com/url?q=abc" },
+      { store: "Tienda D", price: "12.00", url: "https://www.google.com/url?q=def" }
+    ]
+  });
+  const items = mapEanRows([row], EAN, 10);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].url, "https://c.example/p");
+  assert.equal(items[0].attrs.storeUrl, "https://c.example/p");
+  assert.equal(items[1].url, "https://www.google.com/url?q=def");
+});
+
 test("google EAN: descarta una fila de otro codigo y respeta moneda no EUR", () => {
   const other = Object.assign({}, ROW, { gtin: "8412345678905" });
   assert.equal(mapEanRows([other], EAN, 20).length, 0);

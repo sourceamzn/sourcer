@@ -30,6 +30,8 @@ function health(req, res) {
       alibaba: apifyReady() && Boolean(config.apify.actors.alibaba),
       madeinchina: apifyReady() && Boolean(config.apify.actors.mic),
       gshopping: apifyReady() && Boolean(config.apify.actors.shopping),
+      /* Resolucion de ofertas por EAN (actor distinto al buscador por texto). */
+      gshopping_ean: apifyReady() && Boolean(config.apify.actors.shoppingEan),
       explorar: apifyReady() && Boolean(config.apify.actors.shopping),
       foto: apifyReady() && Boolean(config.apify.actors.image),
       /* Comparacion visual de fotos: opcional; sin clave se usan heuristicas. */

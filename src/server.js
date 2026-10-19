@@ -5,6 +5,7 @@ const sourcing = require("./routes/sourcing");
 const coverage = require("./routes/coverage");
 const alerts = require("./routes/alerts");
 const suppliers = require("./routes/suppliers");
+const product = require("./routes/product");
 const events = require("./lib/events");
 const debug = require("./routes/debug");
 const security = require("./lib/security");
@@ -39,6 +40,7 @@ app.get("/debug/events", events.guard, debug.getEvents);
 app.post("/debug/beacon", beaconGuard, beaconLimit, debug.beacon);
 app.get("/suppliers/log/:id", events.guard, debug.jobLog);
 app.post("/sourcing/:source/:action", apiLimit, requireApiKey, sourcing);
+app.get("/product/:ean", apiLimit, requireApiKey, product.productByEan);
 
 /* Inicializa el almacen del vigilante en segundo plano (no bloquea el arranque). */
 store.init().catch(function () {});

@@ -2,6 +2,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
 process.env.BIGBUY_API_KEY = '  "Bearer clave-de-prueba"  ';
+process.env.APIFY_TOKEN = "apify-de-prueba";
 process.env.ALIEXPRESS_APP_KEY = "app-key";
 process.env.ALIEXPRESS_APP_SECRET = "app-secret";
 process.env.CJ_API_KEY = "cj-key";
@@ -19,6 +20,7 @@ test("health publica los proveedores con API", () => {
   assert.equal(body.sources.bigbuy, true);
   assert.equal(body.sources.aliexpress, true);
   assert.equal(body.sources.cj, true);
+  assert.equal(body.sources.gshopping_ean, true);
 });
 
 test("health no filtra las claves", () => {

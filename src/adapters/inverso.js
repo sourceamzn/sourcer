@@ -1419,12 +1419,19 @@ async function candidatesLarge(body) {
       counts[m.estado] = (counts[m.estado] || 0) + 1;
       if (includeDiscards || m.estado !== "descarte") out.push(m);
     });
-    out = out.slice(0, limit);
   }
   if (!includeDiscards) notes.push("Se ocultan los descartados; activa 'Incluir descartados' para verlos.");
 
-  const sortKey = String((body && body.sort) || "rotacion");
+  const sortKey = String((body && body.sort) || "aptitud");
   const hash = function (asin) { return seedHash(seed + "|" + asin); };
+  /* Margen potencial: parte del PVP que queda libre para pagar al proveedor.
+     costMax ya descuenta comisiones, FBA, IVA/recargo y el ROI/margen minimo
+     exigido por el tramo de ventas. Mas alto = mas colchon de beneficio. */
+  const roomOf = function (m) {
+    const pv = (m.plan && m.plan.pvp) || m.pvp || 0;
+    return pv > 0 ? (m.plan.costMax || 0) / pv : 0;
+  };
+  const rankOf = function (m) { return m.estado === "apt" ? 0 : (m.estado === "casi" ? 1 : 2); };
   out.sort(function (a, b) {
     if (sortKey === "precio") {
       const d = (b.pvp || 0) - (a.pvp || 0); if (d) return d;
@@ -1432,9 +1439,17 @@ async function candidatesLarge(body) {
       const d = ((b.plan && b.plan.discount) || 0) - ((a.plan && a.plan.discount) || 0); if (d) return d;
     } else if (sortKey === "ventas") {
       const d = (b.sales || 0) - (a.sales || 0); if (d) return d;
+    } else if (sortKey === "aptitud") {
+      /* Lo mas apto primero: aptos > casi > descartados y, dentro de cada
+         grupo, la mejor combinacion de rotacion (ventas/mes y BSR) y margen. */
+      const e = rankOf(a) - rankOf(b); if (e) return e;
+      const d = (b.sales || 0) - (a.sales || 0); if (d) return d;
+      const r = (a.bsr || 1e12) - (b.bsr || 1e12); if (r) return r;
+      const m = roomOf(b) - roomOf(a); if (m) return m;
     } else {
       const d = (b.sales || 0) - (a.sales || 0); if (d) return d;
       const r = (a.bsr || 1e12) - (b.bsr || 1e12); if (r) return r;
+      const m = roomOf(b) - roomOf(a); if (m) return m;
       const pr = (b.pvp || 0) - (a.pvp || 0); if (pr) return pr;
     }
     return hash(a.asin) - hash(b.asin);
