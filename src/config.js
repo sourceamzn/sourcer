@@ -9,6 +9,15 @@ function clean(value) {
   return value == null ? "" : String(value).trim();
 }
 
+/* Algunas variables llegan pegadas con texto extra (p. ej. "URL ICECAT_LANG=es").
+   Nos quedamos solo con la primera URL http(s) valida para no romper fetch. */
+function urlOnly(value, fallback) {
+  const raw = clean(value);
+  const m = raw.match(/https?:\/\/[^\s"'`]+/i);
+  if (!m) return fallback;
+  return m[0].replace(/\/+$/, "");
+}
+
 const config = {
   env: clean(process.env.NODE_ENV) || "development",
   port: parseInt(clean(process.env.PORT) || "3000", 10),
@@ -101,8 +110,8 @@ const config = {
     shopname: clean(process.env.ICECAT_SHOPNAME),
     username: clean(process.env.ICECAT_USERNAME),
     password: clean(process.env.ICECAT_PASSWORD),
-    base: clean(process.env.ICECAT_BASE) || "https://live.icecat.biz",
-    lang: clean(process.env.ICECAT_LANG) || "es"
+    base: urlOnly(process.env.ICECAT_BASE, "https://live.icecat.biz"),
+    lang: (clean(process.env.ICECAT_LANG).split(/\s+/)[0] || "es").toLowerCase()
   },
   aliexpress: {
     appKey: clean(process.env.ALIEXPRESS_APP_KEY),

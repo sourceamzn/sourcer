@@ -115,13 +115,49 @@ const cjdropshipping = {
   kind: "wholesale",
   supplier: true,
   actions: {
-    ping: async () => ({
-      ok: cjReady(),
-      configured: cjReady(),
-      reason: cjReady() ? null : "cj_not_configured",
-      mode: cjReady() ? "api_dropshipping" : "sin_clave",
-      note: cjReady() ? "Catalogo mayorista con busqueda por palabra clave (precio en USD)." : "Sin CJ_API_KEY: el proveedor esta apagado."
-    }),
+    /* Ping real: autentica y trae un producto. "Configurado" no es "funciona". */
+    ping: async () => {
+      if (!cjReady()) {
+        return {
+          ok: false,
+          configured: false,
+          reason: "cj_not_configured",
+          mode: "sin_clave",
+          note: "Sin CJ_API_KEY: el proveedor esta apagado."
+        };
+      }
+      const started = Date.now();
+      const auth = await accessToken();
+      if (!auth.ok) {
+        return {
+          ok: false,
+          configured: true,
+          mode: "api_dropshipping",
+          ms: Date.now() - started,
+          reason: auth.reason,
+          status: auth.status,
+          detail: auth.detail,
+          hint: "El API key fue rechazado por CJ. Revisa CJ_API_KEY en Railway."
+        };
+      }
+      const res = await cjGet(
+        base() + "/product/listV2?" + new URLSearchParams({ page: "1", size: "1", keyWord: "phone" }).toString(),
+        auth.token
+      );
+      const first = res.list && res.list[0] ? mapCj(res.list[0]) : null;
+      return {
+        ok: !!(res.ok && first && (first.name || first.reference)),
+        configured: true,
+        mode: "api_dropshipping",
+        ms: Date.now() - started,
+        status: res.status,
+        count: res.list ? res.list.length : 0,
+        sample: first ? { name: String(first.name || "").slice(0, 90), price: first.price, currency: "USD", url: first.url } : null,
+        reason: res.ok ? (first ? null : "cj_sin_resultados") : "cj_http_" + (res.status || 0),
+        detail: res.message || null,
+        note: "Autenticacion + busqueda real en el catalogo CJ (precio en USD)."
+      };
+    },
     search
   }
 };

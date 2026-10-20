@@ -3,6 +3,7 @@ const { config } = require("./config");
 const health = require("./routes/health");
 const sourcing = require("./routes/sourcing");
 const coverage = require("./routes/coverage");
+const selftest = require("./routes/selftest");
 const alerts = require("./routes/alerts");
 const suppliers = require("./routes/suppliers");
 const product = require("./routes/product");
@@ -34,6 +35,7 @@ const beaconGuard = security.beaconGuard({ maxBytes: function () { return config
 app.get("/", (req, res) => res.json({ ok: true, service: pkg.name, version: pkg.version, docs: "/health" }));
 app.get("/health", health);
 app.get("/coverage", coverage);
+app.post("/selftest", apiLimit, requireApiKey, selftest);
 app.use("/alerts", apiLimit, requireApiKey, alerts);
 app.post("/suppliers/start", apiLimit, requireApiKey, suppliers.startSuppliers);
 app.get("/suppliers/status/:id", apiLimit, requireApiKey, suppliers.statusSuppliers);

@@ -48,6 +48,10 @@ async function coverage(req, res) {
     version: pkg.version,
     time: new Date().toISOString(),
     market: config.market,
+    /* "ok" aqui es configuracion, no una llamada de red. La prueba real es
+       POST /selftest, que devuelve resultados y una muestra de cada fuente. */
+    okMeaning: "configurado; usa POST /selftest para verificar con datos reales",
+    selftest: "/selftest",
     totals: { sources: sources.length, operative: live, notConfigured: sources.length - live },
     store: { mode: mode, stats: stats },
     sources: sources
