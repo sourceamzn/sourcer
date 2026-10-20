@@ -1074,7 +1074,7 @@ async function searchSuppliers(body, priceMax, hooks) {
         const brandInName = id !== "discovery" || !brNorm || nmNorm.indexOf(brNorm) !== -1;
         const noiseUrl = id === "discovery" && /chollometro|mundobatidora|versusfinder|\.vercel\.app|foro|blog/i.test(String(rec.url || ""));
         const related = (it.__typeOk === true || ptype.hasCJK(nmCand) || relevance(nmCand, qTokens) >= 0.25) && brandInName && !noiseUrl;
-        if (mt.strongConflict || mt.typeConflict || (mt.band !== "verificado" && !(provisionalOk && related))) {
+        if (mt.strongConflict || mt.typeConflict || mt.band === "descartar" || (mt.band === "revisar" && !(provisionalOk && related))) {
           /* El motivo debe explicar el DESCARTE, no citar una coincidencia
              ("Marca Ganiza coincide") como si fuera el problema. */
           const neg = (mt.reasons || []).filter(function (r) { return !/coincide|ok\b/i.test(String(r)); });
@@ -1107,7 +1107,7 @@ async function searchSuppliers(body, priceMax, hooks) {
         recsOut.push(rec);
         /* Los candidatos de mercado/mayorista no se mezclan con los verificados:
            van a la lista de revision, que es lo que el usuario puede cotejar. */
-        if (mt.band !== "verificado") {
+        if (mt.band === "revisar") {
           if (review.indexOf(rec) === -1) review.push(rec);
           return;
         }
