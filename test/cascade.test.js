@@ -32,6 +32,17 @@ test("mergeSearched se queda con la entrada que trajo datos", function () {
   assert.strictEqual(out[0].count, 3);
 });
 
+test("splitOver separa las ofertas por encima del maximo", function () {
+  const out = cascade.splitOver([
+    { url: "a", price: 10 },
+    { url: "b", price: 90, over: true },
+    { url: "c", price: 0 }
+  ]);
+  assert.strictEqual(out.matches.length, 2);
+  assert.strictEqual(out.over.length, 1);
+  assert.strictEqual(out.over[0].url, "b");
+});
+
 test("summarize conserva contadores de la fase 1 y añade fases", function () {
   const s = cascade.summarize({ exact: 2, raw: 10 }, 2, 5);
   assert.strictEqual(s.exact, 2);

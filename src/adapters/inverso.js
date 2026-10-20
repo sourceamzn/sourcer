@@ -587,7 +587,11 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
         rec.source = "tarifas";
         rec.sourceLabel = "Tarifa importada: " + String(row.source || "");
         rec.supplier = String(row.source || "");
-        rec.dedupeKey = "tarifa|" + String(row.source || "") + "|" + row.ean;
+        /* Un mismo EAN puede estar repetido en el almacen por reimportaciones
+           con etiquetas de origen distintas. Se colapsa el duplicado exacto
+           (mismo EAN, precio y stock) para no mostrar 24 veces el mismo
+           proveedor. */
+        rec.dedupeKey = "tarifa|" + row.ean + "|" + rec.price + "|" + String(row.stock == null ? "" : row.stock);
         accept(rec, entry, recsOut);
       });
       entry.ok = entry.count > 0;
@@ -1080,7 +1084,10 @@ async function searchSuppliers(body, priceMax, hooks) {
   const cfgM = config.match || {};
   const enrichMax = cfgM.enrichMax == null ? 12 : cfgM.enrichMax;
   if (enrichMax > 0) {
-    const targets = matches.filter(function (r) {
+    /* Tambien se cotejan las ofertas por encima del maximo: si no, un precio
+       maximo bajo hacia desaparecer resultados verificados y el diagnostico
+       decia "no hay ofertas verificables" cuando si las habia. */
+    const targets = matches.concat(above).filter(function (r) {
       return !r.ean && /^https?:\/\//i.test(String(r.url || ""));
     }).sort(function (a, b) {
       /* Primero lo descubierto en la web abierta y lo que no trae precio:
@@ -1088,6 +1095,9 @@ async function searchSuppliers(body, priceMax, hooks) {
       const da = a.source === "discovery" ? 0 : 1;
       const db = b.source === "discovery" ? 0 : 1;
       if (da !== db) return da - db;
+      const oa = above.indexOf(a) !== -1 ? 1 : 0;
+      const ob = above.indexOf(b) !== -1 ? 1 : 0;
+      if (oa !== ob) return oa - ob;
       const pa = a.price > 0 ? 1 : 0;
       const pb = b.price > 0 ? 1 : 0;
       if (pa !== pb) return pa - pb;
@@ -1155,8 +1165,9 @@ async function searchSuppliers(body, priceMax, hooks) {
           };
           rec.strongConflict = Boolean(mt.strongConflict || mt.typeConflict);
           if (mt.band === "revisar" && !rec.strongConflict && !rec.imageConflict) review.push(rec);
+          const wasAbove = above.indexOf(rec) !== -1;
           if (mt.strongConflict || mt.typeConflict || mt.band !== "verificado") removed.push(rec);
-          else if (priceMax > 0 && rec.price > priceMax) {
+          else if (!wasAbove && priceMax > 0 && rec.price > priceMax) {
             /* La ficha decia un precio distinto: ya no cumple el maximo. No se
                borra, se devuelve como referencia por encima del maximo. */
             removed.push(rec);
@@ -1166,6 +1177,12 @@ async function searchSuppliers(body, priceMax, hooks) {
         removed.forEach(function (rec) {
           const i = matches.indexOf(rec);
           if (i !== -1) matches.splice(i, 1);
+          /* Si estaba por encima del maximo y no se pudo verificar, deja de
+             ser una referencia valida. */
+          if (rec.matchBand !== "verificado") {
+            const ai = above.indexOf(rec);
+            if (ai !== -1) above.splice(ai, 1);
+          }
           if (rec.matchBand === "descartar" || rec.matchScore === 0) {
             rejected.push({ source: rec.source, kind: "identidad", name: String(rec.name || "").slice(0, 80), reason: (rec.matchReasons && rec.matchReasons[0]) || "EAN distinto leido en la ficha del proveedor.", score: rec.matchScore });
           }
@@ -1382,7 +1399,8 @@ async function cascadeSuppliers(body, priceMax, hooks, srcEans) {
       }), priceMax, hooks, srcEans);
     } catch (e) { p1err = String((e && e.message) || e); }
   }
-  const p1matches = p1 && p1.matches ? p1.matches.filter(function (r) { return !r.over; }) : [];
+  const p1split = cascadeLib.splitOver((p1 && p1.matches) || []);
+  const p1matches = p1split.matches;
   const p1count = p1matches.length;
   if (allowKeyword && (!p1count || body.expand === true)) {
     const left = Math.max(30000, totalMs - (Date.now() - t0));
@@ -1398,10 +1416,14 @@ async function cascadeSuppliers(body, priceMax, hooks, srcEans) {
     ((p1 && p1.searched) || []).map(function (e) { return Object.assign({ phase: 1 }, e); }),
     ((p2 && p2.searched) || []).map(function (e) { return Object.assign({ phase: 2 }, e); })
   );
-  const p2matches = p2 && p2.matches ? p2.matches.filter(function (r) { return !r.over; }) : [];
+  const p2split = cascadeLib.splitOver((p2 && p2.matches) || []);
+  const p2matches = p2split.matches;
   const p2count = p2matches.length;
   const matches = cascadeLib.mergeMatches(p1matches, p2matches);
-  const overMax = cascadeLib.dedupe([].concat((p1 && p1.overMax) || [], (p2 && p2.overMax) || [])).slice(0, 12);
+  const overMax = cascadeLib.dedupe([].concat(
+    (p1 && p1.overMax) || [], p1split.over,
+    (p2 && p2.overMax) || [], p2split.over
+  )).sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); }).slice(0, 12);
   const rejected = [].concat((p1 && p1.rejected) || [], (p2 && p2.rejected) || []).slice(0, 120);
   const review = config.match.reviewVisible === false ? [] : ((p2 && p2.review) || []).slice(0, 40);
   const rejectedBySource = {};
@@ -1414,7 +1436,9 @@ async function cascadeSuppliers(body, priceMax, hooks, srcEans) {
   const summary = cascadeLib.summarize((p1 && p1.summary) || (p2 && p2.summary), p1count, p2count);
   let diagnosis = null;
   if (!matches.length) {
-    if (!srcEans.length && !allowKeyword) {
+    if (overMax.length) {
+      diagnosis = { reason: "solo_por_encima", message: "Hay " + overMax.length + " oferta(s) verificada(s), pero por encima de tu precio maximo" + (priceMax > 0 ? " (" + round2(priceMax) + " EUR)" : "") + ": no dejan margen. Se listan como referencia." };
+    } else if (!srcEans.length && !allowKeyword) {
       diagnosis = { reason: "producto_sin_ean", message: "El producto no tiene EAN/UPC y la busqueda por marca/modelo esta desactivada." };
     } else if (review.length) {
       diagnosis = { reason: "solo_revisar", message: "Hay " + review.length + " candidato(s) parecido(s) por marca/modelo/titulo, pero ninguno se pudo verificar como el mismo producto. No cuentan como proveedor." };

@@ -89,9 +89,16 @@ const config = {
     base: clean(process.env.BIGBUY_BASE) || "https://api.bigbuy.eu",
     iso: clean(process.env.BIGBUY_ISO) || "es"
   },
-  /* Icecat: usuario y contrasena de la cuenta (no hay API key). La IP del
-     servidor debe estar autorizada en el panel de Icecat. */
+  /* Icecat: dos formas de autenticar.
+     1. Tokens (recomendado): ICECAT_API_TOKEN + ICECAT_CONTENT_TOKEN. Van en
+        las cabeceras `api-token` y `content-token`; sustituyen a Basic auth y
+        a la lista de IPs permitidas.
+     2. Legado: ICECAT_USERNAME + ICECAT_PASSWORD (HTTP Basic) con la IP del
+        servidor autorizada en el panel de Icecat. */
   icecat: {
+    apiToken: clean(process.env.ICECAT_API_TOKEN),
+    contentToken: clean(process.env.ICECAT_CONTENT_TOKEN),
+    shopname: clean(process.env.ICECAT_SHOPNAME),
     username: clean(process.env.ICECAT_USERNAME),
     password: clean(process.env.ICECAT_PASSWORD),
     base: clean(process.env.ICECAT_BASE) || "https://live.icecat.biz",
@@ -248,7 +255,7 @@ function bigbuyReady() {
 }
 
 function icecatReady() {
-  return Boolean(config.icecat.username && config.icecat.password);
+  return Boolean(config.icecat.apiToken || (config.icecat.username && config.icecat.password));
 }
 
 function aliexpressReady() {

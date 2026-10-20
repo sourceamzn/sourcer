@@ -64,6 +64,18 @@ function mergeMatches(a, b) {
   return sortMatches(list);
 }
 
+/* La fase 2 devuelve las ofertas por encima del maximo dentro de `matches`
+   con `over:true` cuando no hay ninguna por debajo. Hay que separarlas antes
+   de mezclar o se pierden (el sintoma era: 0 resultados y 0 "por encima"). */
+function splitOver(list) {
+  const matches = [], over = [];
+  (list || []).forEach(function (r) {
+    if (!r) return;
+    if (r.over) over.push(r); else matches.push(r);
+  });
+  return { matches: matches, over: over };
+}
+
 function summarize(sum, phase1, phase2) {
   const base = Object.assign({
     exact: 0, raw: 0, withEan: 0, differentEan: 0, noEan: 0,
@@ -75,4 +87,4 @@ function summarize(sum, phase1, phase2) {
   return base;
 }
 
-module.exports = { matchKey, dedupe, mergeSearched, mergeMatches, sortMatches, summarize };
+module.exports = { matchKey, dedupe, mergeSearched, mergeMatches, sortMatches, splitOver, summarize };
