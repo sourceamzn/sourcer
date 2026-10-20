@@ -10,7 +10,9 @@ function startSuppliers(req, res) {
   const explicit = String(body.policy || "").toLowerCase();
   const policy = explicit || (body.eanOnly === true ? "exact" : (body.eanOnly === false ? "keyword" : ((config.match && config.match.policy) || "exact")));
   const cascade = policy === "cascade";
-  const eanOnly = body.eanOnly !== false && !cascade;
+  /* La politica manda: "keyword" no puede seguir exigiendo EAN aunque el
+     cliente no envie eanOnly. */
+  const eanOnly = policy === "exact" ? true : (policy === "keyword" || cascade ? false : body.eanOnly !== false);
   const eans = gtin.normalizeAll([].concat(body.eans || [], body.ean || []));
   if (eanOnly && !eans.length && !body.asin) return res.status(400).json({ ok: false, reason: "producto_sin_ean", hint: "El modo exacto solo busca por EAN/UPC. Esta ficha no tiene un codigo valido: no se buscan parecidos por nombre, marca, modelo ni foto." });
   const hasId = eans.length || body.asin || body.name || body.model || body.brand || body.query;

@@ -449,6 +449,11 @@ function eanZeroResult(body, priceMax, reason, message) {
     diagnosis: { reason: reason || "producto_sin_ean", message: message || "Este producto no tiene EAN/UPC valido: no se puede buscar por coincidencia exacta." }
   };
 }
+/* Fuentes que no sirven en la fase exacta: los mercados chinos no publican EAN
+   y el descubrimiento/Shopping, ademas de no publicarlo, son los actores mas
+   lentos. Se reservan para la fase de palabra clave, que corre una sola vez,
+   y asi dejan de competir entre si por el mismo token de Apify. */
+const NO_EAN_SOURCES = { a1688: 1, alibaba: 1, madeinchina: 1, aliexpress: 1, aliexpress_apify: 1, discovery: 1, gshopping: 1 };
 async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
   hooks = hooks || {};
   const { adapters } = require("./index");
@@ -457,7 +462,10 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
   const candidates = Object.keys(adapters).filter(function (id) {
     const a = adapters[id];
     /* En modo exacto no se consultan fuentes que declaran no publicar EAN:
-       solo gastan tiempo y ocupan fichas de enriquecimiento. */
+       solo gastan tiempo y ocupan fichas de enriquecimiento. Los mercados
+       chinos (1688, Alibaba, Made-in-China, AliExpress) nunca publican EAN:
+       su sitio es la fase de palabra clave, donde salen como candidatos. */
+    if (NO_EAN_SOURCES[id]) return false;
     return !skip[id] && a && a.ean !== false && !a.requiresAuth && a.actions && typeof a.actions.search === "function";
   }).sort(function (x, y) {
     const rx = rank[adapters[x].kind] != null ? rank[adapters[x].kind] : 5;
@@ -561,7 +569,7 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
       }
     })());
   }
-  await Promise.all(workers);
+  await raceBudget(workers, deadline);
 
   /* Tarifas/liquidaciones importadas por el usuario: cruce directo por EAN
      contra el almacen. Es la via que hace que una tarifa subida aparezca en la
@@ -742,10 +750,22 @@ function buildSourcesPayload(out, body, priceMax) {
    presupuesto de la busqueda: se cortan a 25 s. El resto conserva el margen
    completo para actores lentos (Apify, descubrimiento). */
 function sourceCap(kind) {
-  if (kind === "scraping" || kind === "wholesale") return 14000;
-  if (kind === "supplier_market" || kind === "marketplace") return 30000;
-  if (kind === "discovery" || kind === "discovery_open" || kind === "discovery_multi") return 45000;
+  if (kind === "scraping" || kind === "wholesale") return 15000;
+  if (kind === "supplier_market" || kind === "marketplace") return 55000;
+  if (kind === "discovery" || kind === "discovery_open" || kind === "discovery_multi") return 90000;
   return 20000;
+}
+
+/* Ninguna fuente puede bloquear el trabajo entero: al llegar al presupuesto se
+   devuelve lo que ya haya. Antes un unico adaptador lento (60 s) retrasaba la
+   respuesta completa y el usuario veia "0 proveedores" tras la espera. */
+function raceBudget(workers, deadline) {
+  const done = Promise.all(workers);
+  const limit = new Promise(function (resolve) {
+    const t = setTimeout(resolve, Math.max(1000, deadline - Date.now()));
+    if (t.unref) t.unref();
+  });
+  return Promise.race([done, limit]);
 }
 
 async function searchSuppliers(body, priceMax, hooks) {
@@ -1035,9 +1055,17 @@ async function searchSuppliers(body, priceMax, hooks) {
         rec.__typeReason = it.__typeReason || "";
         /* Los descubrimientos web llegan solo con titulo + URL: no se pueden
            juzgar hasta abrir la ficha. Se conservan como provisionales y el
-           cotejo posterior (JSON-LD/Open Graph + foto) decide. El resto de
-           fuentes mantiene el descarte inmediato ante conflicto. */
-        if (mt.strongConflict || mt.typeConflict || (mt.band !== "verificado" && id !== "discovery")) {
+           cotejo posterior (JSON-LD/Open Graph + foto) decide. Los mercados y
+           mayoristas tampoco publican EAN: si no hay conflicto fuerte, se
+           conservan como candidatos a revisar (nunca como verificados). */
+        const srcKind = adapters[id].kind;
+        /* Solo mercados/buscador pueden quedar como candidatos: las webs de
+           catalogo (mayoristas, scraping) devuelven todo su catalogo y
+           llenarian la lista de ruido. */
+        const provisionalOk = id === "discovery" || srcKind === "supplier_market" || srcKind === "marketplace";
+        const nmCand = String(it.name || "");
+        const related = it.__typeOk === true || ptype.hasCJK(nmCand) || relevance(nmCand, qTokens) >= 0.25;
+        if (mt.strongConflict || mt.typeConflict || (mt.band !== "verificado" && !(provisionalOk && related))) {
           rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: mt.reasons[0] || "Coincidencia insuficiente.", score: mt.score });
           return;
         }
@@ -1056,10 +1084,17 @@ async function searchSuppliers(body, priceMax, hooks) {
             : (rec.provisional
               ? "Descubierto en la web: se abre su ficha para cotejar el producto."
               : "Candidato a revisar: coincidencia " + mt.score + "/100; compara la foto con la tuya.");
+          if (!rec.provisional) rec.reviewNote = "Mayorista candidato (no publica EAN): compara modelo y foto antes de comprar.";
         }
         if (weakId) { rec.review = true; rec.reviewNote = rec.reviewNote || "Identidad de origen débil: candidato a revisar."; }
         rec.state = mt.band === "verificado" ? "verificado" : "candidato";
         recsOut.push(rec);
+        /* Los candidatos de mercado/mayorista no se mezclan con los verificados:
+           van a la lista de revision, que es lo que el usuario puede cotejar. */
+        if (mt.band !== "verificado" && id !== "discovery") {
+          if (review.indexOf(rec) === -1) review.push(rec);
+          return;
+        }
         if (price <= 0) { matches.push(rec); return; }
         if (priceMax > 0 && price > priceMax) { above.push(rec); return; }
         matches.push(rec);
@@ -1081,7 +1116,7 @@ async function searchSuppliers(body, priceMax, hooks) {
       }
     })());
   }
-  await Promise.all(workers);
+  await raceBudget(workers, deadline);
 
   /* Fase 4 · las ofertas "a revisar" sin EAN se contrastan abriendo su ficha
      (JSON-LD: gtin/mpn/sku/marca) y se vuelven a puntuar. Si el EAN leido es

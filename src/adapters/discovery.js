@@ -303,11 +303,29 @@ async function search(body) {
     return p.then(function (r) { return { engine: name, r: r }; })
       .catch(function (e) { return { engine: name, r: { ok: false, reason: String((e && e.message) || e) } }; });
   }
+  /* Los motores de pago se esperan; el respaldo web (DuckDuckGo/Bing) solo
+     entra si lo anterior no trae nada util. Antes se lanzaba siempre y podia
+     colgar la fuente entera aunque Google/Brave ya hubieran respondido. */
+  function withCap(p, ms, label) {
+    return Promise.race([
+      p,
+      new Promise(function (resolve) {
+        const t = setTimeout(function () { resolve({ engine: label, r: { ok: false, reason: "timeout" } }); }, ms);
+        if (t.unref) t.unref();
+      })
+    ]);
+  }
   const jobs = [];
   if (apifyReady()) jobs.push(settle(apifySearch(q, count, body), "apify"));
   if (config.discovery.apiKey) jobs.push(settle(braveMany(q, count, body), "brave"));
-  jobs.push(settle(webMany(q, count, body), "web"));
-  const settled = await Promise.all(jobs);
+  let settled = [];
+  if (jobs.length) {
+    settled = await Promise.all(jobs);
+    const found = settled.reduce(function (n, s) { return n + ((s.r && s.r.results) ? s.r.results.length : 0); }, 0);
+    if (found < 5) settled.push(await withCap(settle(webMany(q, count, body), "web"), 12000, "web"));
+  } else {
+    settled = [await withCap(settle(webMany(q, count, body), "web"), 20000, "web")];
+  }
   const results = [];
   const engines = [];
   let reason = "sin_motor", status = 0;

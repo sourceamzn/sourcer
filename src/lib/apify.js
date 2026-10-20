@@ -16,6 +16,21 @@ const cache = new Map();
 const stats = { calls: 0, errors: 0, byActor: {}, lastError: null };
 const CACHE_MAX = 300;
 
+/* Cola de actores: Apify arranca en frio y comparte proxy. Con cinco actores
+   a la vez todos tardan mas y el descubrimiento pierde su turno. */
+let active = 0;
+const waiting = [];
+function takeSlot() {
+  const max = config.apify.maxConcurrent || 2;
+  if (active < max) { active += 1; return Promise.resolve(); }
+  return new Promise(function (resolve) { waiting.push(resolve); });
+}
+function freeSlot() {
+  const next = waiting.shift();
+  if (next) next();
+  else active = Math.max(0, active - 1);
+}
+
 function actorPath(id) {
   return String(id || "").trim().replace("/", "~");
 }
@@ -64,6 +79,7 @@ async function runActor(actorId, input, opts) {
   if (opts.limit) params.push("limit=" + opts.limit);
   const url = config.apify.base + "/v2/acts/" + actorPath(actorId) + "/run-sync-get-dataset-items?" + params.join("&");
 
+  await takeSlot();
   const t0 = Date.now();
   const ctrl = new AbortController();
   const timer = setTimeout(function () { ctrl.abort(); }, (timeoutSec + 8) * 1000);
@@ -97,6 +113,7 @@ async function runActor(actorId, input, opts) {
     return { ok: false, reason: aborted ? "actor_timeout" : "actor_error", items: [] };
   } finally {
     clearTimeout(timer);
+    freeSlot();
   }
 }
 
