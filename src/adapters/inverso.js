@@ -341,7 +341,7 @@ function cheapestVerified(matches, kinds) {
 function reviewRec(r) {
   return {
     source: r.source, sourceLabel: r.sourceLabel || r.source,
-    name: String(r.name || "").slice(0, 140), price: r.price, currency: r.currency || "",
+    name: String(r.name || r.title || "").slice(0, 140), price: r.price, currency: r.currency || "",
     url: r.url, image: r.image || "", brand: r.brand || "", ean: r.ean || "", model: r.model || "",
     matchScore: r.matchScore, matchBand: r.matchBand,
     reviewNote: String(r.reviewNote || "").slice(0, 220),
@@ -817,8 +817,10 @@ async function searchSuppliers(body, priceMax, hooks) {
   const explicitPolicy = String((body && body.policy) || "").toLowerCase();
   const policy = explicitPolicy || ((body && body.eanOnly === true) ? "exact" : ((body && body.eanOnly === false) ? "keyword" : (config.match.policy || "exact")));
   if (policy === "cascade") return cascadeSuppliers(body, priceMax, hooks, srcEans);
-  /* Modo exacto por defecto: sin EAN no se buscan parecidos. */
-  if ((body && body.eanOnly) !== false) {
+  /* La politica manda: policy=keyword no puede caer en la fase exacta solo
+     porque el cliente no envie eanOnly=false (bug: devolvia "producto_sin_ean"
+     sin consultar ni una fuente). */
+  if (policy !== "keyword" && (body && body.eanOnly) !== false) {
     if (!srcEans.length) {
       return eanZeroResult(body, priceMax, "producto_sin_ean",
         "Este producto no tiene EAN/UPC valido. El modo exacto solo busca por codigo de barras: no se muestran parecidos por marca, modelo o foto.");
@@ -1064,9 +1066,23 @@ async function searchSuppliers(body, priceMax, hooks) {
            llenarian la lista de ruido. */
         const provisionalOk = id === "discovery" || srcKind === "supplier_market" || srcKind === "marketplace";
         const nmCand = String(it.name || "");
-        const related = it.__typeOk === true || ptype.hasCJK(nmCand) || relevance(nmCand, qTokens) >= 0.25;
+        /* En la web, un resultado solo vale como candidato si el titulo lleva
+           la marca del origen: si no, es otro producto (un UFESA colado en una
+           busqueda de Ganiza). Blogs y agregadores tampoco son proveedores. */
+        const nmNorm = nmCand.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        const brNorm = String((body && body.brand) || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        const brandInName = id !== "discovery" || !brNorm || nmNorm.indexOf(brNorm) !== -1;
+        const noiseUrl = id === "discovery" && /chollometro|mundobatidora|versusfinder|\.vercel\.app|foro|blog/i.test(String(rec.url || ""));
+        const related = (it.__typeOk === true || ptype.hasCJK(nmCand) || relevance(nmCand, qTokens) >= 0.25) && brandInName && !noiseUrl;
         if (mt.strongConflict || mt.typeConflict || (mt.band !== "verificado" && !(provisionalOk && related))) {
-          rejected.push({ source: id, kind: "identidad", name: String(it.name || "").slice(0, 80), reason: mt.reasons[0] || "Coincidencia insuficiente.", score: mt.score });
+          /* El motivo debe explicar el DESCARTE, no citar una coincidencia
+             ("Marca Ganiza coincide") como si fuera el problema. */
+          const neg = (mt.reasons || []).filter(function (r) { return !/coincide|ok\b/i.test(String(r)); });
+          rejected.push({
+            source: id, kind: "identidad", name: String(it.name || "").slice(0, 80),
+            url: rec.url || "", price: rec.price || 0, currency: rec.currency || "",
+            reason: neg.join(" · ") || ("Coincidencia insuficiente (" + mt.score + "/100)."), score: mt.score
+          });
           return;
         }
         const cmp = identity.compare(srcId, { name: it.name, brand: it.brand, ean: it.ean, model: rec.model, color: rec.color, size: rec.size, attrs: it.attrs });
@@ -1091,7 +1107,7 @@ async function searchSuppliers(body, priceMax, hooks) {
         recsOut.push(rec);
         /* Los candidatos de mercado/mayorista no se mezclan con los verificados:
            van a la lista de revision, que es lo que el usuario puede cotejar. */
-        if (mt.band !== "verificado" && id !== "discovery") {
+        if (mt.band !== "verificado") {
           if (review.indexOf(rec) === -1) review.push(rec);
           return;
         }
@@ -1224,7 +1240,16 @@ async function searchSuppliers(body, priceMax, hooks) {
             if (ai !== -1) above.splice(ai, 1);
           }
           if (rec.matchBand === "descartar" || rec.matchScore === 0) {
-            rejected.push({ source: rec.source, kind: "identidad", name: String(rec.name || "").slice(0, 80), reason: (rec.matchReasons && rec.matchReasons[0]) || "EAN distinto leido en la ficha del proveedor.", score: rec.matchScore });
+            /* Si la ficha abierta desmiente el parecido, sale tambien de la
+               lista de candidatos (antes seguia ahi y confundia). */
+            const ri = review.indexOf(rec);
+            if (ri !== -1) review.splice(ri, 1);
+            const neg = (rec.matchReasons || []).filter(function (r) { return !/coincide|ok\b/i.test(String(r)); });
+            rejected.push({
+              source: rec.source, kind: "identidad", name: String(rec.name || "").slice(0, 80),
+              url: rec.url || "", price: rec.price || 0, currency: rec.currency || "",
+              reason: neg.join(" · ") || ("Coincidencia insuficiente (" + rec.matchScore + "/100)."), score: rec.matchScore
+            });
           }
         });
         try { events.add("job", { phase: "match_enrich", tried: targets.length, found: targets.filter(function (r) { return r.enriched; }).length, discarded: removed.length }); } catch (e) {}
@@ -1596,13 +1621,34 @@ async function candidatesLarge(body) {
      producto y a fichas con ventas, y se filtra por tokens del titulo. Asi no
      vuelven accesorios ni fichas con 0 ventas como en la version anterior. */
   const page = num(body && body.page, 0);
-  if (!pool.length && query && page <= 0) {
+  if (query && page <= 0) {
     const s = await keepaSearchProducts(query);
     if (s.ok && s.products.length) {
       pool = asinListOf(s.products);
       via = "search";
       notes.push("Busqueda '" + query + "': " + pool.length + " ASIN.");
     } else if (!s.ok) errors.push("search:" + (s.reason || "error"));
+    /* Keepa /search devuelve 20 como maximo (sin paginacion desde 2026). Con
+       palabras genericas ("batidoras") eso deja el pool en 20 y, tras el filtro
+       de Buy Box, la vista parece vacia. Se completa con Product Finder por
+       titulo ordenado por ventas: mismo producto, mucho mas donde elegir. */
+    if (pool.length < Math.max(40, limit)) {
+      const f = await keepaFinder({
+        selection: {
+          domainId: config.keepa.domain,
+          title: query,
+          perPage: Math.min(200, Math.max(100, limit * 3)),
+          productType: [0, 1],
+          sort: [["current_SALES", "desc"]],
+          current_SALES_gte: 1
+        }
+      });
+      if (f.ok && f.asins.length) {
+        const before = pool.length;
+        pool = uniqAsins(pool.concat(f.asins));
+        notes.push("Product Finder por titulo: " + f.asins.length + " ASIN (+" + (pool.length - before) + ", total " + pool.length + ").");
+      } else if (!f.ok) errors.push("finder_titulo:" + (f.reason || "error"));
+    }
   }
   if (!pool.length && query && page > 0) {
     const catId = digits(body && body.hintCategory);
@@ -1622,21 +1668,6 @@ async function candidatesLarge(body) {
       notes.push("Product Finder " + (catId ? ("categoria " + catId) : "sin categoria") + ", pagina " + page + ": " + f.asins.length + " ASIN.");
     } else if (!f.ok) errors.push("finder_pagina:" + (f.reason || "error"));
   }
-  if (!pool.length && query && page <= 0) {
-    const f = await keepaFinder({
-      selection: {
-        domainId: config.keepa.domain,
-        title: query,
-        perPage: Math.min(200, Math.max(50, limit * 2)),
-        productType: [0, 1],
-        sort: [["current_SALES", "desc"]],
-        current_SALES_gte: 1
-      }
-    });
-    if (f.ok && f.asins.length) { pool = f.asins; via = "product_finder"; notes.push("Product Finder por titulo: " + f.asins.length + " ASIN."); }
-    else if (!f.ok) errors.push("finder_titulo:" + (f.reason || "error"));
-  }
-
   pool = uniqAsins(pool);
   /* Pagina adicional sin resultados: es el final del pool, no un error. */
   if (!pool.length && page > 0) {
@@ -1689,10 +1720,14 @@ async function candidatesLarge(body) {
     const qWords = query ? query.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(function (w) { return w.length >= 4; }) : [];
     function keywordRelevant(m) {
-      /* Solo se aplica al Product Finder, cuya coincidencia por titulo es laxa.
-         La busqueda normal de Keepa ya viene ordenada por relevancia. */
-      if ((via !== "product_finder" && via !== "product_finder_page") || !qWords.length) return true;
       const t = String(m.title || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      /* Repuestos y accesorios no son el producto: "repuesto de embolo para
+         batidora" pasaba el filtro por titulo y se colaba como candidato. */
+      if (/\b(repuesto|repuestos|recambio|accesorio|accesorios|pieza|piezas|cuchilla|embolo|filtro|junta|adaptador|manguera)\b/.test(t)) return false;
+      /* El Product Finder por titulo es laxo: ademas de los accesorios devuelve
+         productos que solo comparten una palabra lejana. Se exige que el titulo
+         contenga la palabra buscada (raiz de 5 letras). */
+      if (!qWords.length) return true;
       return qWords.every(function (w) { return t.indexOf(w.slice(0, 5)) !== -1; });
     }
     const baseM = (got.products || []).map(metricsFromKeepa).filter(function (m) {

@@ -381,6 +381,12 @@ function decideIdentity(src, offer, ctx) {
     /* Marca+modelo distintivo sin conflicto: unica via a "verificado" sin EAN. */
     band = "verificado";
     points = Math.max(points, BANDS.verified);
+  } else if (brandOk && !specConflict && !variantConflict && !typeConflict) {
+    /* Marca correcta y sin conflicto de tipo/specs: es un CANDIDATO (nivel 3),
+       no un descarte. Antes caia a "descartar" por no tener modelo y la web
+       que si vendia el producto acababa fuera de la lista. */
+    band = "revisar";
+    points = Math.max(points, BANDS.review);
   } else if (points >= BANDS.review) {
     band = "revisar";
   } else {

@@ -23,7 +23,7 @@ const PLAN_DEFAULT = {
      Se exigen al menos 2 FBA de terceros (sin contar Amazon). Los dos
      terceros distintos en la Buy Box son un modo estricto opcional. */
   bbManufacturerMin: 95, bbThirdMax: 5, bbSingleThird: 97,
-  requireTwoSellers: 0
+  requireTwoSellers: 1
 };
 
 function num(v, d) {
@@ -106,7 +106,14 @@ function planFor(m, p) {
     : (fbaKnown ? Math.max(0, fba - (m.amazonSells ? 1 : 0)) : 0);
   const lowFbaThird = fbaThirdKnown && fbaThird < num(p.minFbaThird, 2);
   const lowFbaThirdBlocked = num(p.bbRule, 1) > 0 && lowFbaThird;
-  const privateLabel = !!m.privateLabel || (fbaKnown && num(m.thirdParty, 0) <= 1 && fba <= 1);
+  /* Sin competencia real no hay Buy Box que compartir: si en 90 d Amazon o la
+     marca la acaparan, o solo existe UN vendedor tercero, no es oportunidad.
+     Se aplica tambien sin historial de Buy Box usando el numero de ofertas de
+     terceros de Keepa: 0-1 ofertas = marca propia o monopolio. Antes estas
+     fichas salian como "aptas" porque el historial venia vacio (sin_dato). */
+  const tpKnown = m.thirdParty != null && m.thirdParty !== "";
+  const noCompetition = num(p.bbRule, 1) > 0 && pvp > 0 && tpKnown && num(m.thirdParty, 0) <= 1;
+  const privateLabel = !!m.privateLabel || noCompetition || (fbaKnown && num(m.thirdParty, 0) <= 1 && fba <= 1);
   /* Regla Buy Box 90 d: Amazon+fabricante >= 95 % o terceros < 5 % = no apto
      (configurable). Ademas, si hay historial clasificado, se exigen al menos
      2 vendedores terceros distintos: con un solo vendedor no hay competencia. */
@@ -116,13 +123,14 @@ function planFor(m, p) {
   const twoSellers = num(p.requireTwoSellers, 0) > 0;
   const singleSeller = num(p.bbRule, 1) > 0 && twoSellers && bbv.kind !== "sin_dato" &&
     bbv.thirdSellers != null && num(bbv.thirdSellers) < 2;
-  const bbBlocked = singleSeller || (num(p.bbRule, 1) > 0 && (
+  const bbBlocked = singleSeller || noCompetition || (num(p.bbRule, 1) > 0 && (
     bbv.kind === "amazon" || bbv.kind === "fabricante" ||
-    bbv.kind === "amazon+fabricante" || bbv.kind === "terceros"
+    bbv.kind === "amazon+fabricante" || bbv.kind === "terceros" || bbv.kind === "a_revisar"
   ));
   const hardDrop = costMax <= 0 || bbBlocked || lowFbaBlocked || lowFbaThirdBlocked;
   const restricted = restrictionNotes(m.restrictions);
   if (bbBlocked) reasons.push("No apto: " + bbv.note + " No hay hueco para revender.");
+  if (noCompetition) reasons.push("No apto: solo " + num(m.thirdParty) + " oferta(s) de terceros; con un unico vendedor la Buy Box no se comparte (marca propia o monopolio).");
   if (singleSeller && ["amazon", "fabricante", "amazon+fabricante", "terceros"].indexOf(bbv.kind) === -1) {
     reasons.push("Buy Box 90 d: solo " + num(bbv.thirdSellers) + " vendedor(es) tercero(s); se exigen 2 vendedores distintos. No apto.");
   }
