@@ -72,14 +72,9 @@ function isCode(query) {
   return /^\d{8,14}$/.test(String(query || "").trim());
 }
 
-/* Lidl mezcla alimentacion con bazar. Para sourcing solo interesa menaje,
-   herramientas, hogar y jardin: se descarta todo lo que sea comida/bebida. */
+/* Lidl mezcla alimentacion con bazar. Para sourcing se descarta solo la alimentacion: menaje, herramientas, hogar, jardin, textil, juguetes y deporte se conservan. */
 const FOOD_CATEGORY = /(^|\/)(food|alimentaci[oó]n|bebidas?|frescos?|carnes?|carnicer[ií]a|pescader[ií]a|panader[ií]a|fruter[ií]a|verduras?|l[aá]cteos?|congelados?|despensa|ultramarinos)(\/|$)/i;
 
-/* El sourcing de Lidl se centra en menaje y herramientas. Se descarta el resto
-   (incluida toda la alimentacion), salvo fichas sin categoria para no perder
-   productos por un dato ausente. */
-const TARGET_CATEGORY = /(^|\/)(hogar y cocina|tienda de bricolaje|bricolaje|menaje|herramientas|jard[ií]n y barbacoa)(\/|$)/i;
 
 function categoryOf(item) {
   return String((item && item.attrs && item.attrs.category) || "").trim();
@@ -91,10 +86,7 @@ function isFood(item) {
 }
 
 function isTarget(item) {
-  const category = categoryOf(item);
-  if (!category) return true;
-  if (isFood(item)) return false;
-  return TARGET_CATEGORY.test(category);
+  return !isFood(item);
 }
 
 function filterTarget(list) {
@@ -146,6 +138,17 @@ async function search(body) {
     };
   }
   if (!payload || !Array.isArray(payload.items)) {
+    /* Algunas palabras genericas ("deporte") devuelven una redireccion a una
+       categoria, no productos. Se trata como cero, no como parser roto. */
+    if (payload && (payload.redirectURL || payload.resultType === "redirect" || payload.type === "redirect")) {
+      return {
+        ok: true,
+        empty: true,
+        reason: "lidl_redirect",
+        hint: "Lidl redirige esa busqueda a una categoria; prueba una palabra mas concreta (p. ej. 'mancuernas').",
+        data: emptyData(query, offset, FETCHSIZE)
+      };
+    }
     /* Lidl contesta un documento de busqueda sin "items" cuando no hay
        coincidencias (tipico con EAN). Es un cero legitimo, no un parser roto. */
     if (payload && (payload.resultType === "search" || payload.type === "search" ||

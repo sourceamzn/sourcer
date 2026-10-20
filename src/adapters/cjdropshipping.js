@@ -127,34 +127,20 @@ const cjdropshipping = {
         };
       }
       const started = Date.now();
-      const auth = await accessToken();
-      if (!auth.ok) {
-        return {
-          ok: false,
-          configured: true,
-          mode: "api_dropshipping",
-          ms: Date.now() - started,
-          reason: auth.reason,
-          status: auth.status,
-          detail: auth.detail,
-          hint: "El API key fue rechazado por CJ. Revisa CJ_API_KEY en Railway."
-        };
-      }
-      const res = await cjGet(
-        base() + "/product/listV2?" + new URLSearchParams({ page: "1", size: "1", keyWord: "phone" }).toString(),
-        auth.token
-      );
-      const first = res.list && res.list[0] ? mapCj(res.list[0]) : null;
+      /* Usa el mismo camino que la busqueda real (v2 + respaldo legacy), no
+         una llamada suelta que puede devolver otro formato. */
+      const r = await search({ query: "phone", max: 3 });
+      const items = (r && r.data && r.data.items) || [];
+      const first = items[0] || null;
       return {
-        ok: !!(res.ok && first && (first.name || first.reference)),
+        ok: !!(r && r.ok && first),
         configured: true,
         mode: "api_dropshipping",
         ms: Date.now() - started,
-        status: res.status,
-        count: res.list ? res.list.length : 0,
+        count: items.length,
         sample: first ? { name: String(first.name || "").slice(0, 90), price: first.price, currency: "USD", url: first.url } : null,
-        reason: res.ok ? (first ? null : "cj_sin_resultados") : "cj_http_" + (res.status || 0),
-        detail: res.message || null,
+        reason: r && r.ok ? (first ? null : "cj_sin_resultados") : (r && r.reason) || "cj_error",
+        detail: (r && (r.detail || r.hint)) || null,
         note: "Autenticacion + busqueda real en el catalogo CJ (precio en USD)."
       };
     },
