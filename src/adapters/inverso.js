@@ -344,6 +344,9 @@ function reviewRec(r) {
     name: String(r.name || r.title || "").slice(0, 140), price: r.price, currency: r.currency || "",
     url: r.url, image: r.image || "", brand: r.brand || "", ean: r.ean || "", model: r.model || "",
     matchScore: r.matchScore, matchBand: r.matchBand,
+    factory: r.factory === true, verifiedSupplier: r.verifiedSupplier === true,
+    supplierType: r.supplierType || "sin_confirmar",
+    supplier: r.supplier || "", moq: r.moq == null ? null : r.moq, priceTiers: (r.priceTiers || []).slice(0, 3),
     reviewNote: String(r.reviewNote || "").slice(0, 220),
     matchReasons: (r.matchReasons || []).slice(0, 3)
   };
@@ -939,7 +942,13 @@ async function searchSuppliers(body, priceMax, hooks) {
         const qq = plan[pi];
         if (pi > 0 && Date.now() > deadline - 3000) break;
         let qText = qq.q;
-        if (qq.lazyEnglish) { qText = await englishQuery(); if (!qText) continue; qq.q = qText; }
+        if (qq.lazyEnglish) {
+          qText = await englishQuery();
+          if (!qText) continue;
+          /* Alibaba/Made-in-China: se pide explicitamente fabricante. */
+          if (adapters[id].kind === "supplier_market") qText = (qText + " manufacturer").slice(0, 110);
+          qq.q = qText;
+        }
         tried.push(qq.via);
         r = await withTimeout(
           adapters[id].actions.search({
@@ -1040,6 +1049,14 @@ async function searchSuppliers(body, priceMax, hooks) {
           checkedAt: new Date().toISOString()
         };
         rec.role = roleOf(adapters[id], rec);
+        /* Primera mano: se etiqueta al vendedor segun lo que declara el actor.
+           Una oferta barata de un "trading company" no es precio de fabrica. */
+        const at = (it.attrs || {});
+        rec.factory = at.factory === true;
+        rec.verifiedSupplier = at.verified === true;
+        rec.moq = rec.minOrder != null ? rec.minOrder : (it.minOrder != null ? it.minOrder : null);
+        rec.priceTiers = Array.isArray(at.priceTiers) ? at.priceTiers.slice(0, 3) : [];
+        rec.supplierType = rec.factory ? "fabrica" : (String(at.sellerType || "").trim() ? "trading" : "sin_confirmar");
         /* Fase 4: puntuacion 0-100. Solo el conflicto fuerte (EAN, pack o
            modelo distintos) descarta; el resto queda "a revisar". */
         const mt = matchLib.score(srcId, {
@@ -1521,7 +1538,13 @@ async function cascadeSuppliers(body, priceMax, hooks, srcEans) {
     (p2 && p2.overMax) || [], p2split.over
   )).sort(function (a, b) { return (a.price || 1e9) - (b.price || 1e9); }).slice(0, 12);
   const rejected = [].concat((p1 && p1.rejected) || [], (p2 && p2.rejected) || []).slice(0, 120);
-  const review = config.match.reviewVisible === false ? [] : ((p2 && p2.review) || []).slice(0, 40);
+  const review = config.match.reviewVisible === false ? [] : ((p2 && p2.review) || []).slice().sort(function (a, b) {
+    /* Primera mano arriba: fabrica > proveedor verificado > resto; luego score. */
+    const fa = a.factory ? 2 : (a.verifiedSupplier ? 1 : 0);
+    const fb = b.factory ? 2 : (b.verifiedSupplier ? 1 : 0);
+    if (fa !== fb) return fb - fa;
+    return (b.matchScore || 0) - (a.matchScore || 0);
+  }).slice(0, 40);
   const rejectedBySource = {};
   rejected.forEach(function (x) { rejectedBySource[x.source] = (rejectedBySource[x.source] || 0) + 1; });
   const phases = {
