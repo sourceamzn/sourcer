@@ -316,8 +316,8 @@ async function search(body) {
     ]);
   }
   const jobs = [];
-  if (apifyReady()) jobs.push(settle(apifySearch(q, count, body), "apify"));
-  if (config.discovery.apiKey) jobs.push(settle(braveMany(q, count, body), "brave"));
+  if (apifyReady()) jobs.push(withCap(settle(apifySearch(q, count, body), "apify"), 35000, "apify"));
+  if (config.discovery.apiKey) jobs.push(withCap(settle(braveMany(q, count, body), "brave"), 15000, "brave"));
   let settled = [];
   if (jobs.length) {
     settled = await Promise.all(jobs);

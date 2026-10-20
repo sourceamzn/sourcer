@@ -81,7 +81,7 @@ const config = {
     maxCostPerOp: Math.max(0, parseFloat(clean(process.env.APIFY_MAX_COST_PER_OP) || "0.50") || 0),
     /* Actores simultaneos: los de Apify arrancan en frio y comparten proxy;
        lanzar cinco a la vez hace que todos pierdan el turno. */
-    maxConcurrent: Math.min(Math.max(parseInt(clean(process.env.APIFY_MAX_CONCURRENT) || "2", 10) || 2, 1), 4),
+    maxConcurrent: Math.min(Math.max(parseInt(clean(process.env.APIFY_MAX_CONCURRENT) || "4", 10) || 4, 1), 6),
     timeoutSec: Math.min(Math.max(parseInt(clean(process.env.APIFY_TIMEOUT_SEC) || "50", 10) || 50, 10), 300),
     actors: {
       search: clean(process.env.APIFY_SEARCH_ACTOR) || "apify/google-search-scraper",

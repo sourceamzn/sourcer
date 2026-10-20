@@ -751,7 +751,7 @@ function buildSourcesPayload(out, body, priceMax) {
    completo para actores lentos (Apify, descubrimiento). */
 function sourceCap(kind) {
   if (kind === "scraping" || kind === "wholesale") return 15000;
-  if (kind === "supplier_market" || kind === "marketplace") return 55000;
+  if (kind === "supplier_market" || kind === "marketplace") return 100000;
   if (kind === "discovery" || kind === "discovery_open" || kind === "discovery_multi") return 90000;
   return 20000;
 }
@@ -771,7 +771,7 @@ function raceBudget(workers, deadline) {
 async function searchSuppliers(body, priceMax, hooks) {
   hooks = hooks || {};
   const { adapters } = require("./index"); /* lazy: evita el ciclo index<->inverso */
-  const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1, explorar: 1, gemimarket: 1, selectavision: 1 };
+  const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1, explorar: 1, gemimarket: 1, selectavision: 1, gshopping: 1 };
   /* Primero las fuentes que buscan en toda la red (buscador, 1688, Alibaba,
      Google Shopping...) y las API de mayoristas: son las lentas y las que mas
      valen; las webs de catalogo fijo van detras. */
@@ -1429,7 +1429,7 @@ async function cascadeSuppliers(body, priceMax, hooks, srcEans) {
   body = Object.assign({}, body || {});
   hooks = hooks || {};
   const allowKeyword = config.match.allowKeyword !== false;
-  const totalMs = clampInt(body.budgetMs, 150000, 45000, 200000);
+  const totalMs = clampInt(body.budgetMs, 170000, 45000, 210000);
   const t0 = Date.now();
   let p1 = null, p1err = "", p2 = null, p2err = "";
   /* Las dos fases corren a la vez: la de EAN exacto y la de marca+modelo.
