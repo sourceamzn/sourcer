@@ -204,8 +204,10 @@ async function keepaSellerName(id) {
   _sellerCache[id] = name;
   return name;
 }
-async function keepaSearchProducts(term) {
-  const r = await keepaRequest("search", { type: "product", term: String(term), stats: "1" });
+async function keepaSearchProducts(term, page) {
+  const params = { type: "product", term: String(term), stats: "1" };
+  if (page != null && String(page) !== "" && Number(page) > 0) params.page = String(Number(page));
+  const r = await keepaRequest("search", params);
   if (!r.ok) return { ok: false, reason: r.reason, error: r.error };
   return { ok: true, products: (r.data && r.data.products) || [] };
 }
@@ -450,7 +452,7 @@ function eanZeroResult(body, priceMax, reason, message) {
 async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
   hooks = hooks || {};
   const { adapters } = require("./index");
-  const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1 };
+  const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1, explorar: 1, gemimarket: 1, selectavision: 1 };
   const rank = { gshopping_ean: 0, discovery: 0, discovery_open: 0, supplier_market: 1, wholesale: 2, marketplace: 2 };
   const candidates = Object.keys(adapters).filter(function (id) {
     const a = adapters[id];
@@ -468,7 +470,7 @@ async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
   if (!qlist.length) return eanZeroResult(body, priceMax, "producto_sin_ean");
   const budgetMs = clampInt(body && body.budgetMs, 110000, 15000, 180000);
   const deadline = Date.now() + budgetMs;
-  const concurrency = Math.max(2, Math.min(clampInt(body && body.concurrency, 10, 1, 16), candidates.length || 1));
+  const concurrency = Math.max(2, Math.min(clampInt(body && body.concurrency, 14, 1, 16), candidates.length || 1));
   const matches = [], above = [], searched = [], rejected = [], pendingAll = [];
   const seenKeys = {};
   let cursor = 0;
@@ -740,20 +742,23 @@ function buildSourcesPayload(out, body, priceMax) {
    presupuesto de la busqueda: se cortan a 25 s. El resto conserva el margen
    completo para actores lentos (Apify, descubrimiento). */
 function sourceCap(kind) {
-  return (kind === "scraping" || kind === "wholesale") ? 25000 : 110000;
+  if (kind === "scraping" || kind === "wholesale") return 14000;
+  if (kind === "supplier_market" || kind === "marketplace") return 30000;
+  if (kind === "discovery" || kind === "discovery_open" || kind === "discovery_multi") return 45000;
+  return 20000;
 }
 
 async function searchSuppliers(body, priceMax, hooks) {
   hooks = hooks || {};
   const { adapters } = require("./index"); /* lazy: evita el ciclo index<->inverso */
-  const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1, explorar: 1 };
+  const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1, explorar: 1, gemimarket: 1, selectavision: 1 };
   /* Primero las fuentes que buscan en toda la red (buscador, 1688, Alibaba,
      Google Shopping...) y las API de mayoristas: son las lentas y las que mas
      valen; las webs de catalogo fijo van detras. */
   const rank = { discovery: 0, supplier_market: 1, wholesale: 2, marketplace: 2 };
   const candidates = Object.keys(adapters).filter(function (id) {
     const a = adapters[id];
-    return !skip[id] && a && !a.exactOnly && a.actions && typeof a.actions.search === "function";
+    return !skip[id] && a && !a.exactOnly && !a.requiresAuth && a.actions && typeof a.actions.search === "function";
   }).sort(function (x, y) {
     const rx = rank[adapters[x].kind] != null ? rank[adapters[x].kind] : 5;
     const ry = rank[adapters[y].kind] != null ? rank[adapters[y].kind] : 5;
@@ -872,7 +877,7 @@ async function searchSuppliers(body, priceMax, hooks) {
      segundo plano (el frontend consulta el estado), asi que se le da margen. */
   const budgetMs = clampInt(body && body.budgetMs, 110000, 15000, 180000);
   const deadline = Date.now() + budgetMs;
-  const concurrency = Math.max(2, Math.min(clampInt(body && body.concurrency, 12, 1, 16), candidates.length || 1));
+  const concurrency = Math.max(2, Math.min(clampInt(body && body.concurrency, 16, 1, 16), candidates.length || 1));
   let cursor = 0;
 
   async function runOne(id) {
@@ -1392,24 +1397,33 @@ async function cascadeSuppliers(body, priceMax, hooks, srcEans) {
   const totalMs = clampInt(body.budgetMs, 150000, 45000, 200000);
   const t0 = Date.now();
   let p1 = null, p1err = "", p2 = null, p2err = "";
-  if (srcEans.length) {
+  /* Las dos fases corren a la vez: la de EAN exacto y la de marca+modelo.
+     Antes la fase 2 esperaba a que terminaran las fuentes lentas de la fase 1
+     y el total se iba a 100 s; el usuario veia "0 proveedores" tras una espera
+     larga. En paralelo el total queda en la fuente mas lenta (~50 s). */
+  const p1job = (async function () {
+    if (!srcEans.length) return;
     try {
       p1 = await searchSuppliersEan(Object.assign({}, body, {
-        budgetMs: Math.min(60000, Math.max(25000, Math.round(totalMs * 0.4)))
+        budgetMs: Math.min(50000, Math.max(20000, Math.round(totalMs * 0.55)))
       }), priceMax, hooks, srcEans);
     } catch (e) { p1err = String((e && e.message) || e); }
-  }
+  })();
+  const p2job = (async function () {
+    if (!allowKeyword) return;
+    /* Pequeno desfase para no lanzar dos peticiones simultaneas a la misma
+       fuente (CJ y AliExpress devuelven 429 con rafagas). */
+    await new Promise(function (r) { setTimeout(r, 1500); });
+    try {
+      p2 = await searchSuppliers(Object.assign({}, body, {
+        eanOnly: false, policy: "keyword", budgetMs: Math.max(20000, totalMs)
+      }), priceMax, hooks);
+    } catch (e) { p2err = String((e && e.message) || e); }
+  })();
+  await Promise.all([p1job, p2job]);
   const p1split = cascadeLib.splitOver((p1 && p1.matches) || []);
   const p1matches = p1split.matches;
   const p1count = p1matches.length;
-  if (allowKeyword && (!p1count || body.expand === true)) {
-    const left = Math.max(30000, totalMs - (Date.now() - t0));
-    try {
-      p2 = await searchSuppliers(Object.assign({}, body, {
-        eanOnly: false, policy: "keyword", budgetMs: left
-      }), priceMax, hooks);
-    } catch (e) { p2err = String((e && e.message) || e); }
-  }
   const srcId = (p1 && p1.identity) || (p2 && p2.identity) ||
     identity.freezeCard(identity.identityOf(body), body);
   const searched = cascadeLib.mergeSearched(
@@ -1541,30 +1555,69 @@ async function candidatesLarge(body) {
     if (pool.length && body && body.range == null) notes.push("Rangos usados: actual + " + ([30, 90, 180][Math.abs(seed) % 3]) + " d (rotacion por seed).");
   }
 
-  /* Palabra clave: Product Finder por titulo (si esta disponible) y busqueda. */
-  if (!pool.length && query) {
+  /* Palabra clave: primero la busqueda de Keepa, que ordena por relevancia
+     (maximo 20 resultados; Keepa retiro la paginacion de /search en 2026).
+     Para "Cargar mas" se usa el Product Finder restringido a la categoria del
+     producto y a fichas con ventas, y se filtra por tokens del titulo. Asi no
+     vuelven accesorios ni fichas con 0 ventas como en la version anterior. */
+  const page = num(body && body.page, 0);
+  if (!pool.length && query && page <= 0) {
+    const s = await keepaSearchProducts(query);
+    if (s.ok && s.products.length) {
+      pool = asinListOf(s.products);
+      via = "search";
+      notes.push("Busqueda '" + query + "': " + pool.length + " ASIN.");
+    } else if (!s.ok) errors.push("search:" + (s.reason || "error"));
+  }
+  if (!pool.length && query && page > 0) {
+    const catId = digits(body && body.hintCategory);
+    const selection = {
+      domainId: config.keepa.domain,
+      title: query,
+      perPage: 200,
+      page: page - 1,
+      productType: [0, 1],
+      sort: [["current_SALES", "desc"]],
+      current_SALES_gte: 1
+    };
+    if (catId) selection.categories_include = [String(catId)];
+    const f = await keepaFinder({ selection: selection });
+    if (f.ok && f.asins.length) {
+      pool = f.asins; via = "product_finder_page";
+      notes.push("Product Finder " + (catId ? ("categoria " + catId) : "sin categoria") + ", pagina " + page + ": " + f.asins.length + " ASIN.");
+    } else if (!f.ok) errors.push("finder_pagina:" + (f.reason || "error"));
+  }
+  if (!pool.length && query && page <= 0) {
     const f = await keepaFinder({
       selection: {
         domainId: config.keepa.domain,
         title: query,
         perPage: Math.min(200, Math.max(50, limit * 2)),
         productType: [0, 1],
-        sort: [["current_SALES", "desc"]]
+        sort: [["current_SALES", "desc"]],
+        current_SALES_gte: 1
       }
     });
     if (f.ok && f.asins.length) { pool = f.asins; via = "product_finder"; notes.push("Product Finder por titulo: " + f.asins.length + " ASIN."); }
     else if (!f.ok) errors.push("finder_titulo:" + (f.reason || "error"));
   }
-  if (!pool.length && query) {
-    const s = await keepaSearchProducts(query);
-    if (s.ok) {
-      pool = asinListOf(s.products);
-      via = via || "search";
-      notes.push("Busqueda '" + query + "': " + pool.length + " ASIN.");
-    } else errors.push("search:" + (s.reason || "error"));
-  }
 
   pool = uniqAsins(pool);
+  /* Pagina adicional sin resultados: es el final del pool, no un error. */
+  if (!pool.length && page > 0) {
+    return {
+      ok: true,
+      data: {
+        source: "inverso", kind: "candidates", via: "product_finder_page",
+        query: query, mode: categoryDigits ? "categoria" : "palabra", categoryName: categoryName,
+        categoryId: digits(body && body.hintCategory) || "",
+        count: 0, counts: { apt: 0, casi: 0, descarte: 0 }, candidates: [],
+        pool: 0, poolRemaining: 0, hasMore: false, seed: seed, page: page, params: p,
+        notes: ["No hay mas resultados en esta categoria."],
+        cost: { asinsScanned: 0, bestsellerCalls: bestsellerCalls, estimatedTokens: bestsellerCalls * 50 }
+      }
+    };
+  }
   if (!pool.length) {
     const attempted = (body && body.finder ? 1 : 0) + (categoryDigits ? 1 : 0) + (query ? 1 : 0);
     const tok = await keepaTokens();
@@ -1598,7 +1651,18 @@ async function candidatesLarge(body) {
     scanned += take;
     if (!chunk.length) continue;
     const got = await keepaProductsByAsins(chunk, 0);
-    const baseM = (got.products || []).map(metricsFromKeepa).filter(function (m) { return m.asin && m.pvp > 0; });
+    const qWords = query ? query.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(function (w) { return w.length >= 4; }) : [];
+    function keywordRelevant(m) {
+      /* Solo se aplica al Product Finder, cuya coincidencia por titulo es laxa.
+         La busqueda normal de Keepa ya viene ordenada por relevancia. */
+      if ((via !== "product_finder" && via !== "product_finder_page") || !qWords.length) return true;
+      const t = String(m.title || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      return qWords.every(function (w) { return t.indexOf(w.slice(0, 5)) !== -1; });
+    }
+    const baseM = (got.products || []).map(metricsFromKeepa).filter(function (m) {
+      return m.asin && m.pvp > 0 && keywordRelevant(m);
+    });
     /* Nombres de los vendedores con mas peso para separar Amazon, marca y terceros. */
     const bbCfg = config.buybox || { sellerLookups: 3 };
     let sellerLookups = 0;
@@ -1670,11 +1734,25 @@ async function candidatesLarge(body) {
 
   const tokensEstimate = scanned + bestsellerCalls * 50;
   notes.push("Escaneados " + scanned + " ASIN; coste Keepa estimado ~" + tokensEstimate + " tokens.");
+  /* Categoria dominante del lote: permite pedir mas paginas al Product Finder
+     sin salir del tipo de producto (proyectores, no despertadores). */
+  const catCounts = {};
+  out.forEach(function (m) {
+    const tree = m.categoryTree;
+    if (!tree || !tree.length) return;
+    const leaf = tree[tree.length - 1];
+    const id = String((leaf && (leaf.catId || leaf.id)) || leaf || "");
+    if (/^\d+$/.test(id)) catCounts[id] = (catCounts[id] || 0) + 1;
+  });
+  let categoryId = "";
+  let catBest = 0;
+  Object.keys(catCounts).forEach(function (id) { if (catCounts[id] > catBest) { catBest = catCounts[id]; categoryId = id; } });
   return {
     ok: true,
     data: {
       source: "inverso", kind: "candidates", via: via,
       query: query, mode: categoryDigits ? "categoria" : "palabra", categoryName: categoryName,
+      categoryId: categoryId,
       count: Math.min(out.length, limit), counts: counts,
       candidates: out.slice(0, limit),
       pool: pool.length, poolRemaining: Math.max(0, filteredPool.length - cursor),

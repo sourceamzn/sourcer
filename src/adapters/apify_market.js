@@ -1,4 +1,4 @@
-﻿/* Fuentes de PROVEEDOR/FABRICANTE vÃ­a Apify (una sola clave: APIFY_TOKEN).
+﻿/* Fuentes de PROVEEDOR/FABRICANTE vía Apify (una sola clave: APIFY_TOKEN).
 
    1688, Alibaba, Made-in-China, Google Shopping y busqueda por foto.
    Cada actor tiene su propio esquema de entrada (verificado en su ficha de
@@ -55,7 +55,7 @@ function textOf(v) {
   if (v == null) return "";
   if (typeof v === "string") return v.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   if (typeof v === "number" || typeof v === "boolean") return String(v);
-  if (Array.isArray(v)) return v.map(textOf).filter(Boolean).join(" Â· ");
+  if (Array.isArray(v)) return v.map(textOf).filter(Boolean).join(" · ");
   if (typeof v === "object") return textOf(v.value != null ? v.value : (v.name || v.text || v.label || ""));
   return "";
 }
@@ -92,22 +92,31 @@ function listOf(v) {
 
 function isEur(cur, id) {
   if (id === "gshopping") return true; /* se pide country=es */
-  return /â‚¬|eur/i.test(cur);
+  return /€|eur/i.test(cur);
 }
+
+/* Mercados que devuelven el precio sin moneda en el JSON: se declara la suya
+   (1688 cotiza en CNY; Alibaba y Made-in-China en USD). Asi `priceText` no
+   sale como un numero suelto que parezca euros. */
+const CURRENCY_DEFAULT = { a1688: "CNY", alibaba: "USD", madeinchina: "USD" };
 
 function toItem(o, id, label, candidate) {
   const url = String(first(o, ["product_url", "url", "link", "productUrl", "productLink", "detailUrl", "itemUrl", "href", "source_url"]) || "");
-  const supplier = String(first(o, ["company_name", "shop_name", "supplier", "supplierName", "companyName", "sellerName", "seller_name", "seller", "merchant", "merchant_name", "merchantName", "store", "source", "source_name"]) || label);
-  const cur = currencyOf(o);
+  const supplier = String(first(o, ["company_name", "shop_name", "sellerName", "supplier", "supplierName", "companyName", "seller_name", "seller", "merchant", "merchant_name", "merchantName", "store", "source", "source_name"]) || label);
+  const cur = currencyOf(o) || CURRENCY_DEFAULT[id] || "";
   const lo = priceOf(first(o, ["priceNumeric", "min_price", "price_min", "price", "priceMin", "minPrice", "unitPrice", "salePrice", "extractedPrice", "extracted_price", "priceRange"]));
   const hi = priceOf(first(o, ["max_price", "price_max", "priceMax", "maxPrice"]));
   const eur = isEur(cur, id);
   let priceText = "";
   if (lo && !eur) {
     const sym = cur || "";
-    priceText = (sym ? sym + " " : "") + lo + (hi && hi !== lo ? "â€“" + hi : "");
+    priceText = (sym ? sym + " " : "") + lo + (hi && hi !== lo ? "–" + hi : "");
   }
-  const moq = moqOf(first(o, ["moq", "min_order", "minOrder", "minimumOrder", "minOrderQuantity", "minOrderQuantity"]));
+  /* 1688 publica el tramo de precio por cantidad (`priceTiers`); el primer
+     tramo es el pedido minimo real, no un campo aparte. */
+  const tiers = Array.isArray(o.priceTiers) ? o.priceTiers.filter(function (t) { return t && t.price != null; }) : [];
+  const moq = moqOf(first(o, ["moq", "min_order", "minOrder", "minimumOrder", "minOrderQuantity", "minOrderQuantity"])) ||
+    (tiers.length ? moqOf(tiers[0].quantity) : null);
   const platform = String(first(o, ["provider", "platform", "marketplace"]) || id);
   /* Identidad y ficha completa: sin esto, una oferta china llega "desnuda" y
      el cotejo no puede comparar marca, modelo, color, medidas ni caracteristicas. */
@@ -151,7 +160,17 @@ function toItem(o, id, label, candidate) {
     attrs: {
       currency: cur,
       platform: platform,
-      factory: /manufactur|factory|fabric/i.test(String(first(o, ["business_type", "seller_type", "sellerType"]) || "")) || o.is_factory === true || o.isFactory === true,
+      factory: /manufactur|factory|fabric|生产|加工|工厂/i.test(String(first(o, ["business_type", "seller_type", "sellerType"]) || "")) || o.is_factory === true || o.isFactory === true,
+      sellerType: textOf(first(o, ["seller_type", "sellerType", "business_type"])),
+      sellerUrl: String(first(o, ["sellerUrl", "seller_url", "shopUrl", "companyUrl"]) || ""),
+      offerId: String(first(o, ["offerId", "offer_id", "productId", "product_id"]) || ""),
+      verified: o.isVerified === true || o.businessInspection === true || o.factoryInspection === true,
+      city: textOf(first(o, ["city"])),
+      province: textOf(first(o, ["province"])),
+      bookedCount: textOf(first(o, ["bookedCount", "booked_count"])),
+      salesText: textOf(first(o, ["salesText", "sales_text"])),
+      repurchaseRate: textOf(first(o, ["repurchaseRate", "repurchase_rate"])),
+      priceTiers: tiers.map(function (t) { return { quantity: textOf(t.quantity), price: priceOf(t.price) }; }).slice(0, 8),
       description: description,
       specs: specs,
       color: color,
@@ -407,7 +426,7 @@ async function searchByImage(body) {
     { estCost: 0.10, timeoutSec: 90, op: apify.newOp() }
   );
   if (!r.ok) return { ok: false, reason: r.reason, detail: r.detail };
-  const items = dedupe(r.items.map(function (o) { return toItem(o, "foto", "BÃºsqueda por foto", true); }), max);
+    const items = dedupe(r.items.map(function (o) { return toItem(o, "foto", "Búsqueda por foto", true); }), max);
   return {
     ok: items.length > 0,
     reason: items.length ? null : "sin_resultados",
@@ -485,7 +504,7 @@ const gshoppingEan = {
 
 const foto = {
   id: "foto",
-  label: "BÃºsqueda por foto (Apify)",
+  label: "Búsqueda por foto (Apify)",
   kind: "supplier_market",
   /* No participa en searchSuppliers (necesita imagen, no texto): sin accion search. */
   actions: {
