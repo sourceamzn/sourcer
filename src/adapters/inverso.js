@@ -751,8 +751,9 @@ function buildSourcesPayload(out, body, priceMax) {
    completo para actores lentos (Apify, descubrimiento). */
 function sourceCap(kind) {
   if (kind === "scraping" || kind === "wholesale") return 15000;
-  if (kind === "supplier_market" || kind === "marketplace") return 100000;
-  if (kind === "discovery" || kind === "discovery_open" || kind === "discovery_multi") return 90000;
+  if (kind === "supplier_market") return 70000;
+  if (kind === "marketplace") return 25000;
+  if (kind === "discovery" || kind === "discovery_open" || kind === "discovery_multi") return 60000;
   return 20000;
 }
 
@@ -1123,16 +1124,37 @@ async function searchSuppliers(body, priceMax, hooks) {
     if (hooks.onSource) { try { hooks.onSource(entry, recsOut); } catch (e) {} }
   }
 
-  const workers = [];
-  for (let w = 0; w < concurrency; w++) {
-    workers.push((async function () {
-      while (cursor < candidates.length) {
-        const id = candidates[cursor++];
-        await runOne(id);
-      }
-    })());
+  /* Dos oleadas: primero todo lo gratis (buscador, tiendas, mayoristas con
+     feed). Solo si eso no deja material revisable se gastan tokens de Apify.
+     Antes se lanzaban los 5 actores en cada busqueda y agotaban la cuenta. */
+  async function runWave(list) {
+    let idx = 0;
+    const ws = [];
+    const n = Math.min(concurrency, list.length || 1);
+    for (let w = 0; w < n; w++) {
+      ws.push((async function () {
+        while (idx < list.length) {
+          const id = list[idx++];
+          await runOne(id);
+        }
+      })());
+    }
+    await raceBudget(ws, deadline);
   }
-  await raceBudget(workers, deadline);
+  const PAID_APIFY = { a1688: 1, alibaba: 1, madeinchina: 1, aliexpress_apify: 1 };
+  const freeSources = candidates.filter(function (id) { return !PAID_APIFY[id]; });
+  const paidSources = candidates.filter(function (id) { return PAID_APIFY[id]; });
+  await runWave(freeSources);
+  const revisable = matches.length + review.length + above.length;
+  if (revisable < 3 && paidSources.length && Date.now() < deadline - 12000) {
+    await runWave(paidSources);
+  } else if (paidSources.length) {
+    paidSources.forEach(function (id) {
+      const entry = { source: id, sourceLabel: adapters[id].label || id, ok: false, count: 0, reason: "omitida_para_ahorrar_tokens", ms: 0 };
+      searched.push(entry);
+      if (hooks.onSource) { try { hooks.onSource(entry, []); } catch (e) {} }
+    });
+  }
 
   /* Fase 4 · las ofertas "a revisar" sin EAN se contrastan abriendo su ficha
      (JSON-LD: gtin/mpn/sku/marca) y se vuelven a puntuar. Si el EAN leido es
