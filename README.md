@@ -97,6 +97,21 @@ devuelve sus ASINs. `storefronts/reverse` parte de un ASIN y devuelve los
 vendedores que lo ofrecen (SP-API `getItemOffers` cuando hay credenciales) y la
 búsqueda de ese ASIN en cada fuente del PDF. Regla fija: nunca crea ASIN.
 
+## Fabricante / distribuidor / mayorista por EAN (v0.29)
+
+`POST /suppliers/start` lanza ahora, en paralelo a la cascada de ofertas, el
+buscador de **quien suministra** el producto (`adapters/fabricantes.js` +
+`lib/leads.js`). Hace las mismas busquedas que se hacen a mano en Google
+(`"<EAN>" mayorista`, `"<EAN>" distribuidor`, `"<EAN>" al por mayor`,
+`"<marca>" distribuidor oficial España`, `"<marca>" "<modelo>" mayorista`...),
+agrupa los resultados por dominio y los clasifica: fabricante, distribuidor
+oficial, mayorista, marketplace B2B, base de datos EAN y minorista (apartado).
+Despues abre las mejores paginas para confirmar EAN, precios tras registro,
+email/telefono y enlace a "distribuidores/profesionales". No exige precio:
+los proveedores B2B casi nunca lo publican. El resultado llega en
+`result.leads` y la interfaz lo muestra arriba del todo. Solo esta parte:
+`POST /sourcing/inverso/leads`.
+
 ## Tarifas, liquidaciones y newsletters (canales)
 
 `tarifa.js` y `newsletters.js` normalizan ficheros/correos al mismo contrato.
