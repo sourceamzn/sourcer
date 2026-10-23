@@ -119,14 +119,14 @@ test("plan: terceros < 5 % descarta", () => {
   };
   assert.equal(plan.planFor(m, plan.PLAN_DEFAULT).estado, "descarte");
 });
-test("plan: un unico tercero en la Buy Box solo descarta en modo estricto", () => {
+test("plan: un unico tercero con la Buy Box (97 %) no es oportunidad: no se comparte (regla del cliente)", () => {
   const m = {
     pvp: 50, sales: 20, brand: "Acme",
     buyBox: { known: true, classified: true, amazonShare: 0, manufacturerShare: 0, thirdShare: 0.97, unknownShare: 0, thirdSellers: 1, topThirdShare: 0.97, sellers: 1 }
   };
   const normal = plan.planFor(m, plan.PLAN_DEFAULT);
   assert.equal(normal.buyBox.kind, "a_revisar");
-  assert.equal(normal.estado, "apt");
+  assert.equal(normal.estado, "descarte");
   assert.equal(normal.buyBox.requireTwoSellers, false);
   const strict = plan.planFor(m, Object.assign({}, plan.PLAN_DEFAULT, { requireTwoSellers: 1 }));
   assert.equal(strict.estado, "descarte");
