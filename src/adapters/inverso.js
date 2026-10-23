@@ -240,10 +240,10 @@ async function keepaProductsByAsins(asins, offers, opts) {
         out.push(p);
       });
     } else if (!r.ok) {
-      return { ok: out.length > 0, products: out, reason: r.reason };
+      return { ok: out.length > 0, products: out, reason: r.reason, fetched: missing.length };
     }
   }
-  return { ok: true, products: out };
+  return { ok: true, products: out, fetched: missing.length };
 }
 const _sellerCache = {};
 async function keepaSellerName(id) {
@@ -338,6 +338,22 @@ async function keepaFinder(body) {
   const d = r.data || {};
   const asins = d.asinList || d.asins || [];
   return { ok: true, asins: Array.isArray(asins) ? asins : [] };
+}
+
+/* Product Finder con filtros de arbitraje: al menos 3 ofertas nuevas y una
+   oferta FBA de terceros con precio. Asi el pool ya llega sin los productos
+   que la regla de Buy Box descartaria (Amazon/marca en solitario), en vez de
+   pagar tokens por descubrirlo despues. Si Keepa rechaza algun filtro, se
+   repite la consulta sin filtros (nunca se queda sin pool por esto). */
+const ARBITRAGE_FILTERS = { current_COUNT_NEW_gte: 3, current_NEW_FBA_gte: 100 };
+async function finderSafe(selection, notes) {
+  const withF = Object.assign({}, selection, ARBITRAGE_FILTERS);
+  let f = await keepaFinder({ selection: withF });
+  if (f.ok && f.asins.length) { f.filtered = true; return f; }
+  if (!f.ok && notes) notes.push("Product Finder rechazo los filtros de arbitraje (" + (f.reason || "error") + "); se repite sin filtros.");
+  f = await keepaFinder({ selection: selection });
+  f.filtered = false;
+  return f;
 }
 
 /* ---------- Fase 2 · buscar proveedor por debajo del precio maximo ---------- */
@@ -1743,9 +1759,27 @@ async function candidatesLarge(body) {
     else if (!f.ok) errors.push("finder:" + (f.reason || "error"));
   }
 
-  /* Categoria: dos listas (rango actual + otro rotado por seed). */
+  /* Categoria: primero Product Finder por categoria raiz con filtros de
+     arbitraje y ordenado por BSR (~10 tokens + 1 por cada 100 ASIN). La lista
+     Best Sellers (50 tokens cada una) trae los mas vendidos, que en categorias
+     como Electronica son casi todos de Amazon o de la marca (Echo, Fire TV,
+     Kindle...) y la regla de Buy Box los descarta todos: 0 resultados. */
+  if (!pool.length && categoryDigits && !(body && body.range != null && String(body.range) !== "")) {
+    const baseSel = {
+      domainId: config.keepa.domain,
+      perPage: Math.min(500, Math.max(200, limit * 6)), productType: [0, 1],
+      sort: [["current_SALES", "asc"]], current_SALES_gte: 1
+    };
+    let fc = await finderSafe(Object.assign({ rootCategory: [Number(categoryDigits)] }, baseSel), notes);
+    /* Si Keepa no acepta rootCategory, se prueba con categories_include. */
+    if (!fc.ok || !fc.asins.length) fc = await finderSafe(Object.assign({ categories_include: [String(categoryDigits)] }, baseSel), notes);
+    if (fc.ok && fc.asins.length) {
+      pool = fc.asins; via = "product_finder_categoria";
+      notes.push("Product Finder categoria" + (fc.filtered ? " (con 3+ ofertas y FBA de terceros)" : "") + ": " + fc.asins.length + " ASIN.");
+    } else if (!fc.ok) errors.push("finder_categoria:" + (fc.reason || "error"));
+  }
   if (!pool.length && categoryDigits) {
-    let ranges = [0, [30, 90, 180][Math.abs(seed) % 3]];
+    let ranges = [[0, 30, 90, 180][Math.abs(seed) % 4]];
     if (body && body.range != null && String(body.range) !== "") ranges = [num(body.range)];
     for (let i = 0; i < ranges.length; i++) {
       const b = await keepaBestSellers(categoryDigits, ranges[i]);
@@ -1756,7 +1790,7 @@ async function candidatesLarge(body) {
         notes.push("Best Sellers " + (ranges[i] ? (ranges[i] + " d") : "actual") + ": " + b.asins.length + " ASIN.");
       } else if (!b.ok) errors.push("bestsellers:" + (b.reason || "error"));
     }
-    if (pool.length && body && body.range == null) notes.push("Rangos usados: actual + " + ([30, 90, 180][Math.abs(seed) % 3]) + " d (rotacion por seed).");
+    if (pool.length && body && body.range == null) notes.push("Best Sellers como respaldo (rango rotado por seed).");
   }
 
   /* Palabra clave: primero la busqueda de Keepa, que ordena por relevancia
@@ -1777,16 +1811,14 @@ async function candidatesLarge(body) {
        de Buy Box, la vista parece vacia. Se completa con Product Finder por
        titulo ordenado por ventas: mismo producto, mucho mas donde elegir. */
     if (pool.length < Math.max(40, limit)) {
-      const f = await keepaFinder({
-        selection: {
+      const f = await finderSafe({
           domainId: config.keepa.domain,
           title: query,
           perPage: Math.min(200, Math.max(100, limit * 3)),
           productType: [0, 1],
           sort: [["current_SALES", "asc"]], /* current_SALES = BSR: asc = mas vendidos primero */
           current_SALES_gte: 1
-        }
-      });
+      }, notes);
       if (f.ok && f.asins.length) {
         const before = pool.length;
         pool = uniqAsins(pool.concat(f.asins));
@@ -1859,9 +1891,13 @@ async function candidatesLarge(body) {
      (titulo, precio, competencia), (3) Buy Box solo para los que pasan y solo
      los que faltan para llenar la pagina. Ademas, cache por ASIN y freno por
      saldo de tokens. */
-  const maxScan = Math.min(filteredPool.length, Math.max(limit * 2, 60));
-  let deepAsked = 0, preDropped = 0, stoppedForTokens = false;
-  while (out.length < limit && cursor < filteredPool.length && scanned < maxScan) {
+  /* El tope es de tokens gastados en el barrido ligero, no de ASIN mirados:
+     lo que ya esta en cache es gratis y se puede seguir bajando por el pool. */
+  const liteBudget = Math.max(limit * 3, 90);
+  const maxScan = Math.min(filteredPool.length, liteBudget * 4);
+  let deepAsked = 0, preDropped = 0, stoppedForTokens = false, liteSpent = 0;
+  const dropWhy = { sin_precio: 0, fuera_de_busqueda: 0, una_oferta: 0, sin_fba_terceros: 0 };
+  while (out.length < limit && cursor < filteredPool.length && scanned < maxScan && liteSpent < liteBudget) {
     let take = Math.min(limit, filteredPool.length - cursor, maxScan - scanned);
     const bud = keepaCost.budget(40);
     if (bud != null && bud < take) {
@@ -1873,6 +1909,7 @@ async function candidatesLarge(body) {
     scanned += take;
     if (!chunk.length) continue;
     const lite = await keepaProductsByAsins(chunk, 0, { buybox: false });
+    liteSpent += lite.fetched || 0;
     const qWords = query ? query.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(function (w) { return w.length >= 4; }) : [];
     function keywordRelevant(m) {
@@ -1892,10 +1929,11 @@ async function candidatesLarge(body) {
     /* Prefiltro barato: sin precio, fuera de la busqueda o con 0-1 ofertas
        (marca propia/monopolio, regla dura del PDF) no merecen Buy Box. */
     const pre = (lite.products || []).map(metricsFromKeepa).filter(function (m) {
-      if (!(m.asin && m.pvp > 0 && keywordRelevant(m))) return false;
-      if (p.bbRule && m.thirdParty != null && m.thirdParty <= 1) { preDropped++; counts.descarte = (counts.descarte || 0) + 1; return false; }
+      if (!(m.asin && m.pvp > 0)) { dropWhy.sin_precio++; return false; }
+      if (!keywordRelevant(m)) { dropWhy.fuera_de_busqueda++; return false; }
+      if (p.bbRule && m.thirdParty != null && m.thirdParty <= 1) { dropWhy.una_oferta++; preDropped++; counts.descarte = (counts.descarte || 0) + 1; return false; }
       /* Ninguna oferta FBA de terceros ahora mismo: no hay Buy Box que compartir. */
-      if (p.bbRule && m.fbaThird === 0) { preDropped++; counts.descarte = (counts.descarte || 0) + 1; return false; }
+      if (p.bbRule && m.fbaThird === 0) { dropWhy.sin_fba_terceros++; preDropped++; counts.descarte = (counts.descarte || 0) + 1; return false; }
       return true;
     }).sort(function (a, b) { return (b.sales || 0) - (a.sales || 0) || (a.bsr || 1e12) - (b.bsr || 1e12); });
     const need = Math.max(1, Math.ceil((limit - out.length) * 1.5));
@@ -1940,6 +1978,7 @@ async function candidatesLarge(body) {
   }
   if (!includeDiscards) notes.push("Se ocultan los descartados; activa 'Incluir descartados' para verlos.");
   notes.push("Keepa: " + scanned + " ASIN en barrido ligero, " + deepAsked + " con Buy Box, " + preDropped + " descartados antes de pedir Buy Box (0-1 ofertas o ningun FBA de terceros)." + (keepaCost.usage.tokensLeft != null ? (" Tokens restantes: " + keepaCost.usage.tokensLeft + ".") : ""));
+  notes.push("Descartes del barrido ligero: " + dropWhy.sin_fba_terceros + " sin FBA de terceros, " + dropWhy.una_oferta + " con 0-1 ofertas, " + dropWhy.sin_precio + " sin precio, " + dropWhy.fuera_de_busqueda + " fuera de la busqueda.");
   if (stoppedForTokens) notes.push("Barrido recortado para no dejar Keepa sin tokens: pulsa 'Cargar mas' cuando se recargue el saldo.");
 
   const sortKey = String((body && body.sort) || "aptitud");
@@ -1979,7 +2018,7 @@ async function candidatesLarge(body) {
     delete m.__bbHist;
   });
 
-  const tokensEstimate = scanned + deepAsked * 3 + bestsellerCalls * 50;
+  const tokensEstimate = liteSpent + deepAsked * 3 + bestsellerCalls * 50;
   notes.push("Escaneados " + scanned + " ASIN; coste Keepa estimado ~" + tokensEstimate + " tokens.");
   /* Categoria dominante del lote: permite pedir mas paginas al Product Finder
      sin salir del tipo de producto (proyectores, no despertadores). */
@@ -2007,6 +2046,7 @@ async function candidatesLarge(body) {
       seed: seed, page: num(body && body.page, 0),
       params: p, notes: notes,
       filters: { minFbaThird: p.minFbaThird, bbRule: p.bbRule, includeDiscards: includeDiscards, sort: sortKey, limit: limit },
+      dropped: dropWhy,
       cost: { asinsScanned: scanned, bestsellerCalls: bestsellerCalls, estimatedTokens: tokensEstimate }
     }
   };
