@@ -138,13 +138,15 @@ test("outreach: envia la bienvenida, programa el seguimiento y detecta la respue
   try {
     const out = require("../src/lib/outreach");
     await out.setSender({ name: "Kevin", company: "Brunea Group", phone: "600000000" });
-    /* Sin plantillas no se envia nada. */
-    const c0 = { id: "x.es", host: "x.es", status: "pendiente", emails: ["a@x.es"], products: [], history: [] };
-    out.startOutreach(c0, { now: true }); await docs.put("contacts", c0.id, c0);
-    const r0 = await out.tick("manual_force");
-    assert.equal(r0.sent, 0);
-    assert.ok(r0.errors.some((e) => /faltan_plantillas/.test(e)));
-    await docs.del("contacts", "x.es");
+    /* Sin plantillas guardadas se usan las del Plan de contacto (PDF). */
+    const def = await out.getTemplates();
+    assert.equal(def.fromPlan, true);
+    assert.equal(def.items.length, 3);
+    const pdf = out.render({ id: "t.es", host: "t.es", products: [{ brand: "Tegui", model: "374240", ean: "8424299374240" }] }, { name: "Kevin De Porras", company: "Brunea Group", phone: "600 000 000", web: "www.bruneagroup.com" }, def, 1, "A");
+    assert.equal(pdf.subject, "Solicitud de tarifa y condiciones de alta como cliente – Tegui");
+    assert.match(pdf.text, /^Buenos días equipo de ventas,\n\nMe llamo Kevin De Porras y escribo desde Brunea Group \(www\.bruneagroup\.com\)/);
+    assert.match(pdf.text, /- 374240 – EAN 8424299374240/);
+    assert.match(out.render({ id: "t.es", host: "t.es", products: [{ brand: "Tegui", model: "374240" }] }, { name: "K", company: "B", phone: "600 000 000" }, def, 3, "A").text, /unos minutos: 600 000 000\./);
     await out.setTemplates({ items: [{ subject: "Tarifa {marca} {referencia}", body: "Hola {proveedor},\n{productos}\n{firma}" }, { subject: "", body: "Seguimiento sobre {producto}" }] });
     const c = { id: "distrib.es", host: "distrib.es", status: "pendiente", emails: ["ventas@distrib.es"], products: [{ key: "B0A", name: "Teléfono T-71U", ean: "8410000000000", brand: "Tegui", model: "374240" }], history: [] };
     out.startOutreach(c, { now: true });
