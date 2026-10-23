@@ -149,3 +149,13 @@ test("imap: fetchFull descarga el mensaje completo como literal", async () => {
   await im.logout();
   srv.close();
 });
+
+test("tarifcross: tarifa PVP estima la compra con el descuento de distribuidor", () => {
+  const cross = require("../src/lib/tarifcross");
+  const t = cross._forTests;
+  assert.equal(Math.round(t.netOf({ price: 121 }, "pvp", 21, 0.30) * 100) / 100, 70);
+  const out = t.evaluate({ ean: "1", price: 60.5 }, { asin: "B0X", pvp: 60, sales: 300, thirdParty: 5, fbaThird: 3, offersFba: 4, historyDays: 400 }, require("../src/lib/plan").planParams({}), "pvp", 1, 0.30);
+  assert.equal(out.pvpRef, 60.5);
+  assert.ok(out.discNeeded > 0 && out.discNeeded < 100, String(out.discNeeded));
+  assert.equal(out.estimated, true);
+});
