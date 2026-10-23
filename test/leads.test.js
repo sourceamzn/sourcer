@@ -171,3 +171,38 @@ test("regla Buy Box: sin 2 FBA de terceros que la compartan -> descarte (sin ped
   assert.equal(m2.fbaThird, 2);
   assert.ok(!plan.planFor(Object.assign({}, m2, { pvp: 64, sales: 23 }), P).reasons.some((r) => /FBA de terceros/.test(r)));
 });
+
+test("historial: la misma busqueda de <24 h se sirve guardada (0 llamadas a Keepa)", async () => {
+  process.env.KEEPA_API_KEY = process.env.KEEPA_API_KEY || "x";
+  const { config } = require("../src/config");
+  config.keepa.apiKey = config.keepa.apiKey || "x";
+  const docs = require("../src/lib/docstore");
+  const mem = {};
+  docs._setForTests({ kind: "mem", async list(c) { return Object.values(mem[c] || {}); }, async get(c, id) { return (mem[c] || {})[id] || null; }, async put(c, id, d) { mem[c] = mem[c] || {}; mem[c][id] = JSON.parse(JSON.stringify(d)); return d; }, async del(c, id) { const h = !!(mem[c] && mem[c][id]); if (h) delete mem[c][id]; return h; } });
+  const http = require("../src/lib/http");
+  const orig = http.jsonFetch;
+  let calls = 0;
+  http.jsonFetch = async (url) => {
+    calls++;
+    const u = new URL(url); const path = u.pathname.slice(1); const p = Object.fromEntries(u.searchParams);
+    if (path === "search") return { ok: true, status: 200, data: { tokensConsumed: 10, tokensLeft: 900, products: [{ asin: "B0HIST0001" }, { asin: "B0HIST0002" }] } };
+    if (path === "query") return { ok: true, status: 200, data: { tokensConsumed: 10, tokensLeft: 900, asinList: [] } };
+    if (path === "product") { const as = p.asin.split(","); return { ok: true, status: 200, data: { tokensConsumed: 1, tokensLeft: 900, products: as.map((a) => { const cur = []; cur[1] = 4000; cur[3] = 500; cur[11] = 6; return { asin: a, title: "Freidora de aire 5L", stats: { current: cur, avg90: [], buyBoxStats: { A1: { percentageWon: 50, isFBA: true }, A2: { percentageWon: 50, isFBA: true } } } }; }) } }; }
+    return { ok: true, status: 200, data: { tokensConsumed: 0 } };
+  };
+  try {
+    const inv = require("../src/adapters/inverso");
+    const body = { query: "freidora", limit: 10, filters: { minFbaThird: 2, bbRule: 1, requireTwoSellers: 0 } };
+    const r1 = await inv.actions.candidates(body);
+    assert.ok(r1.ok && r1.data.candidates.length > 0, "primera busqueda con resultados: " + JSON.stringify(r1).slice(0, 600));
+    const n1 = calls;
+    const r2 = await inv.actions.candidates(Object.assign({}, body, { seed: 999 }));
+    assert.equal(r2.data.fromHistory, true);
+    assert.equal(calls, n1, "sin llamadas nuevas a Keepa");
+    assert.equal(r2.data.candidates.length, r1.data.candidates.length);
+    const r3 = await inv.actions.candidates(Object.assign({}, body, { refresh: true }));
+    assert.ok(!r3.data.fromHistory);
+    const h = require("../src/lib/history");
+    assert.equal((await h.list("candidates")).length, 1);
+  } finally { http.jsonFetch = orig; }
+});
