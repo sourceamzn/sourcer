@@ -296,6 +296,46 @@ async function sendPrepared(c, sd, mail, session) {
   return { ok: true, messageId: r.messageId };
 }
 
+/* Mensaje escrito a mano desde el chat del proveedor. Va en el mismo hilo
+   (In-Reply-To al ultimo mensaje) y, si habia una secuencia en marcha, la
+   pausa para que no salga un recordatorio automatico despues de tu mensaje. */
+async function sendManual(c, input) {
+  input = input || {};
+  if (!mailReady()) return { ok: false, reason: "smtp_no_configurado" };
+  const text = String(input.text || "").trim();
+  if (!text) return { ok: false, reason: "mensaje_vacio" };
+  const o = c.outreach || {};
+  const to = String(input.to || (c.emails || [])[o.emailIdx || 0] || "").trim();
+  if (!to) return { ok: false, reason: "sin_email" };
+  const sd = await getSender();
+  const s = config.mail.smtp;
+  const th = c.thread || [];
+  const lastIn = th.filter(function (m) { return m.dir === "in" && m.msgId; }).slice(-1)[0];
+  const ids = (o.messageIds || []).concat(c.manualMsgIds || []);
+  const lastSubj = (th.slice(-1)[0] || {}).subject || ((o.sentLog || []).slice(-1)[0] || {}).subject || "";
+  const subject = String(input.subject || "").trim() || (lastSubj ? (/^re:/i.test(lastSubj) ? lastSubj : "Re: " + lastSubj) : ("Consulta · " + (sd.company || "")));
+  const refs = ids.slice(-5).concat(lastIn ? [lastIn.msgId] : []);
+  const r = await smtp.send(smtpOpts(), {
+    from: s.from, fromName: s.fromName || [sd.name, sd.company].filter(Boolean).join(" · "),
+    to: to, subject: subject, text: text,
+    inReplyTo: lastIn ? lastIn.msgId : (ids.slice(-1)[0] || null), references: refs.length ? refs : null
+  });
+  c.manualMsgIds = (c.manualMsgIds || []).concat([r.messageId]).slice(-30);
+  threadAdd(c, { dir: "out", manual: true, to: to, subject: subject, text: text });
+  if (c.status === "pendiente") { c.status = "contactado"; c.contactedAt = c.contactedAt || nowIso(); }
+  if (c.outreach && ["activo", "revision"].indexOf(c.outreach.state) !== -1) {
+    c.outreach.state = "pausado"; c.outreach.pausedByManual = true; c.outreach.draft = null;
+    hist(c, "secuencia", "Secuencia en pausa: has escrito a mano al proveedor.");
+  }
+  hist(c, "envio", "Mensaje escrito a mano enviado a " + to + ": «" + subject.slice(0, 120) + "»");
+  /* Copia en Enviados (si se puede leer el buzon). */
+  if (imapReady() && cfg().saveSent) {
+    try { const im = await openImap(); const box = await findSentBox(im); if (box) await im.append(box, r.raw); await im.logout(); } catch (e) {}
+  }
+  try { events.add("outreach", { phase: "manual", contact: c.id, to: to }); } catch (e) {}
+  return { ok: true, messageId: r.messageId };
+}
+
 /* Aprobar (opcionalmente editado) el correo pendiente de revision. */
 async function approveDraft(c, edit) {
   const o = c.outreach;
@@ -329,9 +369,9 @@ function baseDomain(h) { return String(h || "").toLowerCase().replace(/^www\./, 
 function indexContacts(list) {
   const byMsg = {}, byEmail = {}, byDomain = {};
   list.forEach(function (c) {
-    const o = c.outreach;
-    if (!o || !o.attempts) return;
-    (o.messageIds || []).forEach(function (m) { byMsg[m.toLowerCase()] = c; });
+    const o = c.outreach || {};
+    if (!o.attempts && !(c.manualMsgIds || []).length) return;
+    (o.messageIds || []).concat(c.manualMsgIds || []).forEach(function (m) { byMsg[String(m).toLowerCase()] = c; });
     (c.emails || []).forEach(function (e) { byEmail[String(e).toLowerCase()] = c; });
     const d = baseDomain(c.host);
     if (d) byDomain[d] = byDomain[d] || c;
@@ -363,7 +403,7 @@ function classifyMessage(msg, idx, ourAddress) {
   }
   if (!c) return null;
   return {
-    contact: c, how: how, from: from, subject: h.subject || "", date: h.date || "",
+    contact: c, how: how, from: from, subject: h.subject || "", date: h.date || "", msgId: String(h["message-id"] || "").trim().slice(0, 300),
     kind: bounce ? "rebote" : (auto ? "automatica" : (OPTOUT_RE.test(text) && text.length < 400 ? "baja" : "respuesta")),
     snippet: text.slice(0, 300), full: full
   };
@@ -434,7 +474,8 @@ async function applyFinding(f) {
       }
     } catch (e) {}
   }
-  threadAdd(c, { dir: "in", from: f.from, subject: f.subject || "", text: f.full || f.snippet || "", kind: f.kind, ai: ai ? { tipo: ai.tipo, resumen: ai.resumen || "" } : null, files: (f.attachments || []).map(function (a) { return a.filename; }) });
+  if (f.kind !== "automatica") c.unread = (c.unread || 0) + 1;
+  threadAdd(c, { dir: "in", msgId: f.msgId || "", from: f.from, subject: f.subject || "", text: f.full || f.snippet || "", kind: f.kind, ai: ai ? { tipo: ai.tipo, resumen: ai.resumen || "" } : null, files: (f.attachments || []).map(function (a) { return a.filename; }) });
   if (f.kind === "automatica") {
     hist(c, "automatica", "Respuesta automática de " + f.from + " (no para la secuencia): «" + String(f.subject || "").slice(0, 120) + "»");
     c.updatedAt = now; await docs.put(COLL, c.id, c); return;
@@ -725,7 +766,7 @@ async function status() {
 }
 
 module.exports = {
-  tick, testSend, status, metrics, startScheduler, startOutreach, pauseOutreach, approveDraft, rejectDraft,
+  tick, testSend, status, metrics, startScheduler, startOutreach, pauseOutreach, approveDraft, rejectDraft, sendManual,
   __applyForTests: applyFinding,
   PLAN_TEMPLATES, render, fill, varsFor, getTemplates, setTemplates, templateCount, sequenceLength, VARS,
   getSender, setSender, senderOk, mailReady, inWindow, inWindowFor, localeFor, classifyMessage, indexContacts, needsReview, prepare, variantOf

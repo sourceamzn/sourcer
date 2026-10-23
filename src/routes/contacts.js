@@ -138,6 +138,7 @@ router.patch("/:id", ah(async function (req, res) {
     }
     if (b.status === "respondido" || b.status === "tarifa") c.starred = true;
   }
+  if (b.seen) c.unread = 0;
   if (b.notes != null) c.notes = str(b.notes, 4000);
   if (b.starred != null) c.starred = Boolean(b.starred);
   /* Datos que usan las plantillas del plan de contacto. */
@@ -253,6 +254,23 @@ router.post("/:id/outreach", ah(async function (req, res) {
   c.updatedAt = new Date().toISOString();
   await docs.put(COLL, id, c);
   res.json({ ok: true, contact: c, mail: { smtp: outreach.mailReady() } });
+}));
+
+/* Mensaje escrito a mano desde el chat: { text, subject?, to? } */
+router.post("/:id/message", ah(async function (req, res) {
+  const id = str(req.params.id, 200);
+  const c = await docs.get(COLL, id);
+  if (!c) return res.status(404).json({ ok: false, reason: "no_encontrado" });
+  const b = req.body || {};
+  let r;
+  try { r = await outreach.sendManual(c, { text: String(b.text || "").slice(0, 20000), subject: str(b.subject, 300), to: str(b.to, 200) }); }
+  catch (e) { return res.status(502).json({ ok: false, reason: String((e && e.message) || e).slice(0, 200) }); }
+  if (!r.ok) return res.status(400).json(r);
+  c.unread = 0;
+  c.updatedAt = new Date().toISOString();
+  await docs.put(COLL, id, c);
+  await learn.syncContact(c);
+  res.json({ ok: true, contact: c });
 }));
 
 /* Iniciar la secuencia en todos los pendientes con email (o en los ids dados). */
