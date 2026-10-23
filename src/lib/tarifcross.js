@@ -60,18 +60,22 @@ function packOf(prod) {
 }
 
 /* Precio de la tarifa SIN IVA (asi cotizan casi todos los mayoristas). */
-function netOf(row, vatMode, vat) {
+/* vatMode: "sin" (precio de compra sin IVA), "con" (precio de compra con IVA)
+   o "pvp" (tarifa de venta al publico con IVA: se estima el precio de compra
+   con el descuento habitual de distribuidor, `pvpDiscount`, por defecto 30 %). */
+function netOf(row, vatMode, vat, pvpDiscount) {
   const p = num(row.net) || num(row.price);
   if (!(p > 0)) return 0;
+  if (vatMode === "pvp") return (p / (1 + vat / 100)) * (1 - (pvpDiscount == null ? 0.30 : pvpDiscount));
   return vatMode === "con" ? p / (1 + vat / 100) : p;
 }
 
 /* Resultado de una fila frente al plan del producto. */
-function evaluate(row, m, params, vatMode, phase) {
+function evaluate(row, m, params, vatMode, phase, pvpDiscount) {
   const p = params;
   const vat = num(p.vat), rec = num(p.recargo);
   const plan = planLib.planFor(m, p);
-  const net = netOf(row, vatMode, vat);
+  const net = netOf(row, vatMode, vat, pvpDiscount);
   const pack = m.pack || 1;
   const costReal = net * pack * (1 + (vat + rec) / 100);
   const room = plan.pvNet - plan.feesReal;
@@ -89,6 +93,14 @@ function evaluate(row, m, params, vatMode, phase) {
     phase: phase, estado: plan.estado, reasons: plan.reasons.slice(0, 4),
     bbKind: plan.buyBox && plan.buyBox.kind, feesSource: plan.fees && plan.fees.source
   };
+  if (vatMode === "pvp") {
+    /* Con tarifa PVP: cuanto descuento sobre ese PVP hay que pedir al distribuidor. */
+    const pvpRef = num(row.net) || num(row.price);
+    const pvpNet = pvpRef / (1 + vat / 100);
+    out.pvpRef = r2(pvpRef);
+    out.discNeeded = pvpNet > 0 && out.priceMaxNet > 0 ? r2(Math.max(0, 1 - out.priceMaxNet / pvpNet) * 100) : null;
+    out.estimated = true;
+  }
   /* Banda de precio de la tarifa frente a lo que se puede pagar. */
   if (!(plan.pvp > 0)) out.band = "sin_precio_amazon";
   else if (net <= out.priceMaxNet && out.priceMaxNet > 0) out.band = "margen";
@@ -151,7 +163,8 @@ async function create(input) {
   const run = {
     id: id, createdAt: now(), updatedAt: now(), state: "en_cola",
     fileName: String(input.fileName || "").slice(0, 120), source: String(input.source || "").slice(0, 60),
-    contactId: String(input.contactId || "").slice(0, 200), vatMode: input.vatMode === "con" ? "con" : "sin",
+    contactId: String(input.contactId || "").slice(0, 200), vatMode: ["con", "pvp"].indexOf(input.vatMode) !== -1 ? input.vatMode : "sin",
+    pvpDiscount: Math.min(0.7, Math.max(0, (Number(input.pvpDiscount) || 30) / 100)),
     params: input.params && typeof input.params === "object" ? input.params : {},
     total: items.length, sinEan: sinEan, sinPrecio: sinPrecio,
     looked: 0, found: 0, deep: 0, deepDone: 0, tokens: 0, waits: 0, notFound: 0, counts: {}, message: "En cola"
@@ -306,7 +319,7 @@ async function process1(run) {
       if (!b) { run.notFound++; return; }
       const m = d.metricsFromKeepa(b.p);
       m.pack = packOf(b.p);
-      const row = evaluate(it, m, params, run.vatMode, 1);
+      const row = evaluate(it, m, params, run.vatMode, 1, run.pvpDiscount);
       if (b.alt) row.alternatives = b.alt;
       rowsByEan[it.ean] = row;
     });
@@ -347,7 +360,7 @@ async function process1(run) {
       if (!p || !it) return;
       const m = d.metricsFromKeepa(p);
       m.pack = packOf(p);
-      const row = evaluate(it, m, params, run.vatMode, 2);
+      const row = evaluate(it, m, params, run.vatMode, 2, run.pvpDiscount);
       if (rowsByEan[ean] && rowsByEan[ean].alternatives) row.alternatives = rowsByEan[ean].alternatives;
       rowsByEan[ean] = row;
     });
