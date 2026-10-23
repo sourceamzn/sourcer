@@ -25,7 +25,8 @@
    - Sin ASIN/listing previo no hay oportunidad: nunca crea ASIN ni listings. */
 
 const { config, keepaReady, amazonReady } = require("../config");
-const { jsonFetch } = require("../lib/http");
+const httpLib = require("../lib/http");
+function jsonFetch() { return httpLib.jsonFetch.apply(null, arguments); }
 const store = require("../lib/store");
 
 const KEEPA = "https://api.keepa.com/";
@@ -2087,7 +2088,40 @@ const inverso = {
 
     /* Fase 1 · candidatos + filtro de precio maximo, todo ANTES de buscar proveedor. */
     candidates: async function (body) {
-      return candidatesLarge(body);
+      /* Historial: una busqueda identica de menos de 24 h se sirve guardada
+         (0 tokens). "Cargar mas" y "Actualizar lote" siempre van a Keepa. */
+      const historyLib = require("../lib/history");
+      body = body || {};
+      const page = num(body.page, 0);
+      const firstPage = page <= 0 && !body.finder && !(Array.isArray(body.exclude) && body.exclude.length);
+      const key = historyLib.candKey(body);
+      if (firstPage && body.useHistory !== false && body.refresh !== true) {
+        try {
+          const h = await historyLib.get("candidates", key);
+          if (h && h.fresh && h.data) {
+            return { ok: true, data: Object.assign({}, h.data, {
+              fromHistory: true, savedAt: h.savedAt, historyId: key,
+              notes: ["Busqueda guardada de " + new Date(h.savedAt).toLocaleString("es-ES", { timeZone: "Europe/Madrid" }) + ": 0 tokens. Pulsa Refrescar para repetirla en Keepa."].concat(h.data.notes || []),
+              cost: { asinsScanned: 0, bestsellerCalls: 0, estimatedTokens: 0 }
+            }) };
+          }
+        } catch (e) {}
+      }
+      const r = await candidatesLarge(body);
+      if (firstPage && r && r.ok && r.data && (r.data.candidates || []).length) {
+        try {
+          const data = Object.assign({}, r.data, { candidates: r.data.candidates.map(historyLib.slimCandidate) });
+          await historyLib.save("candidates", key, {
+            query: String(body.query || body.q || ""), categoryId: String(body.categoryId || body.category || ""),
+            mode: r.data.mode, count: r.data.count, counts: r.data.counts,
+            image: (r.data.candidates[0] && r.data.candidates[0].image) || "",
+            request: { query: body.query || "", categoryId: body.categoryId || "", sort: body.sort, limit: body.limit, includeDiscards: body.includeDiscards, filters: body.filters || {} }
+          }, data);
+          r.data.historyId = key;
+          r.data.savedAt = new Date().toISOString();
+        } catch (e) {}
+      }
+      return r;
     },
 
     /* Implementacion anterior, conservada para comparar/rollback manual. */

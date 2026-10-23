@@ -156,6 +156,37 @@ const config = {
      revisar" sin EAN: cuantas fichas se abren por busqueda y con que timeout. */
   /* Buscador de fabricante/distribuidor/mayorista por EAN (adapters/fabricantes).
      Lanza la busqueda manual ("<EAN>" mayorista...) y clasifica dominios. */
+  /* Correo saliente (SMTP de cPanel) y lectura de respuestas (IMAP).
+     cPanel: servidor mail.tudominio.com, SMTP 465 (SSL) e IMAP 993 (SSL),
+     usuario = direccion completa, contrasena de la cuenta de correo. */
+  mail: {
+    smtp: {
+      host: clean(process.env.SMTP_HOST), port: parseInt(clean(process.env.SMTP_PORT) || "465", 10) || 465,
+      user: clean(process.env.SMTP_USER), pass: process.env.SMTP_PASS || "",
+      from: clean(process.env.SMTP_FROM) || clean(process.env.SMTP_USER), fromName: clean(process.env.SMTP_FROM_NAME)
+    },
+    imap: {
+      host: clean(process.env.IMAP_HOST) || clean(process.env.SMTP_HOST), port: parseInt(clean(process.env.IMAP_PORT) || "993", 10) || 993,
+      user: clean(process.env.IMAP_USER) || clean(process.env.SMTP_USER), pass: process.env.IMAP_PASS || process.env.SMTP_PASS || "",
+      sentBox: clean(process.env.IMAP_SENT_BOX)
+    },
+    tlsStrict: clean(process.env.MAIL_TLS_STRICT || "0") === "1"
+  },
+  /* Secuencia de correos a fabricantes/distribuidores guardados. */
+  outreach: {
+    enabled: clean(process.env.OUTREACH_ENABLED || "1") !== "0",
+    autoStart: clean(process.env.OUTREACH_AUTO_START || "1") !== "0",
+    maxAttempts: Math.min(Math.max(parseInt(clean(process.env.OUTREACH_MAX_ATTEMPTS) || "10", 10) || 10, 1), 10),
+    minDays: Math.max(1, parseFloat(clean(process.env.OUTREACH_MIN_DAYS) || "2") || 2),
+    maxDays: Math.max(1, parseFloat(clean(process.env.OUTREACH_MAX_DAYS) || "3") || 3),
+    dailyLimit: Math.min(Math.max(parseInt(clean(process.env.OUTREACH_DAILY_LIMIT) || "40", 10) || 40, 1), 300),
+    perTick: Math.min(Math.max(parseInt(clean(process.env.OUTREACH_PER_TICK) || "6", 10) || 6, 1), 30),
+    tickMin: Math.min(Math.max(parseInt(clean(process.env.OUTREACH_TICK_MIN) || "10", 10) || 10, 2), 120),
+    hours: clean(process.env.OUTREACH_HOURS) || "9-19",
+    weekdays: clean(process.env.OUTREACH_WEEKDAYS) || "1-5",
+    tz: clean(process.env.OUTREACH_TZ) || "Europe/Madrid",
+    saveSent: clean(process.env.OUTREACH_SAVE_SENT || "1") !== "0"
+  },
   leads: {
     enabled: clean(process.env.LEADS_ENABLED || "1") !== "0",
     maxQueries: Math.min(Math.max(parseInt(clean(process.env.LEADS_MAX_QUERIES) || "8", 10) || 8, 2), 14),

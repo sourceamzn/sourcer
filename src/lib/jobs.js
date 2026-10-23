@@ -59,6 +59,28 @@ function start(body, inverso) {
       const rej = (job.result && job.result.rejected) || [];
       rej.forEach(function (x) { tl("reject", { source: x.source, name: x.name, reason: x.reason }); });
       tl("job", { phase: "end", state: job.state, error: job.error, matches: job.matches.length, rejected: rej.length });
+      /* Historial: el resultado queda guardado por ASIN/EAN (sin volver a
+         gastar Apify al reabrir la ficha). */
+      if (job.state === "done" && job.result) {
+        try {
+          const history = require("./history");
+          const key = history.supKey(body);
+          if (key) {
+            const r = job.result;
+            const slim = {
+              matches: (r.matches || []).slice(0, 40), overMax: (r.overMax || []).slice(0, 12), review: (r.review || []).slice(0, 25),
+              searched: r.searched || [], diagnosis: r.diagnosis || null, summary: r.summary || null, phases: r.phases || null,
+              identity: r.identity || null, cheapestVerified: r.cheapestVerified || null, leads: r.leads || null,
+              googleShopping: r.googleShopping || "", coverage: r.coverage || null, rejected: (r.rejected || []).slice(0, 40)
+            };
+            history.save("suppliers", key, {
+              asin: String((body && body.asin) || ""), ean: String((body && body.ean) || ""), name: String((body && body.name) || "").slice(0, 160),
+              image: String((body && body.image) || ""), leads: r.leads ? (r.leads.leads || []).length : 0, matches: (r.matches || []).length
+            }, slim).catch(function () {});
+            job.result.historyId = key;
+          }
+        } catch (e) {}
+      }
     })
     .catch(function (e) { job.state = "error"; job.error = String((e && e.message) || e); tl("error", { phase: "job", msg: job.error }); })
     .then(function () { job.finishedAt = new Date().toISOString(); job.running = []; });

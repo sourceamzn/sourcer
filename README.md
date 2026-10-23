@@ -112,6 +112,23 @@ los proveedores B2B casi nunca lo publican. El resultado llega en
 `result.leads` y la interfaz lo muestra arriba del todo. Solo esta parte:
 `POST /sourcing/inverso/leads`.
 
+## Historial de busquedas (v0.32)
+
+Las busquedas de productos se guardan (30 ultimas). Una busqueda identica de
+menos de 24 h se sirve guardada sin gastar tokens; "Refrescar" la repite en
+Keepa. Las busquedas de proveedores se guardan por ASIN/EAN (200 ultimas,
+validas 14 dias) y se muestran al abrir la ficha. Rutas: `GET /history`,
+`GET /history/:kind/:id`, `DELETE /history/:kind/:id`.
+
+## Fabricantes / distribuidores y correo automatico (v0.31-0.32)
+
+`/contacts` guarda los proveedores elegidos en "Buscar proveedores" y busca su
+email/telefono/WhatsApp/CIF en su web. `/outreach` envia por SMTP (cPanel) un
+correo de bienvenida y seguimientos en el mismo hilo cada 2-3 dias en horario
+laboral, hasta 10, y lee el buzon por IMAP: si contestan, para la secuencia,
+marca el contacto como favorito y crea una alerta; si piden la baja, para.
+Necesita Postgres (`DATABASE_URL`) para no perder contactos ni historial.
+
 ## Tarifas, liquidaciones y newsletters (canales)
 
 `tarifa.js` y `newsletters.js` normalizan ficheros/correos al mismo contrato.

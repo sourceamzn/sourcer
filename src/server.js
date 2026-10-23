@@ -8,6 +8,10 @@ const alerts = require("./routes/alerts");
 const suppliers = require("./routes/suppliers");
 const product = require("./routes/product");
 const tariffs = require("./routes/tariffs");
+const contacts = require("./routes/contacts");
+const historyRoutes = require("./routes/history");
+const outreachRoutes = require("./routes/outreach");
+const outreachLib = require("./lib/outreach");
 const events = require("./lib/events");
 const debug = require("./routes/debug");
 const security = require("./lib/security");
@@ -37,6 +41,9 @@ app.get("/health", health);
 app.get("/coverage", coverage);
 app.post("/selftest", apiLimit, requireApiKey, selftest);
 app.use("/alerts", apiLimit, requireApiKey, alerts);
+app.use("/contacts", apiLimit, requireApiKey, contacts);
+app.use("/history", apiLimit, requireApiKey, historyRoutes);
+app.use("/outreach", apiLimit, requireApiKey, outreachRoutes);
 app.post("/suppliers/start", apiLimit, requireApiKey, suppliers.startSuppliers);
 app.get("/suppliers/status/:id", apiLimit, requireApiKey, suppliers.statusSuppliers);
 app.get("/debug/events", events.guard, debug.getEvents);
@@ -62,6 +69,7 @@ if (require.main === module) {
     console.log("Claves API cargadas: " + config.apiKeys.length);
   });
   scheduler.start();
+  outreachLib.startScheduler();
 }
 
 module.exports = app;
