@@ -137,6 +137,11 @@ router.patch("/:id", ah(async function (req, res) {
       c.outreach.state = b.status === "descartado" ? "parado" : "respondido"; c.outreach.nextAt = null;
     }
     if (b.status === "respondido" || b.status === "tarifa") c.starred = true;
+    /* Desmarcar a mano «Ha respondido» sin respuesta real: la secuencia vuelve (en pausa). */
+    if (["pendiente", "contactado"].indexOf(b.status) !== -1 && c.outreach && c.outreach.state === "respondido" && !c.lastReply) {
+      c.outreach.state = "pausado"; c.outreach.nextAt = null;
+      c.history = (c.history || []).concat([{ at: now, type: "secuencia", text: "Secuencia recuperada (en pausa) al desmarcar «Ha respondido»." }]);
+    }
   }
   if (b.seen) c.unread = 0;
   if (b.notes != null) c.notes = str(b.notes, 4000);
@@ -239,7 +244,10 @@ router.post("/:id/outreach", ah(async function (req, res) {
   snapshot(c, { start: "inicio de la secuencia", resume: "reanudar", sendnow: "enviar ya", pause: "pausa", approve: "aprobación del correo", reject: "descarte del correo" }[action] || action);
   if (action === "start" || action === "resume" || action === "sendnow") {
     if (!(c.emails || []).length) return res.status(400).json({ ok: false, reason: "sin_email", hint: "Pulsa «Buscar email / teléfono» o añade un email a mano." });
-    if (c.outreach && ["respondido", "baja", "rechazado"].indexOf(c.outreach.state) !== -1) return res.status(400).json({ ok: false, reason: "ya_respondio" });
+    const blocked = action === "sendnow" ? ["baja", "rechazado"] : ["respondido", "baja", "rechazado"];
+    if (c.outreach && blocked.indexOf(c.outreach.state) !== -1) return res.status(400).json({ ok: false, reason: "ya_respondio" });
+    /* Forzar el siguiente correo aunque haya respondido: lo decides tu. */
+    if (action === "sendnow" && c.outreach && c.outreach.state === "respondido") c.outreach.state = "activo";
     if (!outreach.templateCount(await outreach.getTemplates())) return res.status(400).json({ ok: false, reason: "faltan_plantillas", hint: "Escribe al menos el correo de bienvenida en «Plantillas de correo»." });
     outreach.startOutreach(c, action === "sendnow" ? { now: true } : {});
   } else if (action === "pause") outreach.pauseOutreach(c);
