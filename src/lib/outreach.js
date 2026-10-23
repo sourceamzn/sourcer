@@ -35,6 +35,10 @@ function cfg() { return config.outreach; }
 function mailReady() { const s = config.mail.smtp; return Boolean(s.host && s.user && s.pass && s.from); }
 function imapReady() { const i = config.mail.imap; return Boolean(i.host && i.user && i.pass); }
 function nowIso() { return new Date().toISOString(); }
+/* Conversacion completa con el proveedor: enviados y recibidos, con su texto. */
+function threadAdd(c, m) {
+  c.thread = (c.thread || []).concat([Object.assign({ at: nowIso() }, m, { text: String(m.text || "").slice(0, 6000) })]).slice(-40);
+}
 function hist(c, type, text) { c.history = (c.history || []).concat([{ at: nowIso(), type: type, text: String(text).slice(0, 500) }]).slice(-120); }
 
 async function getSender() { return (await docs.get("settings", "sender")) || {}; }
@@ -262,6 +266,7 @@ async function sendPrepared(c, sd, mail, session) {
   o.messageIds = (o.messageIds || []).concat([r.messageId]).slice(-12);
   o.lastSentAt = now.toISOString();
   o.lastTo = to;
+  threadAdd(c, { dir: "out", n: mail.n, to: to, subject: mail.subject, text: mail.text, lang: mail.lang || "es" });
   o.sentLog = (o.sentLog || []).concat([{ at: o.lastSentAt, n: mail.n, to: to, subject: mail.subject, lang: mail.lang, variant: mail.variant || "" }]).slice(-12);
   o.draft = null;
   o.lastError = null;
@@ -429,6 +434,7 @@ async function applyFinding(f) {
       }
     } catch (e) {}
   }
+  threadAdd(c, { dir: "in", from: f.from, subject: f.subject || "", text: f.full || f.snippet || "", kind: f.kind, ai: ai ? { tipo: ai.tipo, resumen: ai.resumen || "" } : null, files: (f.attachments || []).map(function (a) { return a.filename; }) });
   if (f.kind === "automatica") {
     hist(c, "automatica", "Respuesta automática de " + f.from + " (no para la secuencia): «" + String(f.subject || "").slice(0, 120) + "»");
     c.updatedAt = now; await docs.put(COLL, c.id, c); return;
