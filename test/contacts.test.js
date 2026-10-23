@@ -79,4 +79,17 @@ test("contacts: guardar fusiona productos por dominio (almacen en memoria)", asy
   assert.ok(r3.body.contact.contactedAt);
   const l = await call("GET", "/");
   assert.equal(l.body.contacts.length, 1);
+  /* Deshacer: "Ha respondido" por error vuelve a "contactado" y recupera la secuencia. */
+  const r4 = await call("PATCH", "/distrib-levante.es", { status: "respondido" });
+  assert.equal(r4.body.contact.status, "respondido");
+  const r5 = await call("PATCH", "/distrib-levante.es", { undo: true });
+  assert.equal(r5.body.contact.status, "contactado");
+  const r6 = await call("PATCH", "/distrib-levante.es", { undo: true });
+  assert.equal(r6.status, 400);
+  /* Quitar y recuperar de la papelera. */
+  await call("DELETE", "/distrib-levante.es");
+  assert.equal((await call("GET", "/")).body.contacts.length, 0);
+  const r7 = await call("POST", "/distrib-levante.es/restore");
+  assert.equal(r7.body.contact.status, "contactado");
+  assert.equal((await call("GET", "/")).body.contacts.length, 1);
 });
