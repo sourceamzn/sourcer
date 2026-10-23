@@ -255,16 +255,14 @@ function buildLeadQueries(body, opts) {
   /* 2. Marca + referencia: las webs de material profesional (electricidad,
      ferreteria...) listan por referencia de fabricante, no por EAN. */
   if (hasModel) {
-    brands.slice(0, 2).forEach(function (b, i) {
-      add('"' + b + '" "' + model + '"', "modelo", "identidad");
-      if (i === 0 || brands.length > 1) add('"' + b + '" "' + model + '" mayorista', "modelo", "mayorista");
-    });
-    add('"' + model + '" ' + (who ? '"' + who + '" ' : "") + "distribuidor", "modelo", "distribuidor");
+    brands.slice(0, 2).forEach(function (b) { add('"' + b + '" "' + model + '"', "modelo", "identidad"); });
+    add('"' + who + '" "' + model + '" mayorista', "modelo", "mayorista");
   }
-  /* 3. Marca: quien la distribuye en Espana. */
+  /* 3. Marca: quien la distribuye en Espana (todas las marcas candidatas). */
   brands.slice(0, 2).forEach(function (b) {
     add('"' + b + '" distribuidor oficial ' + (lang === "es" ? "España" : ""), "marca", "distribuidor_oficial");
   });
+  if (hasModel) add('"' + model + '" ' + (who ? '"' + who + '" ' : "") + "distribuidor", "modelo", "distribuidor");
   if (who) add('"' + who + '" mayorista', "marca", "mayorista");
   if (ean) add(eanQ + " al por mayor", "ean", "mayorista");
   if (eans[1] && eans[1] !== ean) add('"' + eans[1] + '"', "ean", "identidad");

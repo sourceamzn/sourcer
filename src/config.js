@@ -158,7 +158,7 @@ const config = {
      Lanza la busqueda manual ("<EAN>" mayorista...) y clasifica dominios. */
   leads: {
     enabled: clean(process.env.LEADS_ENABLED || "1") !== "0",
-    maxQueries: Math.min(Math.max(parseInt(clean(process.env.LEADS_MAX_QUERIES) || "12", 10) || 12, 2), 14),
+    maxQueries: Math.min(Math.max(parseInt(clean(process.env.LEADS_MAX_QUERIES) || "8", 10) || 8, 2), 14),
     perQuery: Math.min(Math.max(parseInt(clean(process.env.LEADS_PER_QUERY) || "10", 10) || 10, 5), 20),
     pageChecks: Math.min(Math.max(parseInt(clean(process.env.LEADS_PAGE_CHECKS) || "8", 10) || 0, 0), 20),
     pageMs: Math.min(Math.max(parseInt(clean(process.env.LEADS_PAGE_MS) || "8000", 10) || 8000, 2000), 20000),

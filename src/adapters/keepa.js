@@ -8,6 +8,7 @@ async function request(path, params) {
     Object.assign({ key: config.keepa.apiKey, domain: String(config.keepa.domain) }, params)
   );
   const res = await jsonFetch(BASE + path + "?" + query.toString(), { method: "GET" }, 30000);
+  if (res && res.data && typeof res.data === "object") require("../lib/keepacost").note(path, res.data);
   if (!res.ok) return { ok: false, reason: "keepa_http_" + res.status, error: res.error };
   const data = res.data;
   if (data && typeof data === "object" && data.error) return { ok: false, reason: "keepa_error", error: data.error };

@@ -67,6 +67,7 @@ const gtinLib = require("../lib/gtin");
 const queriesLib = require("../lib/queries");
 const feesLib = require("../lib/fees");
 const spapi = require("../lib/spapi");
+const keepaCost = require("../lib/keepacost");
 
 /* ---------- metricas desde un producto Keepa ---------- */
 function keepaCur(prod, idx, scale) {
@@ -178,23 +179,44 @@ async function keepaRequest(path, params, method, body) {
   const opts = { method: method || "GET", headers: {} };
   if (body) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
   const res = await jsonFetch(KEEPA + path + "?" + query.toString(), opts, 40000);
+  if (res && res.data && typeof res.data === "object") keepaCost.note(path, res.data);
   if (!res.ok) return { ok: false, reason: "keepa_http_" + res.status, error: res.error };
   const data = res.data;
   if (data && typeof data === "object" && data.error) return { ok: false, reason: "keepa_error", error: data.error };
   return { ok: true, data: data };
 }
-async function keepaProductsByAsins(asins, offers) {
+/* opts.buybox (por defecto true): el historial de Buy Box cuesta +2 tokens por
+   producto. El barrido de candidatos lo pide solo para los que pasan el
+   prefiltro barato. Cache por ASIN (lib/keepacost) para no repetir fichas. */
+async function keepaProductsByAsins(asins, offers, opts) {
   if (!asins || !asins.length) return { ok: true, products: [] };
+  opts = opts || {};
+  const withBB = opts.buybox !== false;
   const out = [];
   /* `offers` (lista real de vendedores con flag FBA) cuesta ~6 tokens extra por
      cada 10 ofertas y producto. Sin ella Keepa no da el recuento FBA fiable. */
   const nOffers = offers === undefined ? 20 : Math.max(0, Math.min(parseInt(offers, 10) || 0, 100));
-  for (let i = 0; i < asins.length; i += 100) {
-    const chunk = asins.slice(i, i + 100).join(",");
-    const params = { asin: chunk, stats: "1", buybox: "1" };
+  const variant = nOffers >= 20 ? ("o" + nOffers) : (withBB ? "b" : "p");
+  const missing = [];
+  asins.forEach(function (a) {
+    const k = String(a || "").toUpperCase();
+    const hit = keepaCost.get(k, variant);
+    if (hit) out.push(hit); else missing.push(k);
+  });
+  for (let i = 0; i < missing.length; i += 100) {
+    const chunk = missing.slice(i, i + 100).join(",");
+    const params = { asin: chunk, stats: "1" };
+    if (withBB || nOffers >= 20) params.buybox = "1";
     if (nOffers >= 20) { params.offers = String(nOffers); params["only-live-offers"] = "1"; }
     const r = await keepaRequest("product", params);
-    if (r.ok && r.data && Array.isArray(r.data.products)) out.push.apply(out, r.data.products);
+    if (r.ok && r.data && Array.isArray(r.data.products)) {
+      r.data.products.forEach(function (p) {
+        if (p && p.asin) keepaCost.set(String(p.asin).toUpperCase(), variant, p);
+        out.push(p);
+      });
+    } else if (!r.ok) {
+      return { ok: out.length > 0, products: out, reason: r.reason };
+    }
   }
   return { ok: true, products: out };
 }
@@ -840,6 +862,9 @@ async function searchSuppliers(body, priceMax, hooks) {
   hooks = hooks || {};
   const { adapters } = require("./index"); /* lazy: evita el ciclo index<->inverso */
   const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1, explorar: 1, gemimarket: 1, selectavision: 1, gshopping: 1 };
+  /* El buscador de fabricantes ya lanza las busquedas de Google de este
+     producto: repetirlas en `discovery` duplicaba el gasto de Apify. */
+  if (body && body.__leadsRunning) skip.discovery = 1;
   /* Primero las fuentes que buscan en toda la red (buscador, 1688, Alibaba,
      Google Shopping...) y las API de mayoristas: son las lentas y las que mas
      valen; las webs de catalogo fijo van detras. */
@@ -1207,11 +1232,16 @@ async function searchSuppliers(body, priceMax, hooks) {
   /* APIFY_ALL=1 lanza siempre la oleada de pago (todas a la vez, sin orden por
      region). Por defecto solo si lo gratis no deja material revisable. */
   const forcePaid = String(process.env.APIFY_ALL || "").trim() === "1";
-  if ((forcePaid || revisable < 3) && paidSources.length && Date.now() < deadline - 12000) {
+  /* Los mercados chinos/B2B (1688, Alibaba, IndiaMART...) cobran por ejecucion
+     y no sirven para arbitraje de marcas con ASIN: apagados salvo
+     APIFY_PAID_WAVE=1 (o APIFY_ALL=1). Antes se lanzaban 9 actores cada vez
+     que una busqueda dejaba menos de 3 resultados, que es casi siempre. */
+  const paidWave = forcePaid || String(process.env.APIFY_PAID_WAVE || "").trim() === "1";
+  if (paidWave && (forcePaid || revisable < 3) && paidSources.length && Date.now() < deadline - 12000) {
     await runWave(paidSources);
   } else if (paidSources.length) {
     paidSources.forEach(function (id) {
-      const entry = { source: id, sourceLabel: adapters[id].label || id, ok: false, count: 0, reason: "omitida_para_ahorrar_tokens", ms: 0 };
+      const entry = { source: id, sourceLabel: adapters[id].label || id, ok: false, count: 0, reason: paidWave ? "omitida_para_ahorrar_tokens" : "desactivada_APIFY_PAID_WAVE", ms: 0 };
       searched.push(entry);
       if (hooks.onSource) { try { hooks.onSource(entry, []); } catch (e) {} }
     });
@@ -1798,14 +1828,26 @@ async function candidatesLarge(body) {
 
   let cursor = 0, scanned = 0, out = [];
   const counts = { apt: 0, casi: 0, descarte: 0 };
-  const maxScan = Math.min(filteredPool.length, Math.max(limit * 4, 120));
+  /* Coste: antes se pedian hasta 240 ASIN CON historial de Buy Box (3 tokens
+     cada uno = ~720 tokens por clic; con 21 tokens/min, 35 min de espera).
+     Ahora: (1) barrido ligero sin Buy Box (1 token/ASIN), (2) prefiltro barato
+     (titulo, precio, competencia), (3) Buy Box solo para los que pasan y solo
+     los que faltan para llenar la pagina. Ademas, cache por ASIN y freno por
+     saldo de tokens. */
+  const maxScan = Math.min(filteredPool.length, Math.max(limit * 2, 60));
+  let deepAsked = 0, preDropped = 0, stoppedForTokens = false;
   while (out.length < limit && cursor < filteredPool.length && scanned < maxScan) {
-    const take = Math.min(limit * 2, filteredPool.length - cursor, maxScan - scanned);
+    let take = Math.min(limit, filteredPool.length - cursor, maxScan - scanned);
+    const bud = keepaCost.budget(40);
+    if (bud != null && bud < take) {
+      if (bud < 10) { stoppedForTokens = true; break; }
+      take = bud;
+    }
     const chunk = filteredPool.slice(cursor, cursor + take);
     cursor += take;
     scanned += take;
     if (!chunk.length) continue;
-    const got = await keepaProductsByAsins(chunk, 0);
+    const lite = await keepaProductsByAsins(chunk, 0, { buybox: false });
     const qWords = query ? query.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(function (w) { return w.length >= 4; }) : [];
     function keywordRelevant(m) {
@@ -1822,8 +1864,22 @@ async function candidatesLarge(body) {
       if (!qWords.length) return true;
       return qWords.every(function (w) { return t.indexOf(w.slice(0, 5)) !== -1; });
     }
+    /* Prefiltro barato: sin precio, fuera de la busqueda o con 0-1 ofertas
+       (marca propia/monopolio, regla dura del PDF) no merecen Buy Box. */
+    const pre = (lite.products || []).map(metricsFromKeepa).filter(function (m) {
+      if (!(m.asin && m.pvp > 0 && keywordRelevant(m))) return false;
+      if (p.bbRule && m.thirdParty != null && m.thirdParty <= 1) { preDropped++; counts.descarte = (counts.descarte || 0) + 1; return false; }
+      return true;
+    }).sort(function (a, b) { return (b.sales || 0) - (a.sales || 0) || (a.bsr || 1e12) - (b.bsr || 1e12); });
+    const need = Math.max(1, Math.ceil((limit - out.length) * 1.5));
+    let deepList = pre.slice(0, need).map(function (m) { return m.asin; });
+    const bud2 = keepaCost.budget(40);
+    if (bud2 != null && bud2 < deepList.length * 3) { deepList = deepList.slice(0, Math.floor(bud2 / 3)); stoppedForTokens = stoppedForTokens || deepList.length < need; }
+    if (!deepList.length) continue;
+    deepAsked += deepList.length;
+    const got = await keepaProductsByAsins(deepList, 0);
     const baseM = (got.products || []).map(metricsFromKeepa).filter(function (m) {
-      return m.asin && m.pvp > 0 && keywordRelevant(m);
+      return m.asin && m.pvp > 0;
     });
     /* Nombres de los vendedores con mas peso para separar Amazon, marca y terceros. */
     const bbCfg = config.buybox || { sellerLookups: 3 };
@@ -1856,6 +1912,8 @@ async function candidatesLarge(body) {
     });
   }
   if (!includeDiscards) notes.push("Se ocultan los descartados; activa 'Incluir descartados' para verlos.");
+  notes.push("Keepa: " + scanned + " ASIN en barrido ligero, " + deepAsked + " con Buy Box, " + preDropped + " descartados antes de pedir Buy Box (0-1 ofertas)." + (keepaCost.usage.tokensLeft != null ? (" Tokens restantes: " + keepaCost.usage.tokensLeft + ".") : ""));
+  if (stoppedForTokens) notes.push("Barrido recortado para no dejar Keepa sin tokens: pulsa 'Cargar mas' cuando se recargue el saldo.");
 
   const sortKey = String((body && body.sort) || "aptitud");
   const hash = function (asin) { return seedHash(seed + "|" + asin); };
@@ -1894,7 +1952,7 @@ async function candidatesLarge(body) {
     delete m.__bbHist;
   });
 
-  const tokensEstimate = scanned + bestsellerCalls * 50;
+  const tokensEstimate = scanned + deepAsked * 3 + bestsellerCalls * 50;
   notes.push("Escaneados " + scanned + " ASIN; coste Keepa estimado ~" + tokensEstimate + " tokens.");
   /* Categoria dominante del lote: permite pedir mas paginas al Product Finder
      sin salir del tipo de producto (proyectores, no despertadores). */
@@ -2175,8 +2233,9 @@ const inverso = {
       const priceMax = num(body && (body.priceMax || body.maxPrice));
       const full = await fichaFromKeepa(body || {});
       /* Primero (y en paralelo) QUIEN lo suministra; despues, ofertas con precio. */
-      const leadsP = (body && body.leads === false) ? Promise.resolve(null) : findLeads(full, hooks);
-      const out = await searchSuppliers(full, priceMax, hooks);
+      const leadsOn = !(body && body.leads === false) && !(config.leads && config.leads.enabled === false);
+      const leadsP = leadsOn ? findLeads(full, hooks) : Promise.resolve(null);
+      const out = await searchSuppliers(Object.assign({}, full, { __leadsRunning: leadsOn }), priceMax, hooks);
       const lr = await leadsP;
       if (lr) {
         out.leads = lr.data;

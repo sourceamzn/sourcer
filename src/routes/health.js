@@ -86,6 +86,7 @@ function health(req, res) {
     },
     /* Consumo real de Apify desde el arranque (peticiones ejecutadas, no de cache). */
     apifyUsage: apifyLib.stats,
+    keepaUsage: require("../lib/keepacost").snapshot(),
     top20: top20.status(),
     adapters: list(),
     /* Catalogo del PDF con las particularidades por proveedor (EAN, stock
