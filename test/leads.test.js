@@ -116,3 +116,58 @@ test("leads: caso real Tegui (EAN-8 rellenado con ceros, marca Keepa Legrand, ti
     { eans: [b.ean], brand: "Legrand", brands: leads.brandCandidates(b) });
   assert.equal(r.leads[0].role, "fabricante");
 });
+
+test("leads: precio frente al maximo (B0DCW34G9T: PVP 64, max 32,48 con IVA)", () => {
+  const plan = require("../src/lib/plan");
+  const p = plan.planFor({ pvp: 64, sales: 23, fees: { referralPct: 7, fbaFee: 4.76, source: "keepa" } }, plan.PLAN_DEFAULT);
+  assert.ok(Math.abs(p.priceMax - 32.48) < 0.05);
+  assert.ok(Math.abs(p.priceMaxNet - p.priceMax / 1.21) < 0.02);
+  assert.ok(p.breakEven > p.priceMax);
+  const t = { priceMax: p.priceMax, priceMaxNet: p.priceMaxNet, breakEven: p.breakEven, breakEvenNet: p.breakEvenNet };
+  /* Mayorista sin indicar IVA: se asume sin IVA (prudente). */
+  assert.equal(leads.priceBand({ role: "mayorista", price: { price: 25, vat: null } }, t).band, "ok");
+  assert.equal(leads.priceBand({ role: "mayorista", price: { price: 30, vat: null } }, t).band, "justo");
+  assert.equal(leads.priceBand({ role: "mayorista", price: { price: 45, vat: "sin" } }, t).band, "caro");
+  /* Tienda: 32 con IVA = 26,4 sin IVA -> deja margen. */
+  assert.equal(leads.priceBand({ role: "minorista", price: { price: 32, vat: null } }, t).band, "ok");
+  assert.equal(leads.priceBand({ role: "mayorista" }, t).band, "sin_precio");
+  /* Orden: con margen > justo > sin precio > caro, aunque el caro sea fabricante. */
+  const L = [
+    { role: "fabricante", score: 130, priceCheck: { band: "caro" } },
+    { role: "mayorista", score: 90, priceCheck: { band: "sin_precio" } },
+    { role: "mayorista", score: 80, priceCheck: { band: "ok" } },
+    { role: "distribuidor_oficial", score: 95, priceCheck: { band: "justo" } }
+  ].sort(leads.compareLeads);
+  assert.deepEqual(L.map((x) => x.priceCheck.band), ["ok", "justo", "sin_precio", "caro"]);
+});
+
+test("leads: lee precio y si es con o sin IVA", () => {
+  assert.deepEqual(leads.priceFromText("Precio: 24,90 € + IVA"), { price: 24.9, vat: "sin" });
+  assert.deepEqual(leads.priceFromText("PVP 39,95 € IVA incluido"), { price: 39.95, vat: "con" });
+  const h = '<script type="application/ld+json">{"@type":"Product","offers":{"price":"18.50","priceCurrency":"EUR"}}</script><p>Precios sin IVA</p>';
+  const r = leads.priceFromHtml(h);
+  assert.equal(r.price, 18.5);
+  assert.equal(r.vat, "sin");
+});
+
+test("regla Buy Box: sin 2 FBA de terceros que la compartan -> descarte (sin pedir ofertas)", () => {
+  const inv = require("../src/adapters/inverso");
+  const plan = require("../src/lib/plan");
+  const P = Object.assign({}, plan.PLAN_DEFAULT, { requireTwoSellers: 0 });
+  const cur = []; cur[1] = 5500; cur[3] = 20; cur[10] = -1; cur[11] = 3; cur[18] = 6400;
+  /* Caso B0DCW34G9T: ninguna oferta FBA de terceros. */
+  const m0 = inv.metricsFromKeepa({ asin: "B0DCW34G9T", title: "x", stats: { current: cur, avg90: [] } });
+  assert.equal(m0.fbaThird, 0);
+  assert.equal(plan.planFor(Object.assign({}, m0, { pvp: 64, sales: 23 }), P).estado, "descarte");
+  /* Buy Box 90 d: Amazon + 1 FBA de tercero -> descarte. */
+  const cur2 = cur.slice(); cur2[10] = 5900;
+  const bst1 = { ATVPDKIKX0DER: { percentageWon: 70, isFBA: true }, A1SELLERFBA: { percentageWon: 30, isFBA: true } };
+  const m1 = inv.metricsFromKeepa({ asin: "B0X1", title: "x", stats: { current: cur2, avg90: [], buyBoxStats: bst1 } });
+  assert.equal(m1.fbaThird, 1);
+  assert.equal(plan.planFor(Object.assign({}, m1, { pvp: 64, sales: 23 }), P).estado, "descarte");
+  /* 2 FBA de terceros que la ganan -> no se descarta por esta regla. */
+  const bst2 = { A1SELLERFBA: { percentageWon: 55, isFBA: true }, A2OTHERFBA: { percentageWon: 45, isFBA: true } };
+  const m2 = inv.metricsFromKeepa({ asin: "B0X2", title: "x", stats: { current: cur2, avg90: [], buyBoxStats: bst2 } });
+  assert.equal(m2.fbaThird, 2);
+  assert.ok(!plan.planFor(Object.assign({}, m2, { pvp: 64, sales: 23 }), P).reasons.some((r) => /FBA de terceros/.test(r)));
+});
