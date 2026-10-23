@@ -55,7 +55,6 @@ function slugify(q) {
 
 const CACHE = new Map();
 const CACHE_MS = 10 * 60 * 1000;
-const READER = "https://r.jina.ai/";
 
 function sleep(ms) {
   return new Promise(function (r) { setTimeout(r, ms); });
@@ -78,13 +77,6 @@ async function getHtml(url, timeoutMs) {
     /* Limite de peticiones o error temporal del servidor: se reintenta una vez. */
     if (out.status !== 429 && out.status < 500) break;
     await sleep(attempt === 0 ? 2500 : 0);
-  }
-  /* CloudFront tambien bloquea por IP de datacenter (Railway): un lector HTML
-     externo sin clave hace la peticion desde su red y devuelve el HTML igual. */
-  if (!out.ok && (out.status === 403 || out.status === 429 || out.status === 451 || out.status === 0)) {
-    const r = await jsonFetch(READER + url, { headers: { "X-Return-Format": "html" }, redirect: "follow" }, timeoutMs || 25000);
-    const html = typeof r.data === "string" ? r.data : "";
-    out = { ok: Boolean(r.ok) && html.length > 500, status: r.status || 0, html: html, reader: true };
   }
   if (out.ok) CACHE.set(url, { at: Date.now(), ok: out.ok, status: out.status, html: out.html });
   return out;
