@@ -315,6 +315,10 @@ function rankLeads(results, ctx) {
     if (r.group && d.groups.indexOf(r.group) === -1) d.groups.push(r.group);
     const pos = Number(r.position) || 50;
     if (pos < d.bestPos) d.bestPos = pos;
+    if (!d.price) {
+      const sp = priceFromText([r.title, r.description].join(" "));
+      if (sp) d.price = Object.assign(sp, { from: "buscador" });
+    }
     if (textHasEan(text, forms)) {
       d.eanHit = true;
       /* La pagina que muestra el EAN es la mas util: se prefiere como enlace. */
@@ -353,7 +357,7 @@ function rankLeads(results, ctx) {
       role: role, roleLabel: ROLE_LABEL[role], score: score,
       eanOnSerp: d.eanHit, signals: b2b.keys, retailSignals: retail.keys,
       queries: d.queries.slice(0, 6), groups: d.groups, bestPosition: d.bestPos === 99 ? null : d.bestPos,
-      contact: null, page: null
+      contact: null, page: null, price: d.price || null
     };
     if (role === "minorista" || role === "minorista_probable") retailers.push(lead);
     else leads.push(lead);
@@ -379,8 +383,87 @@ function tierOf(l) {
   }
 }
 function compareLeads(a, b) {
-  return tierOf(a) - tierOf(b) || b.score - a.score || (a.bestPosition || 99) - (b.bestPosition || 99);
+  /* Con precio maximo: primero los que dejan margen, luego los justos, luego
+     los sin precio (hay que pedir tarifa) y al final los caros. No se
+     elimina ninguno: solo se ordena. */
+  const ba = a.priceCheck ? (BAND_RANK[a.priceCheck.band] != null ? BAND_RANK[a.priceCheck.band] : 2) : 2;
+  const bb = b.priceCheck ? (BAND_RANK[b.priceCheck.band] != null ? BAND_RANK[b.priceCheck.band] : 2) : 2;
+  return ba - bb || tierOf(a) - tierOf(b) || b.score - a.score || (a.bestPosition || 99) - (b.bestPosition || 99);
 }
+
+/* ---------- precio del candidato frente al precio maximo ----------
+   Los mayoristas casi siempre cotizan SIN IVA; las tiendas, con IVA. Se lee
+   la indicacion de la pagina/snippet y, si no la hay, se asume sin IVA para
+   mayoristas/distribuidores (lo prudente: no da por bueno un precio que en
+   realidad es mas caro) y con IVA para el resto. */
+const VAT_EXCL = /(sin\s+iva|iva\s+no\s+incluido|\+\s*iva\b|excl\.?\s*iva|iva\s+excl|base\s+imponible|precio\s+neto|tax\s+excl|excl\.?\s*vat|ex\.?\s*vat|net\s+price)/i;
+const VAT_INCL = /(iva\s+incluido|con\s+iva|incl\.?\s*iva|iva\s+incl|impuestos\s+incluidos|incl\.?\s*vat|tax\s+incl|\bpvp\b)/i;
+function parseEuro(v) {
+  if (v == null) return 0;
+  if (typeof v === "number") return isFinite(v) && v > 0 ? v : 0;
+  let t = String(v).replace(/[^\d.,]/g, "");
+  if (!t) return 0;
+  if (/,\d{1,2}$/.test(t)) t = t.replace(/\./g, "").replace(",", ".");
+  else t = t.replace(/,/g, "");
+  const n = parseFloat(t);
+  return isFinite(n) && n > 0 && n < 100000 ? n : 0;
+}
+function priceFromText(text) {
+  const t = String(text || "");
+  const m = t.match(/(\d{1,5}(?:[.,]\d{3})*[.,]\d{2})\s?(?:€|eur\b)|€\s?(\d{1,5}(?:[.,]\d{3})*[.,]\d{2})/i);
+  if (!m) return null;
+  const price = parseEuro(m[1] || m[2]);
+  if (!price) return null;
+  /* La indicacion de IVA suele ir pegada al precio. */
+  const around = t.slice(Math.max(0, m.index - 80), m.index + m[0].length + 80);
+  return { price: price, vat: VAT_EXCL.test(around) ? "sin" : (VAT_INCL.test(around) ? "con" : null) };
+}
+function priceFromHtml(html) {
+  const raw = String(html || "");
+  /* 1. JSON-LD Product/Offer. */
+  const re = /<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi;
+  let m, best = 0, cur = "";
+  while ((m = re.exec(raw))) {
+    const txt = m[1];
+    const pm = txt.match(/"(?:price|lowPrice)"\s*:\s*"?([\d.,]+)"?/);
+    const cm = txt.match(/"priceCurrency"\s*:\s*"([A-Z]{3})"/);
+    const v = pm ? parseEuro(pm[1]) : 0;
+    if (v > 0 && (!best || v < best)) { best = v; cur = cm ? cm[1] : ""; }
+  }
+  /* 2. Microdatos / meta. */
+  if (!best) {
+    const mm = raw.match(/itemprop\s*=\s*["']price["'][^>]*content\s*=\s*["']([\d.,]+)["']/i) || raw.match(/property\s*=\s*["'](?:product:price:amount|og:price:amount)["'][^>]*content\s*=\s*["']([\d.,]+)["']/i);
+    if (mm) best = parseEuro(mm[1]);
+  }
+  const text = stripTags(raw);
+  if (best && (!cur || cur === "EUR")) {
+    return { price: best, vat: VAT_EXCL.test(text.slice(0, 200000)) && !VAT_INCL.test(text.slice(0, 200000)) ? "sin" : (VAT_INCL.test(text) ? "con" : null), from: "ficha" };
+  }
+  const t = priceFromText(text);
+  return t ? Object.assign(t, { from: "texto" }) : null;
+}
+const B2B_ROLES = { mayorista: 1, distribuidor_oficial: 1, marketplace_b2b: 1, fabricante: 1 };
+/* target: { priceMax (con IVA), priceMaxNet, breakEven, breakEvenNet, vat } */
+function priceBand(lead, target) {
+  target = target || {};
+  const pr = lead && lead.price;
+  if (!pr || !(pr.price > 0)) return { band: "sin_precio" };
+  const vat = (target.vat == null ? 21 : target.vat) / 100;
+  const assumed = pr.vat == null;
+  const vatMode = pr.vat || (B2B_ROLES[lead.role] ? "sin" : "con");
+  const net = vatMode === "sin" ? pr.price : pr.price / (1 + vat);
+  const maxNet = target.priceMaxNet || (target.priceMax ? target.priceMax / (1 + vat) : 0);
+  const beNet = target.breakEvenNet || (target.breakEven ? target.breakEven / (1 + vat) : 0);
+  if (!(maxNet > 0)) return { band: "sin_objetivo", net: Math.round(net * 100) / 100, vatMode: vatMode, assumed: assumed };
+  let band = "caro";
+  if (net <= maxNet) band = "ok";
+  else if (beNet > 0 && net <= beNet) band = "justo";
+  return {
+    band: band, net: Math.round(net * 100) / 100, vatMode: vatMode, assumed: assumed,
+    vsMaxPct: Math.round((net / maxNet - 1) * 1000) / 10
+  };
+}
+const BAND_RANK = { ok: 0, justo: 1, sin_precio: 2, sin_objetivo: 2, caro: 3 };
 
 /* ---------- lectura de la pagina del candidato ---------- */
 const DIST_LINK = /(distribuidor|distribuidores|donde[-_ ]?comprar|where[-_ ]?to[-_ ]?buy|dealers?|puntos[-_ ]?de[-_ ]?venta|stockists?|resellers?|profesional(?:es)?|b2b|wholesale|mayorist|hazte|partners?|trade)/i;
@@ -420,6 +503,7 @@ function pageSignals(html, ctx, baseUrl) {
   const loginWall = /(inicia\s+sesi[oó]n|reg[ií]strate|log\s?in|sign\s?in)[^.]{0,60}(ver|para ver|to see|to view)\s+(?:los\s+)?prec/i.test(text) ||
     /precios?\s+(?:solo\s+)?(?:para|a)\s+(?:clientes\s+)?(?:registrados|profesionales)/i.test(text);
   return {
+    price: priceFromHtml(raw),
     eanOnPage: textHasEan(text, forms) || textHasEan(raw, forms),
     signals: b2b.keys, b2bWeight: b2b.weight, retailSignals: retail.keys, retailWeight: retail.weight,
     loginWall: loginWall, emails: emails, phones: phones, distributorLink: distLink
@@ -429,6 +513,7 @@ function pageSignals(html, ctx, baseUrl) {
 /* Re-clasifica con lo leido en la pagina (mas fiable que el snippet). */
 function applyPage(lead, ps) {
   if (!lead || !ps) return lead;
+  if (ps.price && ps.price.price > 0) lead.price = ps.price;
   lead.page = { eanOnPage: ps.eanOnPage, loginWall: ps.loginWall, signals: ps.signals, distributorLink: ps.distributorLink || "" };
   if (ps.emails.length || ps.phones.length) lead.contact = { emails: ps.emails, phones: ps.phones };
   ps.signals.forEach(function (s) { if (lead.signals.indexOf(s) === -1) lead.signals.push(s); });
@@ -450,6 +535,7 @@ function applyPage(lead, ps) {
 }
 
 module.exports = {
+  priceBand, priceFromText, priceFromHtml, parseEuro,
   buildLeadQueries, brandCandidates, bestEans, displayEan, googleLinks, rankLeads, compareLeads, pageSignals, applyPage,
   eanForms, textHasEan, brandSlugs, brandInHost, hostOf, mainLabel,
   ROLE_LABEL, ROLE_WEIGHT, lists: { BLOCKED, COMPARATORS, RETAILERS, B2B_MARKETS, EAN_DBS }

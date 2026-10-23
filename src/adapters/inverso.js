@@ -137,6 +137,26 @@ function metricsFromKeepa(prod) {
   const fbaOffersList = fbaFromOffers(prod);
   let offersFba = fbaOffersList;
   if (offersFba == null && posNum(s.offerCountFBA) > 0) offersFba = posNum(s.offerCountFBA);
+  /* Regla del PDF: sin 2 vendedores FBA de terceros que compartan la Buy Box
+     no hay oportunidad. Sin la lista `offers` (cara: ~12 tokens/producto) el
+     recuento FBA quedaba "desconocido" y la regla NO se aplicaba en la lista
+     de candidatos (caso B0DCW34G9T: 0 FBA, Amazon vende, salia como apto).
+     Ahora, sin coste extra:
+       - buyBoxStats (Keepa, con buybox=1 y stats=90): vendedores que han
+         ganado la Buy Box en 90 d y si son FBA -> FBA de terceros reales.
+       - csv 10 (NEW_FBA) = -1: no hay ninguna oferta FBA de terceros ahora. */
+  let bbFbaThird = null, bbSellersWon = null;
+  try {
+    const bst = s.buyBoxStats;
+    if (bst && typeof bst === "object" && Object.keys(bst).length) {
+      const AMZ = buybox.AMAZON_SELLERS || [];
+      const ids = Object.keys(bst).filter(function (id) { return bst[id] && Number(bst[id].percentageWon) > 0; });
+      bbSellersWon = ids.length;
+      bbFbaThird = ids.filter(function (id) { return AMZ.indexOf(id) === -1 && bst[id].isFBA === true; }).length;
+    }
+  } catch (e) {}
+  const fbaNowRaw = s.current && s.current[10];
+  const noFbaNow = fbaNowRaw === -1;
   const fx = keepaFicha.fichaOf(prod);
   if (fx.missing.length) { try { events.add("keepa", { phase: "ficha_missing", asin: prod && prod.asin, missing: fx.missing.join(",") }); } catch (e) {} }
   const brand = String((prod && prod.brand) || "").trim();
@@ -146,9 +166,12 @@ function metricsFromKeepa(prod) {
   const bb = buybox.analyze(prod && prod.buyBoxSellerIdHistory, 90, undefined, { brand: brand, manufacturer: manufacturer, sellerName: sellerName });
   const amazonSells = keepaFicha.amazonSellsFrom(prod, bb, keepaCur(prod, 0, true));
   const thirdParty = offersTotal > 0 ? Math.max(0, offersTotal - (amazonSells ? 1 : 0)) : (offersFba != null ? offersFba : null);
-  const fbaThird = fbaOffersList != null
+  let fbaThird = fbaOffersList != null
     ? fbaOffersList
     : (offersFba == null ? null : Math.max(0, offersFba - (amazonSells ? 1 : 0)));
+  let fbaSource = fbaOffersList != null ? "ofertas" : (offersFba != null ? "keepa_stats" : "");
+  if (fbaThird == null && bbFbaThird != null) { fbaThird = bbFbaThird; fbaSource = "buybox_90d"; }
+  if (fbaThird == null && noFbaNow) { fbaThird = 0; fbaSource = "sin_oferta_fba"; }
   const ean = fx.ficha.eans[0] || (prod && prod.eanList && prod.eanList[0]) || (prod && prod.upcList && prod.upcList[0]) || "";
   const out = {
     asin: String((prod && prod.asin) || "").toUpperCase(),
@@ -160,7 +183,8 @@ function metricsFromKeepa(prod) {
     url: prod && prod.asin ? "https://www.amazon.es/dp/" + String(prod.asin).toUpperCase() : "",
     pvp: round2(pvp), bsr: bsr, sales: Math.round(sales),
     thirdParty: thirdParty == null ? null : Math.round(thirdParty), offersFba: offersFba == null ? null : Math.round(offersFba),
-    fbaThird: fbaThird == null ? null : Math.round(fbaThird),
+    fbaThird: fbaThird == null ? null : Math.round(fbaThird), fbaSource: fbaSource,
+    bbFbaThird: bbFbaThird, bbSellersWon: bbSellersWon,
     historyDays: historyDays(prod), ean: String(ean || ""),
     categoryTree: (prod && prod.categoryTree) || [],
     buyBox: bb, amazonSells: amazonSells,
@@ -205,7 +229,8 @@ async function keepaProductsByAsins(asins, offers, opts) {
   });
   for (let i = 0; i < missing.length; i += 100) {
     const chunk = missing.slice(i, i + 100).join(",");
-    const params = { asin: chunk, stats: "1" };
+    /* stats=90: buyBoxStats y medias sobre 90 dias (sin coste extra). */
+    const params = { asin: chunk, stats: "90" };
     if (withBB || nOffers >= 20) params.buybox = "1";
     if (nOffers >= 20) { params.offers = String(nOffers); params["only-live-offers"] = "1"; }
     const r = await keepaRequest("product", params);
@@ -1869,6 +1894,8 @@ async function candidatesLarge(body) {
     const pre = (lite.products || []).map(metricsFromKeepa).filter(function (m) {
       if (!(m.asin && m.pvp > 0 && keywordRelevant(m))) return false;
       if (p.bbRule && m.thirdParty != null && m.thirdParty <= 1) { preDropped++; counts.descarte = (counts.descarte || 0) + 1; return false; }
+      /* Ninguna oferta FBA de terceros ahora mismo: no hay Buy Box que compartir. */
+      if (p.bbRule && m.fbaThird === 0) { preDropped++; counts.descarte = (counts.descarte || 0) + 1; return false; }
       return true;
     }).sort(function (a, b) { return (b.sales || 0) - (a.sales || 0) || (a.bsr || 1e12) - (b.bsr || 1e12); });
     const need = Math.max(1, Math.ceil((limit - out.length) * 1.5));
@@ -1912,7 +1939,7 @@ async function candidatesLarge(body) {
     });
   }
   if (!includeDiscards) notes.push("Se ocultan los descartados; activa 'Incluir descartados' para verlos.");
-  notes.push("Keepa: " + scanned + " ASIN en barrido ligero, " + deepAsked + " con Buy Box, " + preDropped + " descartados antes de pedir Buy Box (0-1 ofertas)." + (keepaCost.usage.tokensLeft != null ? (" Tokens restantes: " + keepaCost.usage.tokensLeft + ".") : ""));
+  notes.push("Keepa: " + scanned + " ASIN en barrido ligero, " + deepAsked + " con Buy Box, " + preDropped + " descartados antes de pedir Buy Box (0-1 ofertas o ningun FBA de terceros)." + (keepaCost.usage.tokensLeft != null ? (" Tokens restantes: " + keepaCost.usage.tokensLeft + ".") : ""));
   if (stoppedForTokens) notes.push("Barrido recortado para no dejar Keepa sin tokens: pulsa 'Cargar mas' cuando se recargue el saldo.");
 
   const sortKey = String((body && body.sort) || "aptitud");

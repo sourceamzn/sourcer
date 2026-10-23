@@ -86,6 +86,24 @@ async function find(body, hooks) {
   ranked.leads.forEach(function (l) {
     if (l.role === "minorista" || l.role === "minorista_probable") retailers.push(l); else leads.push(l);
   });
+  /* Precio del candidato frente al precio maximo de compra y al punto de
+     equilibrio (lib/plan). Solo ordena y etiqueta: no descarta. */
+  const target = {
+    priceMax: Number(body.priceMax) || 0, priceMaxNet: Number(body.priceMaxNet) || 0,
+    breakEven: Number(body.breakEven) || 0, breakEvenNet: Number(body.breakEvenNet) || 0
+  };
+  leads.concat(retailers).forEach(function (l) { l.priceCheck = leadsLib.priceBand(l, target); });
+  /* Una tienda que vende POR DEBAJO del precio maximo tambien es una compra
+     valida (arbitraje online): se sube a la lista principal, marcada. */
+  for (let i = retailers.length - 1; i >= 0; i--) {
+    const r = retailers[i];
+    if (r.priceCheck && r.priceCheck.band === "ok") {
+      r.retailOk = true;
+      r.roleLabel = "Tienda con precio que deja margen";
+      leads.push(r);
+      retailers.splice(i, 1);
+    }
+  }
   leads.sort(leadsLib.compareLeads);
 
   const counts = {};
@@ -109,7 +127,7 @@ async function find(body, hooks) {
     source: "fabricantes", ean: leadsLib.bestEans(body)[0] || "", brand: brand, manufacturer: ctx.manufacturer,
     queries: queries, googleLinks: links, engines: engines, errors: sr.errors || [],
     rawResults: (sr.results || []).length, pagesChecked: checked,
-    leads: leads.slice(0, 30), retailers: retailers.slice(0, 20), counts: counts,
+    leads: leads.slice(0, 30), retailers: retailers.slice(0, 20), counts: counts, target: target,
     diagnosis: diagnosis, ms: Date.now() - t0
   };
   try {

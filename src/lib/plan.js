@@ -84,6 +84,14 @@ function planFor(m, p) {
   const costMax = Math.max(0, Math.min(cRoi, cMargin));
   const priceMax = costMax > 0 ? (costMax / (1 + vat + recargo)) * (1 + vat) : 0;
   const discount = pvp > 0 ? 1 - priceMax / pvp : 0;
+  /* Punto de equilibrio: lo maximo que se puede pagar SIN perder dinero (sin
+     margen ni ROI minimo). Entre priceMax y breakEven se gana, pero menos de lo
+     exigido; por encima de breakEven se pierde. "Net" = sin IVA ni recargo,
+     que es como cotizan casi todos los mayoristas. */
+  const room = PV - F;
+  const breakEven = room > 0 ? (room / (1 + vat + recargo)) * (1 + vat) : 0;
+  const priceMaxNet = costMax > 0 ? costMax / (1 + vat + recargo) : 0;
+  const breakEvenNet = room > 0 ? room / (1 + vat + recargo) : 0;
   const discPct = round2(discount * 100);
 
   /* Reglas duras: beneficio neto y Buy Box con competencia real (2 FBA). Sin
@@ -156,7 +164,9 @@ function planFor(m, p) {
   return {
     pvp: round2(pvp), pvNet: round2(PV), tier: { margin: tier.margin, roi: tier.roi, label: tier.label },
     referral: round2(referencia), feesReal: round2(F), costMax: round2(costMax),
-    priceMax: round2(priceMax), discount: discPct, estado: estado, reasons: reasons,
+    priceMax: round2(priceMax), priceMaxNet: round2(priceMaxNet),
+    breakEven: round2(breakEven), breakEvenNet: round2(breakEvenNet),
+    discount: discPct, estado: estado, reasons: reasons,
     fees: {
       referralPct: round2(rates.referralPct), fbaFee: round2(rates.fbaFee),
       source: rates.source, partial: Boolean(rates.partial)
