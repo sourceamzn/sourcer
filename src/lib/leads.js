@@ -389,6 +389,9 @@ function compareLeads(a, b) {
      elimina ninguno: solo se ordena. */
   const ba = a.priceCheck ? (BAND_RANK[a.priceCheck.band] != null ? BAND_RANK[a.priceCheck.band] : 2) : 2;
   const bb = b.priceCheck ? (BAND_RANK[b.priceCheck.band] != null ? BAND_RANK[b.priceCheck.band] : 2) : 2;
+  /* Lo aprendido con el uso: los distribuidores que ya conoces de esa marca, primero. */
+  const ka = a.learned && a.learned.known ? 1 : 0, kb = b.learned && b.learned.known ? 1 : 0;
+  if (ka !== kb) return kb - ka;
   return ba - bb || tierOf(a) - tierOf(b) || b.score - a.score || (a.bestPosition || 99) - (b.bestPosition || 99);
 }
 

@@ -12,6 +12,7 @@ const contacts = require("./routes/contacts");
 const historyRoutes = require("./routes/history");
 const outreachRoutes = require("./routes/outreach");
 const tarifCrossRoutes = require("./routes/tarifcross");
+const learnRoutes = require("./routes/learn");
 const tarifCross = require("./lib/tarifcross");
 const outreachLib = require("./lib/outreach");
 const events = require("./lib/events");
@@ -56,6 +57,7 @@ app.post("/sourcing/:source/:action", apiLimit, requireApiKey, sourcing);
 app.get("/product/:ean", apiLimit, requireApiKey, product.productByEan);
 app.post("/tarifas/import", apiLimit, requireApiKey, tariffs.importTariffs);
 app.use("/tarifas/cruces", apiLimit, requireApiKey, tarifCrossRoutes);
+app.use("/learn", apiLimit, requireApiKey, learnRoutes);
 
 /* Inicializa el almacen del vigilante en segundo plano (no bloquea el arranque). */
 store.init().catch(function () {});

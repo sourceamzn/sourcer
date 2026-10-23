@@ -13,6 +13,7 @@ const express = require("express");
 const docs = require("../lib/docstore");
 const contactScan = require("../lib/contactscan");
 const outreach = require("../lib/outreach");
+const learn = require("../lib/learn");
 const { config } = require("../config");
 
 const router = express.Router();
@@ -30,6 +31,25 @@ async function maybeAutoStart(c) {
     return true;
   } catch (e) { return false; }
 }
+
+/* Deshacer: antes de cada cambio de estado o accion de correo se guarda una
+   copia de lo que cambia; PATCH { undo: true } la restaura. */
+function snapshot(c, what) {
+  c.undo = { at: new Date().toISOString(), what: what || "cambio", status: c.status, starred: Boolean(c.starred), needsHuman: Boolean(c.needsHuman), rejectReason: c.rejectReason || "", contactedAt: c.contactedAt || null, outreach: c.outreach ? JSON.parse(JSON.stringify(c.outreach)) : null };
+}
+function restore(c) {
+  const u = c.undo;
+  if (!u) return false;
+  /* Un correo que ya salio no se puede "desenviar": no se restaura la secuencia
+     (volveria a mandarlo). */
+  if (c.outreach && (c.outreach.attempts || 0) > ((u.outreach && u.outreach.attempts) || 0)) return "ya_enviado";
+  c.status = u.status; c.starred = u.starred; c.needsHuman = u.needsHuman; c.rejectReason = u.rejectReason; c.contactedAt = u.contactedAt;
+  if (u.outreach) c.outreach = u.outreach; else delete c.outreach;
+  c.history = (c.history || []).concat([{ at: new Date().toISOString(), type: "deshacer", text: "Deshecho: " + u.what }]).slice(-100);
+  c.undo = null;
+  return true;
+}
+const TRASH = "contacts_trash";
 
 function ah(fn) {
   return function (req, res) {
@@ -88,6 +108,7 @@ router.post("/", ah(async function (req, res) {
   prev.updatedAt = now;
   await maybeAutoStart(prev);
   await docs.put(COLL, host, prev);
+  await learn.syncContact(prev);
   res.json({ ok: true, contact: prev });
 }));
 
@@ -97,6 +118,16 @@ router.patch("/:id", ah(async function (req, res) {
   if (!c) return res.status(404).json({ ok: false, reason: "no_encontrado" });
   const b = req.body || {};
   const now = new Date().toISOString();
+  if (b.undo) {
+    const r = restore(c);
+    if (r === "ya_enviado") return res.status(400).json({ ok: false, reason: "ya_enviado", hint: "El correo ya salió: no se puede deshacer el envío." });
+    if (!r) return res.status(400).json({ ok: false, reason: "nada_que_deshacer" });
+    c.updatedAt = now;
+    await docs.put(COLL, id, c);
+    await learn.syncContact(c);
+    return res.json({ ok: true, contact: c });
+  }
+  if ((b.status && STATUS.indexOf(b.status) !== -1 && b.status !== c.status) || (b.starred != null && Boolean(b.starred) !== Boolean(c.starred))) snapshot(c, b.status && b.status !== c.status ? ("estado " + c.status + " -> " + b.status) : "favorito");
   if (b.status && STATUS.indexOf(b.status) !== -1 && b.status !== c.status) {
     c.history = (c.history || []).concat([{ at: now, type: "estado", text: c.status + " -> " + b.status }]);
     c.status = b.status;
@@ -121,6 +152,7 @@ router.patch("/:id", ah(async function (req, res) {
   c.history = (c.history || []).slice(-100);
   c.updatedAt = now;
   await docs.put(COLL, id, c);
+  await learn.syncContact(c);
   res.json({ ok: true, contact: c });
 }));
 
@@ -129,6 +161,8 @@ router.post("/reset", ah(async function (req, res) {
   if (String((req.body || {}).confirm || "") !== "VACIAR") return res.status(400).json({ ok: false, reason: "falta_confirmacion" });
   const list = await docs.list(COLL);
   for (let i = 0; i < list.length; i++) { await dropAttachments(list[i]); await docs.del(COLL, list[i].id); }
+  const trash = await docs.list(TRASH);
+  for (let i = 0; i < trash.length; i++) { await dropAttachments(trash[i]); await docs.del(TRASH, trash[i].id); }
   res.json({ ok: true, deleted: list.length });
 }));
 
@@ -137,11 +171,25 @@ async function dropAttachments(c) {
   for (let i = 0; i < list.length; i++) { try { await docs.del("attachments", list[i].id); } catch (e) {} }
 }
 
+/* Quitar un contacto lo mueve a la papelera (se puede recuperar). */
 router.delete("/:id", ah(async function (req, res) {
   const id = str(req.params.id, 200);
-  await dropAttachments(await docs.get(COLL, id));
+  const c = await docs.get(COLL, id);
+  if (c) { c.deletedAt = new Date().toISOString(); await docs.put(TRASH, id, c); }
   const ok = await docs.del(COLL, id);
+  if (c) await learn.contactRemoved(c.host || id);
   res.json({ ok: ok });
+}));
+router.post("/:id/restore", ah(async function (req, res) {
+  const id = str(req.params.id, 200);
+  const c = await docs.get(TRASH, id);
+  if (!c) return res.status(404).json({ ok: false, reason: "no_esta_en_la_papelera" });
+  delete c.deletedAt;
+  c.updatedAt = new Date().toISOString();
+  await docs.put(COLL, id, c);
+  await docs.del(TRASH, id);
+  await learn.syncContact(c);
+  res.json({ ok: true, contact: c });
 }));
 
 /* Adjuntos de tarifa recibidos por correo (Excel/CSV/PDF), en base64. */
@@ -187,6 +235,7 @@ router.post("/:id/outreach", ah(async function (req, res) {
   const c = await docs.get(COLL, id);
   if (!c) return res.status(404).json({ ok: false, reason: "no_encontrado" });
   const action = str((req.body || {}).action, 20);
+  snapshot(c, { start: "inicio de la secuencia", resume: "reanudar", sendnow: "enviar ya", pause: "pausa", approve: "aprobación del correo", reject: "descarte del correo" }[action] || action);
   if (action === "start" || action === "resume" || action === "sendnow") {
     if (!(c.emails || []).length) return res.status(400).json({ ok: false, reason: "sin_email", hint: "Pulsa «Buscar email / teléfono» o añade un email a mano." });
     if (c.outreach && ["respondido", "baja", "rechazado"].indexOf(c.outreach.state) !== -1) return res.status(400).json({ ok: false, reason: "ya_respondio" });

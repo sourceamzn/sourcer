@@ -478,6 +478,7 @@ async function applyFinding(f) {
   }
   c.updatedAt = now;
   await docs.put(COLL, c.id, c);
+  try { await require("./learn").syncContact(c); } catch (e) {}
   try { events.add("outreach", { phase: f.kind, contact: c.id, from: f.from, how: f.how, tipo: ai ? ai.tipo : "" }); } catch (e) {}
 }
 

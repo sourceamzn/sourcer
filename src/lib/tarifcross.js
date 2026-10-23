@@ -362,6 +362,7 @@ async function process1(run) {
   const c = run.counts || {};
   run.message = "Terminado: " + run.found + " de " + run.total + " EAN existen en Amazon · " + (c.oportunidad || 0) + " oportunidad(es) · " + (c.revisar || 0) + " a revisar · " + (c.justo || 0) + " justos · " + run.tokens + " tokens Keepa.";
   await save(run, data);
+  if (run.contactId) { try { await require("./learn").tariffResult(run.contactId, data.rows); } catch (e) {} }
   try { events.add("tarifa_cruce", { phase: "fin", id: run.id, total: run.total, found: run.found, ops: c.oportunidad || 0, tokens: run.tokens }); } catch (e) {}
 }
 

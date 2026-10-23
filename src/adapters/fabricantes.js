@@ -129,7 +129,8 @@ async function find(body, hooks) {
     } catch (e) {}
   }
   /* La pagina o la IA pueden haber convertido una pista en minorista o irrelevante. */
-  const leads = [], retailers = [];
+  let leads = [];
+  const retailers = [];
   ranked.leads.concat(ranked.retailers).forEach(function (l) {
     if (l.role === "minorista" || l.role === "minorista_probable" || l.role === "irrelevante") retailers.push(l); else leads.push(l);
   });
@@ -151,6 +152,18 @@ async function find(body, hooks) {
       retailers.splice(i, 1);
     }
   }
+  /* Aprendizaje: reputacion de webs, distribuidores ya conocidos de la marca
+     (aunque Google no los devuelva) y webs que marcaste «No es proveedor». */
+  let learnInfo = { known: 0, hidden: 0, boosted: 0 };
+  try {
+    const learnLib = require("../lib/learn");
+    const L = await learnLib.forSearch([brand, ctx.manufacturer].concat(ctx.brands || []).filter(Boolean));
+    const ap = learnLib.apply(leads, L, leadsLib);
+    leads = ap.leads;
+    for (let i = retailers.length - 1; i >= 0; i--) if (L.blocked[learnLib.hostOf(retailers[i].host || retailers[i].url)]) { ap.hidden.push(retailers[i]); retailers.splice(i, 1); }
+    leads.forEach(function (l) { if (!l.priceCheck) l.priceCheck = leadsLib.priceBand(l, target); });
+    learnInfo = { known: L.known.length, hidden: ap.hidden.length, boosted: leads.filter(function (l) { return l.learned; }).length, hiddenHosts: ap.hidden.map(function (l) { return l.host; }).slice(0, 30) };
+  } catch (e) {}
   leads.sort(leadsLib.compareLeads);
 
   const counts = {};
@@ -174,7 +187,7 @@ async function find(body, hooks) {
     source: "fabricantes", ean: leadsLib.bestEans(body)[0] || "", brand: brand, manufacturer: ctx.manufacturer,
     queries: queries, googleLinks: links, engines: engines, errors: sr.errors || [],
     rawResults: (sr.results || []).length, pagesChecked: checked,
-    leads: leads.slice(0, 30), retailers: retailers.slice(0, 20), counts: counts, target: target, ai: aiInfo,
+    leads: leads.slice(0, 30), retailers: retailers.slice(0, 20), counts: counts, target: target, ai: aiInfo, learned: learnInfo,
     diagnosis: diagnosis, ms: Date.now() - t0
   };
   try {

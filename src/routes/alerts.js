@@ -126,14 +126,36 @@ router.post(
   })
 );
 
-/* Vaciar avisos. Con {kind} borra solo ese tipo (catalog_new, catalog_drop, price_drop); sin el, todos. */
+/* Recuperar avisos descartados (deshacer). { id } o { ids: [] } */
+router.post(
+  "/undismiss",
+  ah(async (req, res) => {
+    const b = req.body || {};
+    const ids = (Array.isArray(b.ids) ? b.ids : [b.id]).map(str).filter(Boolean).slice(0, 500);
+    if (!ids.length) return res.status(400).json({ ok: false, reason: "id_required" });
+    let restored = 0;
+    for (let i = 0; i < ids.length; i++) { if (await store.undismissAlert(ids[i])) restored++; }
+    res.json({ ok: true, restored: restored });
+  })
+);
+
+/* Vaciar avisos. Con {kind} solo ese tipo. Se marcan como descartados (no se
+   borran) para poder deshacerlo: devuelve los ids. */
 router.post(
   "/clear",
   ah(async (req, res) => {
     await store.init();
     const kind = str((req.body || {}).kind);
-    const removed = await store.clearAlerts(kind || null);
-    res.json({ ok: true, removed: removed });
+    const all = await store.listAlerts({ limit: 1000 });
+    const list = (Array.isArray(all) ? all : (all && all.alerts) || []).filter(function (a) {
+      if (a.dismissed) return false;
+      if (!kind) return true;
+      if (kind === "drop") return a.kind !== "catalog_new" && a.kind !== "respuesta";
+      return a.kind === kind;
+    });
+    const ids = [];
+    for (let i = 0; i < list.length; i++) { if (await store.dismissAlert(list[i].id)) ids.push(list[i].id); }
+    res.json({ ok: true, removed: ids.length, ids: ids });
   })
 );
 
