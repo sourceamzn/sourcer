@@ -53,7 +53,7 @@ async function find(body, hooks) {
       if (info && info.ok && info.data && info.data.brand) brand = info.data.brand;
     } catch (e) {}
   }
-  const ctx = { eans: eans, brand: brand, manufacturer: String(body.manufacturer || "").trim() };
+  const ctx = { eans: eans, brand: brand, manufacturer: String(body.manufacturer || "").trim(), brands: leadsLib.brandCandidates(Object.assign({}, body, { brand: brand })) };
   const queries = leadsLib.buildLeadQueries(Object.assign({}, body, { brand: brand }), { max: c.maxQueries, lang: (config.discovery && config.discovery.lang) || "es" });
   const links = leadsLib.googleLinks(queries);
   if (!queries.length) {
@@ -106,13 +106,20 @@ async function find(body, hooks) {
     };
   }
   const out = {
-    source: "fabricantes", ean: eans[0] || "", brand: brand, manufacturer: ctx.manufacturer,
+    source: "fabricantes", ean: leadsLib.bestEans(body)[0] || "", brand: brand, manufacturer: ctx.manufacturer,
     queries: queries, googleLinks: links, engines: engines, errors: sr.errors || [],
     rawResults: (sr.results || []).length, pagesChecked: checked,
     leads: leads.slice(0, 30), retailers: retailers.slice(0, 20), counts: counts,
     diagnosis: diagnosis, ms: Date.now() - t0
   };
-  try { events.add("job", { phase: "leads", ean: out.ean, brand: brand, raw: out.rawResults, leads: leads.length, retailers: retailers.length, engines: engines.join("+"), ms: out.ms }); } catch (e) {}
+  try {
+    events.add("job", { phase: "leads", ean: out.ean, brand: brand, brands: ctx.brands.join("|"), raw: out.rawResults, leads: leads.length, retailers: retailers.length, engines: engines.join("+"), ms: out.ms, errors: (sr.errors || []).join(",") });
+    events.add("leads", { q: queries.map(function (x) { return x.q; }).join(" || ").slice(0, 390) });
+    /* Una linea por pista (auditable en /debug/events?kind=lead). */
+    leads.slice(0, 25).concat(retailers.slice(0, 10)).forEach(function (l) {
+      events.add("lead", { host: l.host, role: l.role, score: l.score, ean: Boolean(l.eanOnSerp || (l.page && l.page.eanOnPage)), sig: (l.signals || []).join(","), title: String(l.title || "").slice(0, 120), url: String(l.url || "").slice(0, 200) });
+    });
+  } catch (e) {}
   return { ok: true, data: out };
 }
 

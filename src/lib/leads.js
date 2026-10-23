@@ -181,13 +181,50 @@ function brandInHost(host, slugs) {
 }
 
 /* ---------- consultas ---------- */
+/* EAN que de verdad se busca. Keepa/gtin normalizan a 13 digitos rellenando
+   con ceros: un EAN-8 "13008420" pasa a "0000013008420", y buscar ese texto en
+   Google no devuelve NADA (caso real: Tegui 374240). Se elige el codigo mas
+   fiable (EAN-13 real antes que EAN-8/relleno) y se busca en su forma original. */
+function displayEan(n) {
+  n = String(n || "");
+  if (/^00000\d{8}$/.test(n)) return n.slice(5);          /* EAN-8 */
+  if (/^0\d{12}$/.test(n)) return n.slice(1);             /* UPC-A 12 */
+  return n;
+}
+function bestEans(body) {
+  const all = gtin.normalizeAll([].concat(body.eans || [], body.ean || []));
+  const score = function (n) { return /^00000/.test(n) ? 2 : (/^0/.test(n) ? 1 : 0); };
+  return all.slice().sort(function (a, b) { return score(a) - score(b); }).map(displayEan);
+}
+/* Marcas candidatas: la de Keepa, el fabricante y las palabras en MAYUSCULAS
+   del titulo. Keepa dice "Legrand" pero el titulo dice "TEGUI": el producto se
+   busca y se distribuye como Tegui (submarca), y tegui.es es el fabricante. */
+const UPPER_STOP = { LED: 1, USB: 1, HDMI: 1, PACK: 1, UDS: 1, XL: 1, XXL: 1, MAX: 1, PRO: 1, NEW: 1, MINI: 1, PLUS: 1, WIFI: 1, BLANCO: 1, NEGRO: 1, GRIS: 1, AZUL: 1, ROJO: 1, KIT: 1, SET: 1, ABS: 1, PVC: 1, LCD: 1, RGB: 1, DIY: 1, IP: 1, CE: 1, UE: 1, EU: 1, ES: 1, UK: 1, USA: 1, OFERTA: 1, NUEVO: 1, ORIGINAL: 1, SERIE: 1, MODELO: 1, PARA: 1, CON: 1, THE: 1, AND: 1, FOR: 1 };
+function brandCandidates(body) {
+  body = body || {};
+  const out = [];
+  function add(b) {
+    b = clean(b);
+    if (!b || b.length < 2) return;
+    if (out.some(function (x) { return slug(x) === slug(b); })) return;
+    out.push(b);
+  }
+  add(body.brand);
+  add(body.manufacturer);
+  const title = String(body.name || body.title || "");
+  (title.match(/\b[A-Z\u00C0-\u00DD][A-Z\u00C0-\u00DD&\-]{2,}\b/g) || []).forEach(function (w) {
+    if (!UPPER_STOP[fold(w).toUpperCase()] && !/\d/.test(w)) add(w.charAt(0) + w.slice(1).toLowerCase());
+  });
+  return out.slice(0, 3);
+}
+
 /* body: { ean, eans[], brand, manufacturer, model, partNumber, name }
    Devuelve [{ q, group, intent }]. El EAN entre comillas obliga al buscador a
    devolver paginas que contienen ese codigo exacto (como en la busqueda manual). */
 function buildLeadQueries(body, opts) {
   body = body || {};
   opts = opts || {};
-  const max = Math.max(2, Math.min(opts.max || 10, 14));
+  const max = Math.max(2, Math.min(opts.max || 12, 14));
   const out = [];
   const seen = {};
   function add(q, group, intent) {
@@ -198,38 +235,40 @@ function buildLeadQueries(body, opts) {
     seen[k] = 1;
     out.push({ q: q, group: group, intent: intent });
   }
-  const eans = gtin.normalizeAll([].concat(body.ean || [], body.eans || []));
-  const rawEan = gtin.digitsOnly(body.ean);
-  const ean = rawEan.length >= 8 ? rawEan : (eans[0] ? eans[0].replace(/^0+(?=\d{12,})/, "") : "");
-  const brand = clean(body.brand);
-  const manufacturer = clean(body.manufacturer);
-  const model = clean(body.model || body.partNumber || body.mpn);
+  const eans = bestEans(body);
+  const ean = eans[0] || "";
+  const brands = brandCandidates(body);
+  const who = brands[0] || "";
+  const model = clean(body.partNumber || body.model || body.mpn);
   const lang = String(opts.lang || "es").toLowerCase();
+  const hasModel = model && model.length >= 3 && brands.every(function (b) { return slug(model) !== slug(b); });
+  /* Un EAN-8 o un codigo corto es ambiguo: se acompana de la marca. */
+  const shortEan = ean && ean.length < 12;
+  const eanQ = ean ? ('"' + ean + '"' + (shortEan && who ? ' "' + who + '"' : "")) : "";
 
   /* 1. EAN (lo que se hace a mano). */
   if (ean) {
-    add('"' + ean + '" mayorista', "ean", "mayorista");
-    add('"' + ean + '" distribuidor', "ean", "distribuidor");
-    add('"' + ean + '" al por mayor', "ean", "mayorista");
-    add('"' + ean + '"', "ean", "identidad");
-    add('"' + ean + '" wholesale', "ean", "mayorista");
+    add(eanQ + " mayorista", "ean", "mayorista");
+    add(eanQ + " distribuidor", "ean", "distribuidor");
+    add(eanQ, "ean", "identidad");
   }
-  /* 2. Marca / fabricante: quien distribuye la marca en Espana. */
-  const who = brand || manufacturer;
-  if (who) {
-    add('"' + who + '" distribuidor oficial ' + (lang === "es" ? "España" : ""), "marca", "distribuidor_oficial");
-    add('"' + who + '" mayorista', "marca", "mayorista");
-    add('"' + who + '" distribuidores profesionales', "marca", "alta_distribuidor");
+  /* 2. Marca + referencia: las webs de material profesional (electricidad,
+     ferreteria...) listan por referencia de fabricante, no por EAN. */
+  if (hasModel) {
+    brands.slice(0, 2).forEach(function (b, i) {
+      add('"' + b + '" "' + model + '"', "modelo", "identidad");
+      if (i === 0 || brands.length > 1) add('"' + b + '" "' + model + '" mayorista', "modelo", "mayorista");
+    });
+    add('"' + model + '" ' + (who ? '"' + who + '" ' : "") + "distribuidor", "modelo", "distribuidor");
   }
-  if (manufacturer && brand && slug(manufacturer) !== slug(brand) && slug(manufacturer).indexOf(slug(brand)) === -1) {
-    add('"' + manufacturer + '" contacto distribuidores', "marca", "fabricante");
-  }
-  if (who) add('"' + who + '" official website', "marca", "fabricante");
-  /* 3. Marca + modelo (si el EAN no esta indexado). */
-  if (who && model && model.length >= 3 && slug(model) !== slug(who)) {
-    add('"' + who + '" "' + model + '" mayorista', "modelo", "mayorista");
-    add('"' + who + '" "' + model + '" wholesale', "modelo", "mayorista");
-  }
+  /* 3. Marca: quien la distribuye en Espana. */
+  brands.slice(0, 2).forEach(function (b) {
+    add('"' + b + '" distribuidor oficial ' + (lang === "es" ? "España" : ""), "marca", "distribuidor_oficial");
+  });
+  if (who) add('"' + who + '" mayorista', "marca", "mayorista");
+  if (ean) add(eanQ + " al por mayor", "ean", "mayorista");
+  if (eans[1] && eans[1] !== ean) add('"' + eans[1] + '"', "ean", "identidad");
+  if (who) add('"' + who + '" distribuidores profesionales', "marca", "alta_distribuidor");
   return out.slice(0, max);
 }
 
@@ -257,7 +296,8 @@ const ROLE_LABEL = {
 function rankLeads(results, ctx) {
   ctx = ctx || {};
   const forms = eanForms([].concat(ctx.eans || [], ctx.ean || []));
-  const slugs = brandSlugs(ctx.brand, ctx.manufacturer);
+  let slugs = brandSlugs(ctx.brand, ctx.manufacturer);
+  (ctx.brands || []).forEach(function (b) { brandSlugs(b).forEach(function (x) { if (slugs.indexOf(x) === -1) slugs.push(x); }); });
   const byHost = {};
   let dropped = 0;
   (results || []).forEach(function (r) {
@@ -412,7 +452,7 @@ function applyPage(lead, ps) {
 }
 
 module.exports = {
-  buildLeadQueries, googleLinks, rankLeads, compareLeads, pageSignals, applyPage,
+  buildLeadQueries, brandCandidates, bestEans, displayEan, googleLinks, rankLeads, compareLeads, pageSignals, applyPage,
   eanForms, textHasEan, brandSlugs, brandInHost, hostOf, mainLabel,
   ROLE_LABEL, ROLE_WEIGHT, lists: { BLOCKED, COMPARATORS, RETAILERS, B2B_MARKETS, EAN_DBS }
 };
