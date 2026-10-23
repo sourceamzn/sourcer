@@ -1,4 +1,4 @@
-﻿/* Fuentes de PROVEEDOR/FABRICANTE vía Apify (una sola clave: APIFY_TOKEN).
+/* Fuentes de PROVEEDOR/FABRICANTE vía Apify (una sola clave: APIFY_TOKEN).
 
    1688, Alibaba, Made-in-China, Google Shopping y busqueda por foto.
    Cada actor tiene su propio esquema de entrada (verificado en su ficha de
@@ -346,8 +346,47 @@ const BUILDERS = {
   shopping: function (q, max) {
     const list = (Array.isArray(q) ? q : [q]).filter(Boolean).slice(0, 3);
     return { queries: list, maxResults: Math.max(max, 20), country: String(config.apify.country || "es").toLowerCase(), language: "es", sortBy: "relevance" };
+  },
+  /* Directorios B2B: cada actor nombra el campo de otra forma (query, keyword,
+     searchQuery, queries...). Se envian todos los alias: Apify ignora los que
+     el actor no declara y asi el mismo codigo vale para varios actores. */
+  europages: function (q, max) {
+    return b2bInput(q, max, {
+      country: String((config.apify.country || "es")).toUpperCase(),
+      searchType: "manufacturers",
+      includeCompanyDetails: true
+    });
+  },
+  indiamart: function (q, max) {
+    return b2bInput(q, max, { country: "IN" });
+  },
+  dhgate: function (q, max) {
+    return b2bInput(q, max, {});
+  },
+  thomasnet: function (q, max) {
+    return b2bInput(q, max, { country: "US" });
+  },
+  directindustry: function (q, max) {
+    return b2bInput(q, max, {});
   }
 };
+
+/* Entrada comun para los actores de directorio B2B (ver nota de BUILDERS). */
+function b2bInput(q, max, extra) {
+  const n = Math.min(Math.max(Number(max) || 20, 3), 60);
+  return Object.assign({
+    query: q,
+    keyword: q,
+    search: q,
+    searchQuery: q,
+    queries: [q],
+    keywords: [q],
+    maxItems: n,
+    maxResults: n,
+    maxProducts: n,
+    proxyConfiguration: { useApifyProxy: true }
+  }, extra || {});
+}
 
 function makeAdapter(def) {
   const id = def.id;
@@ -440,6 +479,14 @@ const madeinchina = makeAdapter({ id: "madeinchina", actor: "mic", label: "Made-
 const gshopping = makeAdapter({ id: "gshopping", actor: "shopping", label: "Google Shopping (Apify)", candidate: false, estCost: 0.02, timeoutSec: 90 });
 const aliexpressApify = makeAdapter({ id: "aliexpress_apify", actor: "aliexpress", label: "AliExpress texto (Apify)", candidate: true, estCost: 0.03 });
 
+/* Directorios B2B por region. Todos corren a la vez: la geografia no se
+   prioriza, la decide el producto (UE vs China vs India vs EE. UU.). */
+const europages = makeAdapter({ id: "europages", actor: "europages", label: "Europages (fabricantes UE)", lang: "en", candidate: true, estCost: 0.12, timeoutSec: 65 });
+const indiamart = makeAdapter({ id: "indiamart", actor: "indiamart", label: "IndiaMART (fabricantes IN)", lang: "en", candidate: true, estCost: 0.05, timeoutSec: 60 });
+const dhgate = makeAdapter({ id: "dhgate", actor: "dhgate", label: "DHgate (lotes pequeños)", lang: "en", candidate: true, estCost: 0.03, timeoutSec: 80 });
+const thomasnet = makeAdapter({ id: "thomasnet", actor: "thomasnet", label: "ThomasNet (fabricantes US)", lang: "en", candidate: true, estCost: 0.06, timeoutSec: 60 });
+const directindustry = makeAdapter({ id: "directindustry", actor: "directindustry", label: "DirectIndustry (industrial UE)", lang: "en", candidate: true, estCost: 0.05, timeoutSec: 60 });
+
 /* Google Shopping por EAN: usa un actor que resuelve el codigo de barras y
    devuelve todas las ofertas de tienda (precio, envio, stock y enlace directo).
    Evita depender de abrir fichas una a una y cubre tiendas que el buscador por
@@ -516,5 +563,5 @@ const foto = {
   }
 };
 
-module.exports = { a1688, alibaba, madeinchina, gshopping, gshoppingEan, aliexpressApify, foto, searchByImage, mapEanRows };
+module.exports = { a1688, alibaba, madeinchina, gshopping, gshoppingEan, aliexpressApify, europages, indiamart, dhgate, thomasnet, directindustry, foto, searchByImage, mapEanRows };
 

@@ -456,7 +456,7 @@ function eanZeroResult(body, priceMax, reason, message) {
    y el descubrimiento/Shopping, ademas de no publicarlo, son los actores mas
    lentos. Se reservan para la fase de palabra clave, que corre una sola vez,
    y asi dejan de competir entre si por el mismo token de Apify. */
-const NO_EAN_SOURCES = { a1688: 1, alibaba: 1, madeinchina: 1, aliexpress: 1, aliexpress_apify: 1, discovery: 1, gshopping: 1 };
+  const NO_EAN_SOURCES = { a1688: 1, alibaba: 1, madeinchina: 1, globalsources: 1, europages: 1, indiamart: 1, dhgate: 1, thomasnet: 1, directindustry: 1, aliexpress: 1, aliexpress_apify: 1, discovery: 1, gshopping: 1 };
 async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
   hooks = hooks || {};
   const { adapters } = require("./index");
@@ -885,7 +885,7 @@ async function searchSuppliers(body, priceMax, hooks) {
   const weakId = !srcEans.length && !(body && body.brand) && !srcCodes.length;
   const max = clampInt(body && body.max, cfgS.maxResults, 3, cfgS.maxResultsCap);
   /* Fuentes internacionales: reciben ademas el titulo traducido al ingles. */
-  const INTL_SOURCES = { alibaba: 1, madeinchina: 1, aliexpress: 1, aliexpress_apify: 1, cjdropshipping: 1, gshopping: 1, discovery: 1 };
+  const INTL_SOURCES = { alibaba: 1, madeinchina: 1, globalsources: 1, europages: 1, indiamart: 1, dhgate: 1, thomasnet: 1, directindustry: 1, aliexpress: 1, aliexpress_apify: 1, cjdropshipping: 1, gshopping: 1, discovery: 1 };
   let _en = null;
   async function englishQuery() {
     if (_en !== null) return _en;
@@ -1158,12 +1158,17 @@ async function searchSuppliers(body, priceMax, hooks) {
     }
     await raceBudget(ws, deadline);
   }
-  const PAID_APIFY = { a1688: 1, alibaba: 1, madeinchina: 1, aliexpress_apify: 1 };
+  /* Actores de Apify (cobran por ejecucion). Todas las regiones van juntas:
+     el producto decide donde esta el fabricante, no una preferencia nuestra. */
+  const PAID_APIFY = { a1688: 1, alibaba: 1, madeinchina: 1, aliexpress_apify: 1, europages: 1, indiamart: 1, dhgate: 1, thomasnet: 1, directindustry: 1, importyeti: 1 };
   const freeSources = candidates.filter(function (id) { return !PAID_APIFY[id]; });
   const paidSources = candidates.filter(function (id) { return PAID_APIFY[id]; });
   await runWave(freeSources);
   const revisable = matches.length + review.length + above.length;
-  if (revisable < 3 && paidSources.length && Date.now() < deadline - 12000) {
+  /* APIFY_ALL=1 lanza siempre la oleada de pago (todas a la vez, sin orden por
+     region). Por defecto solo si lo gratis no deja material revisable. */
+  const forcePaid = String(process.env.APIFY_ALL || "").trim() === "1";
+  if ((forcePaid || revisable < 3) && paidSources.length && Date.now() < deadline - 12000) {
     await runWave(paidSources);
   } else if (paidSources.length) {
     paidSources.forEach(function (id) {

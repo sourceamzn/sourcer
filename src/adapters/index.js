@@ -16,6 +16,8 @@ const descubrir = require("./descubrir");
 const aliexpress = require("./aliexpress");
 const cjdropshipping = require("./cjdropshipping");
 const apifyMarket = require("./apify_market");
+const globalsources = require("./globalsources");
+const importyeti = require("./importyeti");
 const { tarifa, liquidaciones } = require("./tarifa");
 const { buildAdapters } = require("./sources/catalog");
 
@@ -26,6 +28,9 @@ const { buildAdapters } = require("./sources/catalog");
 const adapters = Object.assign(
   { outletpc, lidl, iherb, amazon, keepa, web, inverso, top20, discovery, explorar, descubrir, bigbuy, icecat, aliexpress, cjdropshipping },
   { a1688: apifyMarket.a1688, alibaba: apifyMarket.alibaba, madeinchina: apifyMarket.madeinchina, gshopping: apifyMarket.gshopping, gshopping_ean: apifyMarket.gshoppingEan, foto: apifyMarket.foto },
+  { europages: apifyMarket.europages, indiamart: apifyMarket.indiamart, dhgate: apifyMarket.dhgate, thomasnet: apifyMarket.thomasnet, directindustry: apifyMarket.directindustry },
+  { globalsources },
+  { importyeti },
   buildAdapters(),
   { storefronts, tarifas: tarifa, liquidaciones, newsletters }
 );

@@ -81,7 +81,7 @@ const config = {
     maxCostPerOp: Math.max(0, parseFloat(clean(process.env.APIFY_MAX_COST_PER_OP) || "0.50") || 0),
     /* Actores simultaneos: los de Apify arrancan en frio y comparten proxy;
        lanzar cinco a la vez hace que todos pierdan el turno. */
-    maxConcurrent: Math.min(Math.max(parseInt(clean(process.env.APIFY_MAX_CONCURRENT) || "4", 10) || 4, 1), 6),
+    maxConcurrent: Math.min(Math.max(parseInt(clean(process.env.APIFY_MAX_CONCURRENT) || "6", 10) || 6, 1), 8),
     timeoutSec: Math.min(Math.max(parseInt(clean(process.env.APIFY_TIMEOUT_SEC) || "50", 10) || 50, 10), 300),
     actors: {
       search: clean(process.env.APIFY_SEARCH_ACTOR) || "apify/google-search-scraper",
@@ -92,7 +92,13 @@ const config = {
       mic: clean(process.env.APIFY_MIC_ACTOR) || "agenscrape/made-in-china-com-product-scraper",
       shopping: clean(process.env.APIFY_SHOPPING_ACTOR) || "automation-lab/google-shopping-scraper",
       shoppingEan: clean(process.env.APIFY_SHOPPING_EAN_ACTOR) || "scrapewise/google-shopping",
-      aliexpress: clean(process.env.APIFY_ALIEXPRESS_ACTOR)
+      aliexpress: clean(process.env.APIFY_ALIEXPRESS_ACTOR),
+      /* Directorios B2B (se canjean por otras versiones sin tocar codigo). */
+      europages: clean(process.env.APIFY_EUROPAGES_ACTOR) || "memo23/europages-scraper",
+      indiamart: clean(process.env.APIFY_INDIAMART_ACTOR) || "thirdwatch/indiamart-supplier-scraper",
+      dhgate: clean(process.env.APIFY_DHGATE_ACTOR) || "piotrv1001/dhgate-listings-scraper",
+      thomasnet: clean(process.env.APIFY_THOMASNET_ACTOR) || "zen-studio/thomasnet-suppliers-scraper",
+      directindustry: clean(process.env.APIFY_DIRECTINDUSTRY_ACTOR) || "crawloop/directindustry-scraper"
     }
   },
   /* --- Proveedores/marketplaces con API (clave por tienda) --- */
@@ -100,6 +106,11 @@ const config = {
     apiKey: clean(process.env.BIGBUY_API_KEY),
     base: clean(process.env.BIGBUY_BASE) || "https://api.bigbuy.eu",
     iso: clean(process.env.BIGBUY_ISO) || "es"
+  },
+  /* ImportYeti: datos de aduanas (bill of lading) para saber que fabricante
+     extranjero esta detras de una marca. Sin clave queda inerte. */
+  importyeti: {
+    apiKey: clean(process.env.IMPORTYETI_API_KEY)
   },
   /* Icecat: dos formas de autenticar.
      1. Tokens (recomendado): ICECAT_API_TOKEN + ICECAT_CONTENT_TOKEN. Van en
@@ -136,7 +147,10 @@ const config = {
     maxQueries: Math.min(Math.max(parseInt(clean(process.env.SUPPLIER_MAX_QUERIES) || "4", 10) || 4, 1), 5),
     maxQueriesPaid: Math.min(Math.max(parseInt(clean(process.env.SUPPLIER_MAX_QUERIES_PAID) || "2", 10) || 2, 1), 4),
     /* Con tantos resultados utiles ya no se prueba la siguiente consulta. */
-    enough: Math.max(1, parseInt(clean(process.env.SUPPLIER_ENOUGH) || "5", 10) || 5)
+    enough: Math.max(1, parseInt(clean(process.env.SUPPLIER_ENOUGH) || "5", 10) || 5),
+    /* Global Sources no tiene clave propia: usa el proveedor de scraping si
+       esta configurado. GS_ENABLED=0 lo apaga sin tocar codigo. */
+    globalsources: clean(process.env.GS_ENABLED) !== "0"
   },
   /* Fase 4 · puntuacion de coincidencia. Enriquecimiento de ofertas "a
      revisar" sin EAN: cuantas fichas se abren por busqueda y con que timeout. */
