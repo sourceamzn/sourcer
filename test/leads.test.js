@@ -12,7 +12,7 @@ test("leads: consultas replican la busqueda manual (EAN entre comillas + mayoris
   assert.ok(texts.includes('"8412345678905" al por mayor'));
   assert.ok(texts.some((t) => /"Acme" distribuidor oficial/.test(t)));
   assert.ok(texts.some((t) => /"Acme" "ZX-200" mayorista/.test(t)));
-  assert.ok(q.length <= 10);
+  assert.ok(q.length <= 12);
 });
 
 test("leads: sin EAN se busca por marca; sin marca ni EAN no hay consultas", () => {
@@ -100,4 +100,19 @@ test("inverso: sin dato de ofertas, thirdParty es desconocido (null) y no descar
   const cur = []; cur[3] = 1500; cur[11] = 7;
   const m2 = inv.metricsFromKeepa({ asin: "B0TEST0002", title: "x", stats: { current: cur } });
   assert.equal(m2.thirdParty, 7);
+});
+
+test("leads: caso real Tegui (EAN-8 rellenado con ceros, marca Keepa Legrand, titulo TEGUI)", () => {
+  const b = { ean: "0000013008420", brand: "Legrand", manufacturer: "Legrand", model: "374240", name: "Teléfono Blanco Universal T-71U Serie 7 de TEGUI 374240" };
+  const q = leads.buildLeadQueries(b).map((x) => x.q);
+  assert.ok(!q.some((t) => t.includes("0000013008420")), "nunca se busca el EAN rellenado");
+  assert.ok(q.includes('"13008420" "Legrand" mayorista'));
+  assert.ok(q.includes('"Tegui" "374240"'));
+  /* Con un EAN-13 real disponible, manda ese. */
+  const q2 = leads.buildLeadQueries(Object.assign({}, b, { eans: ["8410256003749"] })).map((x) => x.q);
+  assert.equal(q2[0], '"8410256003749" mayorista');
+  /* tegui.es se reconoce como fabricante aunque Keepa diga Legrand. */
+  const r = leads.rankLeads([{ url: "https://www.tegui.es/telefonos/374240", title: "Teléfono T-71U 374240", query: '"Tegui" "374240"', group: "modelo", position: 1 }],
+    { eans: [b.ean], brand: "Legrand", brands: leads.brandCandidates(b) });
+  assert.equal(r.leads[0].role, "fabricante");
 });
