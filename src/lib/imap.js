@@ -148,6 +148,18 @@ class Imap {
     return out;
   }
 
+  /* Tamano y mensaje completo de un UID (para leer adjuntos). null si supera maxBytes. */
+  async fetchFull(uid, maxBytes) {
+    const sz = await this.cmd("UID FETCH " + Number(uid) + " (RFC822.SIZE)");
+    let size = 0;
+    sz.untagged.forEach((parts) => { const m = parts.map((p) => p.text).join(" ").match(/RFC822\.SIZE (\d+)/i); if (m) size = Number(m[1]); });
+    if (maxBytes && size > maxBytes) return { size: size, raw: null };
+    const r = await this.cmd("UID FETCH " + Number(uid) + " (BODY.PEEK[])");
+    let raw = null;
+    r.untagged.forEach((parts) => { parts.forEach((p) => { if (p.literal && /BODY\[\]/i.test(p.text)) raw = p.literal; }); });
+    return { size: size, raw: raw };
+  }
+
   async append(box, raw, flags) {
     const data = Buffer.from(raw, "utf8");
     return this.cmd("APPEND " + quote(box) + " (" + (flags || "\\Seen") + ") {" + data.length + "}", { literal: data });

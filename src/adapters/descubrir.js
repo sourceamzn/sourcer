@@ -103,17 +103,29 @@ async function runBrave(query, max) {
   return { engine: eng, items: out };
 }
 
-/* ---- motor: Amazon/Keepa (nace con ASIN) ---- */
+/* ---- motor: Amazon/Keepa (nace con ASIN) ----
+   Sin palabra clave: rota por las categorias raiz de amazon.es y usa el
+   Product Finder con filtros de arbitraje (3+ ofertas, oferta FBA de
+   terceros, Buy Box entre 15 y 200 EUR, ordenado por ventas). Despues pasa la
+   regla de Buy Box compartida (2 FBA de terceros) y el calculo de margen. */
 async function runKeepa(query, max, seed) {
   const label = "Keepa";
   const inverso = require("./inverso");
-  const term = query || explorarMod.CATEGORIES[Math.abs(parseInt(seed, 10) || 0) % explorarMod.CATEGORIES.length];
-  const res = await withTimeout(inverso.actions.candidates({ query: term, limit: Math.min(Math.max(max, 6), 20) }), ENGINE_TIMEOUT_MS, label);
+  const cats = inverso.CATEGORY_TERMS || [];
+  const cat = !query && cats.length ? cats[Math.abs(parseInt(seed, 10) || 0) % cats.length] : null;
+  const body = {
+    limit: Math.min(Math.max(max, 10), 30), sort: "aptitud",
+    filters: { minFbaThird: 2, bbRule: 1, requireTwoSellers: 0 },
+    priceMin: 15, priceMaxBB: 200
+  };
+  if (cat) body.categoryId = cat.id; else body.query = query;
+  const term = cat ? cat.name : query;
+  const res = await withTimeout(inverso.actions.candidates(body), ENGINE_TIMEOUT_MS, label);
   if (!res || !res.ok) {
     return { engine: engineResult("keepa", label, { ok: false, reason: res && (res.reason || res.error) }, [], { term: term }), candidates: [] };
   }
   const cands = (unwrap(res).candidates || []).filter(function (c) { return c.asin; });
-  return { engine: engineResult("keepa", label, { ok: true }, cands, { term: term }), candidates: cands.slice(0, max) };
+  return { engine: engineResult("keepa", label, { ok: true }, cands, { term: term, notes: (unwrap(res).notes || []).slice(-4) }), candidates: cands.slice(0, max) };
 }
 
 async function run(body) {
@@ -122,11 +134,16 @@ async function run(body) {
   const max = Math.min(Math.max(parseInt(body.max || "24", 10) || 24, 6), 60);
   const seed = body.seed || Date.now();
   const fresh = body.fresh !== false;
-  const only = Array.isArray(body.engines) && body.engines.length ? body.engines : null;
+  /* Por defecto solo Keepa (nace con ASIN y margen calculado). Las tiendas
+     (Lidl, Outlet PC, iHerb), Google Shopping y Brave se piden explicitamente
+     o con DISCOVER_ENGINES: rara vez traen EAN y cada cruce con Amazon gasta
+     tokens de Keepa para casi ningun resultado. */
+  const envEng = String(process.env.DISCOVER_ENGINES || "keepa").split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+  const only = Array.isArray(body.engines) && body.engines.length ? body.engines : envEng;
   const want = function (id) { return !only || only.indexOf(id) !== -1; };
 
   const jobs = [];
-  if (want("keepa")) jobs.push(runKeepa(query, Math.ceil(max / 2), seed));
+  if (want("keepa")) jobs.push(runKeepa(query, only.length === 1 ? max : Math.ceil(max / 2), seed));
   SHOPS.forEach(function (id) { if (want(id)) jobs.push(runAdapter(id, id === "outletpc" ? "Outlet PC" : id === "lidl" ? "Lidl" : "iHerb", query, max, seed, fresh)); });
   if (want("explorar")) jobs.push(runAdapter("explorar", "Google Shopping (Apify)", query, max, seed, fresh));
   /* Brave necesita una consulta: sin palabra clave usa una categoria rotatoria. */

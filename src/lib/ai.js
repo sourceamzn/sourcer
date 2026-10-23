@@ -42,12 +42,32 @@ async function note(purpose, data, model) {
 }
 
 let workingModel = null;
+/* Se "pre-rellena" la respuesta con "{" para que el modelo conteste solo con
+   el JSON (sin texto ni bloques ``` alrededor). */
 async function call(model, system, user, maxTokens) {
   return httpLib.jsonFetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json", "x-api-key": cfg().key, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({ model: model, max_tokens: maxTokens || 700, system: system, messages: [{ role: "user", content: user }] })
-  }, 30000);
+    body: JSON.stringify({ model: model, max_tokens: maxTokens || 700, system: system, messages: [{ role: "user", content: user }, { role: "assistant", content: "{" }] })
+  }, 45000);
+}
+/* JSON tolerante: quita ``` y, si la respuesta se corto por longitud, cierra
+   lo que falte (se pierde como mucho el ultimo elemento incompleto). */
+function parseLoose(text) {
+  let t = String(text || "").replace(/```(?:json)?/gi, "").trim();
+  if (t[0] !== "{") t = "{" + t;
+  const end = t.lastIndexOf("}");
+  try { return JSON.parse(t.slice(0, end + 1)); } catch (e) {}
+  /* Reparar truncado: cortar en el ultimo objeto completo de un array y cerrar. */
+  for (let cut = t.length; cut > 1; cut = t.lastIndexOf("}", cut - 1)) {
+    const head = t.slice(0, cut + 1);
+    const opens = (head.match(/\[/g) || []).length - (head.match(/\]/g) || []).length;
+    const braces = (head.match(/\{/g) || []).length - (head.match(/\}/g) || []).length;
+    if (opens < 0 || braces < 0) continue;
+    try { return JSON.parse(head + "]".repeat(opens) + "}".repeat(braces)); } catch (e) {}
+    if (cut <= 0) break;
+  }
+  return null;
 }
 
 /* Devuelve { ok, text, json } o { ok:false, reason }. Espera JSON en la respuesta. */
@@ -68,10 +88,8 @@ async function askJson(purpose, system, user, maxTokens) {
   workingModel = model;
   await note(purpose, r.data, model);
   const text = ((r.data && r.data.content) || []).map(function (b) { return b && b.text ? b.text : ""; }).join("").trim();
-  let json = null;
-  const m = text.match(/\{[\s\S]*\}/);
-  if (m) { try { json = JSON.parse(m[0]); } catch (e) { json = null; } }
-  try { events.add("ai", { purpose: purpose, ok: Boolean(json), model: model }); } catch (e) {}
+  const json = parseLoose(text);
+  try { events.add("ai", { purpose: purpose, ok: Boolean(json), model: model, stop: r.data && r.data.stop_reason, head: json ? undefined : text.slice(0, 160) }); } catch (e) {}
   return { ok: Boolean(json), text: text, json: json, model: model, reason: json ? null : "respuesta_no_json" };
 }
 
@@ -96,7 +114,7 @@ async function analyzeReply(ctx) {
     "\"adjuntos_mencionados\": true/false," +
     "\"siguiente_paso\": \"que deberiamos hacer ahora, en una frase\"," +
     "\"borrador_respuesta\": \"respuesta breve y educada, en el idioma del proveedor, para que la revisemos antes de enviarla, firmada con nuestro nombre y empresa; sin inventar precios, cantidades ni compromisos; sin mencionar Amazon ni marketplaces, sin revelar precio objetivo ni datos de ventas; si preguntan por el canal de venta, pon null (eso lo responde una persona)\"}";
-  const r = await askJson("respuesta", system, user, 900);
+  const r = await askJson("respuesta", system, user, 2000);
   if (!r.ok) return r;
   const j = r.json;
   if (REPLY_TYPES.indexOf(j.tipo) === -1) j.tipo = "otro";
@@ -110,7 +128,7 @@ async function translateEmail(m) {
   const name = LANG_NAMES[lang] || lang;
   const system = "Traduces correos comerciales B2B del espanol a otros idiomas. Traduccion fiel, natural y profesional, con el mismo tono (cercano y educado). No anadas ni quites nada: ni frases, ni datos, ni enlaces. Mantén exactamente nombres propios, marcas, referencias, EAN, cifras, emails, telefonos y webs. Devuelve SOLO JSON valido.";
   const user = "Traduce al " + name + " (" + lang + ") este correo.\n\nAsunto:\n" + String(m.subject || "") + "\n\nCuerpo:\n\"\"\"\n" + String(m.text || "") + "\n\"\"\"\n\nDevuelve: {\"asunto\": \"...\", \"cuerpo\": \"...\"} (si el asunto empieza por \"Re: \", conservalo tal cual al principio).";
-  const r = await askJson("traducir_correo", system, user, 1500);
+  const r = await askJson("traducir_correo", system, user, 2500);
   if (!r.ok) return r;
   const subject = String(r.json.asunto || "").trim(), text = String(r.json.cuerpo || "").trim();
   if (!subject || !text) return { ok: false, reason: "traduccion_vacia" };
@@ -131,7 +149,7 @@ async function suggestSupplierQueries(ctx) {
   const user = prodLine(ctx) + "\n\nYa vamos a buscar en Google: " + JSON.stringify((ctx.existing || []).slice(0, 12)) +
     "\n\nPropon como maximo 3 busquedas de Google NUEVAS y distintas que ayuden a encontrar al fabricante o a sus distribuidores/mayoristas en Espana (por ejemplo, con el nombre de la empresa titular de la marca si la conoces con seguridad, o terminos del sector como 'material electrico mayorista'). No repitas las existentes." +
     "\nDevuelve: {\"titular_marca\": \"empresa titular de la marca si lo sabes con seguridad, si no null\", \"consultas\": [\"...\"]}";
-  const r = await askJson("proveedores_consultas", system, user, 300);
+  const r = await askJson("proveedores_consultas", system, user, 700);
   if (!r.ok) return r;
   const q = (Array.isArray(r.json.consultas) ? r.json.consultas : []).map(function (x) { return String(x || "").trim().slice(0, 120); }).filter(Boolean).slice(0, 3);
   return { ok: true, queries: q, owner: r.json.titular_marca ? String(r.json.titular_marca).slice(0, 80) : null };
@@ -146,7 +164,7 @@ async function classifyLeads(ctx, items) {
   const user = prodLine(ctx) + "\n\nWebs:\n" + JSON.stringify(list) +
     "\n\nPara cada web devuelve su papel: fabricante (la marca o su fabricante), distribuidor_oficial, mayorista (vende a profesionales/B2B, aunque no sea oficial), marketplace_b2b (Alibaba, Ankorstore...), info_ean (base de datos de codigos), minorista (tienda al consumidor), irrelevante (blog, foro, noticia, manual, otra cosa)." +
     "\nDevuelve: {\"webs\": [{\"id\": ..., \"rol\": uno de " + JSON.stringify(LEAD_ROLES) + ", \"vende_producto\": true/false/null (si ofrece este producto o esta marca), \"motivo\": \"max 12 palabras\"}]}";
-  const r = await askJson("proveedores_clasificar", system, user, 1400);
+  const r = await askJson("proveedores_clasificar", system, user, 3000);
   if (!r.ok) return r;
   const out = (Array.isArray(r.json.webs) ? r.json.webs : []).filter(function (w) { return w && LEAD_ROLES.indexOf(w.rol) !== -1; });
   return { ok: true, items: out };
@@ -161,7 +179,7 @@ async function reviewTitles(query, items) {
     "\n\nMarca para descartar SOLO los que claramente no son lo que el usuario busca: repuestos o accesorios de otro producto, fundas, recambios, productos de otra categoria. NO descartes por precio, marca o calidad." +
     "\nAnade hasta 4 busquedas relacionadas (en espanol, 1-3 palabras) con buen potencial para arbitraje en Amazon.es." +
     "\nDevuelve: {\"descartar\": [{\"asin\": \"...\", \"motivo\": \"max 8 palabras\"}], \"sugerencias\": [\"...\"]}";
-  const r = await askJson("productos_titulos", system, user, 900);
+  const r = await askJson("productos_titulos", system, user, 1500);
   if (!r.ok) return r;
   const valid = {};
   items.forEach(function (x) { valid[x.asin] = 1; });
@@ -177,4 +195,4 @@ async function status() {
   return { ready: ready(), model: workingModel || c.model, fallback: c.fallback, dailyLimit: c.daily, usage: await usage() };
 }
 
-module.exports = { ready, askJson, analyzeReply, translateEmail, suggestSupplierQueries, classifyLeads, reviewTitles, status, cfg, REPLY_TYPES, LEAD_ROLES };
+module.exports = { parseLoose, ready, askJson, analyzeReply, translateEmail, suggestSupplierQueries, classifyLeads, reviewTitles, status, cfg, REPLY_TYPES, LEAD_ROLES };

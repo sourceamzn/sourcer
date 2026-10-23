@@ -87,6 +87,18 @@ function health(req, res) {
     /* Consumo real de Apify desde el arranque (peticiones ejecutadas, no de cache). */
     apifyUsage: apifyLib.stats,
     keepaUsage: require("../lib/keepacost").snapshot(),
+    /* Resumen sencillo para la pantalla «Conexiones» del frontend. */
+    services: (function () {
+      let ai = false, mail = {}, db = "";
+      try { ai = require("../lib/ai").ready(); } catch (e) {}
+      try { mail = config.mail || {}; } catch (e) {}
+      try { db = require("../lib/docstore").kind(); } catch (e) {}
+      return {
+        keepa: keepaReady(), apify: apifyReady(), ai: Boolean(ai),
+        smtp: Boolean(mail.smtp && mail.smtp.host && mail.smtp.user), imap: Boolean(mail.imap && mail.imap.host && mail.imap.user),
+        database: db === "postgres", keepaTokens: require("../lib/keepacost").usage.tokensLeft
+      };
+    })(),
     top20: top20.status(),
     adapters: list(),
     /* Catalogo del PDF con las particularidades por proveedor (EAN, stock

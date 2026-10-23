@@ -11,6 +11,8 @@ const tariffs = require("./routes/tariffs");
 const contacts = require("./routes/contacts");
 const historyRoutes = require("./routes/history");
 const outreachRoutes = require("./routes/outreach");
+const tarifCrossRoutes = require("./routes/tarifcross");
+const tarifCross = require("./lib/tarifcross");
 const outreachLib = require("./lib/outreach");
 const events = require("./lib/events");
 const debug = require("./routes/debug");
@@ -22,7 +24,8 @@ const pkg = require("../package.json");
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
-app.use(express.json({ limit: "1mb" }));
+/* 6 MB: una tarifa de 5000 filas viaja en una sola peticion. */
+app.use(express.json({ limit: "6mb" }));
 
 app.use(security.cors({ origins: function () { return config.allowedOrigins; } }));
 
@@ -52,6 +55,7 @@ app.get("/suppliers/log/:id", events.guard, debug.jobLog);
 app.post("/sourcing/:source/:action", apiLimit, requireApiKey, sourcing);
 app.get("/product/:ean", apiLimit, requireApiKey, product.productByEan);
 app.post("/tarifas/import", apiLimit, requireApiKey, tariffs.importTariffs);
+app.use("/tarifas/cruces", apiLimit, requireApiKey, tarifCrossRoutes);
 
 /* Inicializa el almacen del vigilante en segundo plano (no bloquea el arranque). */
 store.init().catch(function () {});
@@ -70,6 +74,7 @@ if (require.main === module) {
   });
   scheduler.start();
   outreachLib.startScheduler();
+  tarifCross.resume();
 }
 
 module.exports = app;

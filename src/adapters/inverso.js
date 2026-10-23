@@ -347,8 +347,8 @@ async function keepaFinder(body) {
    pagar tokens por descubrirlo despues. Si Keepa rechaza algun filtro, se
    repite la consulta sin filtros (nunca se queda sin pool por esto). */
 const ARBITRAGE_FILTERS = { current_COUNT_NEW_gte: 3, current_NEW_FBA_gte: 100 };
-async function finderSafe(selection, notes) {
-  const withF = Object.assign({}, selection, ARBITRAGE_FILTERS);
+async function finderSafe(selection, notes, extra) {
+  const withF = Object.assign({}, selection, ARBITRAGE_FILTERS, extra || {});
   let f = await keepaFinder({ selection: withF });
   if (f.ok && f.asins.length) { f.filtered = true; return f; }
   if (!f.ok && notes) notes.push("Product Finder rechazo los filtros de arbitraje (" + (f.reason || "error") + "); se repite sin filtros.");
@@ -525,10 +525,17 @@ function eanZeroResult(body, priceMax, reason, message) {
    lentos. Se reservan para la fase de palabra clave, que corre una sola vez,
    y asi dejan de competir entre si por el mismo token de Apify. */
   const NO_EAN_SOURCES = { a1688: 1, alibaba: 1, madeinchina: 1, globalsources: 1, europages: 1, indiamart: 1, dhgate: 1, thomasnet: 1, directindustry: 1, aliexpress: 1, aliexpress_apify: 1, discovery: 1, gshopping: 1 };
+const DEFAULT_DISABLED = "a1688,alibaba,madeinchina,globalsources,europages,indiamart,dhgate,thomasnet,directindustry,importyeti,aliexpress,aliexpress_apify,cjdropshipping,lidl,outletpc,iherb,selectavision,yesstyle,corteingles,zalandoprive,gemimarket,norica,famosa,planafabrega,vallesviasat,gshopping,foto";
+function disabledSources() {
+  const raw = String(process.env.SUPPLIER_SOURCES_DISABLED == null ? DEFAULT_DISABLED : process.env.SUPPLIER_SOURCES_DISABLED).trim();
+  if (!raw || raw === "none") return [];
+  return raw.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+}
 async function searchSuppliersEan(body, priceMax, hooks, srcEans) {
   hooks = hooks || {};
   const { adapters } = require("./index");
   const skip = { amazon: 1, keepa: 1, web: 1, storefronts: 1, newsletters: 1, explorar: 1, gemimarket: 1, selectavision: 1 };
+  disabledSources().forEach(function (id) { skip[id] = 1; });
   const rank = { gshopping_ean: 0, discovery: 0, discovery_open: 0, supplier_market: 1, wholesale: 2, marketplace: 2 };
   const candidates = Object.keys(adapters).filter(function (id) {
     const a = adapters[id];
@@ -907,6 +914,11 @@ async function searchSuppliers(body, priceMax, hooks) {
   /* El buscador de fabricantes ya lanza las busquedas de Google de este
      producto: repetirlas en `discovery` duplicaba el gasto de Apify. */
   if (body && body.__leadsRunning) skip.discovery = 1;
+  /* Fuentes que no sirven para buscar el proveedor de un producto con EAN:
+     catalogos de tiendas que devuelven su catalogo entero (ruido), mercados
+     chinos/B2B internacionales y dropshipping. Se reactivan con
+     SUPPLIER_SOURCES_DISABLED (lista separada por comas; "none" = ninguna). */
+  disabledSources().forEach(function (id) { skip[id] = 1; });
   /* Primero las fuentes que buscan en toda la red (buscador, 1688, Alibaba,
      Google Shopping...) y las API de mayoristas: son las lentas y las que mas
      valen; las webs de catalogo fijo van detras. */
@@ -1771,7 +1783,12 @@ async function candidatesLarge(body) {
       perPage: Math.min(500, Math.max(200, limit * 6)), productType: [0, 1],
       sort: [["current_SALES", "asc"]], current_SALES_gte: 1
     };
-    let fc = await finderSafe(Object.assign({ rootCategory: [Number(categoryDigits)] }, baseSel), notes);
+    /* Banda de precio (Buy Box) opcional: en arbitraje con distribuidor, por
+       debajo de ~15 EUR las tarifas de Amazon se comen el margen. */
+    const band = {};
+    if (num(body && body.priceMin) > 0) band.current_BUY_BOX_SHIPPING_gte = Math.round(num(body.priceMin) * 100);
+    if (num(body && body.priceMaxBB) > 0) band.current_BUY_BOX_SHIPPING_lte = Math.round(num(body.priceMaxBB) * 100);
+    let fc = await finderSafe(Object.assign({ rootCategory: [Number(categoryDigits)] }, baseSel), notes, band);
     /* Si Keepa no acepta rootCategory, se prueba con categories_include. */
     if (!fc.ok || !fc.asins.length) fc = await finderSafe(Object.assign({ categories_include: [String(categoryDigits)] }, baseSel), notes);
     if (fc.ok && fc.asins.length) {
@@ -2039,7 +2056,10 @@ async function candidatesLarge(body) {
     if (sortKey === "precio") {
       const d = (b.pvp || 0) - (a.pvp || 0); if (d) return d;
     } else if (sortKey === "descuento") {
-      const d = ((b.plan && b.plan.discount) || 0) - ((a.plan && a.plan.discount) || 0); if (d) return d;
+      /* Menor descuento necesario primero: son los que un distribuidor puede
+         cubrir (antes estaba al reves y salian primero los imposibles). */
+      const rk = rankOf(a) - rankOf(b); if (rk) return rk;
+      const d = ((a.plan && a.plan.discount) || 999) - ((b.plan && b.plan.discount) || 999); if (d) return d;
     } else if (sortKey === "ventas") {
       const d = (b.sales || 0) - (a.sales || 0); if (d) return d;
     } else if (sortKey === "aptitud") {
@@ -2400,6 +2420,7 @@ inverso.buildSourcesPayload = buildSourcesPayload;
 
 module.exports = inverso;
 module.exports.planFor = planFor;
+module.exports.CATEGORY_TERMS = CATEGORY_TERMS;
 module.exports.metricsFromKeepa = metricsFromKeepa;
 module.exports.keepaImageUrl = keepaImageUrl;
 module.exports.keepaBestSellers = keepaBestSellers;
@@ -2407,3 +2428,4 @@ module.exports.keepaProductsByAsins = keepaProductsByAsins;
 module.exports.keepaCategories = keepaCategories;
 module.exports.keepaTokens = keepaTokens;
 module.exports.keepaReady = keepaReady;
+module.exports.keepaRequest = keepaRequest;

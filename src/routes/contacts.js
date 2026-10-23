@@ -128,13 +128,35 @@ router.patch("/:id", ah(async function (req, res) {
 router.post("/reset", ah(async function (req, res) {
   if (String((req.body || {}).confirm || "") !== "VACIAR") return res.status(400).json({ ok: false, reason: "falta_confirmacion" });
   const list = await docs.list(COLL);
-  for (let i = 0; i < list.length; i++) await docs.del(COLL, list[i].id);
+  for (let i = 0; i < list.length; i++) { await dropAttachments(list[i]); await docs.del(COLL, list[i].id); }
   res.json({ ok: true, deleted: list.length });
 }));
 
+async function dropAttachments(c) {
+  const list = (c && c.attachments) || [];
+  for (let i = 0; i < list.length; i++) { try { await docs.del("attachments", list[i].id); } catch (e) {} }
+}
+
 router.delete("/:id", ah(async function (req, res) {
-  const ok = await docs.del(COLL, str(req.params.id, 200));
+  const id = str(req.params.id, 200);
+  await dropAttachments(await docs.get(COLL, id));
+  const ok = await docs.del(COLL, id);
   res.json({ ok: ok });
+}));
+
+/* Adjuntos de tarifa recibidos por correo (Excel/CSV/PDF), en base64. */
+router.get("/:id/attachments/:aid", ah(async function (req, res) {
+  const a = await docs.get("attachments", str(req.params.aid, 200));
+  if (!a || a.contactId !== str(req.params.id, 200)) return res.status(404).json({ ok: false, reason: "no_encontrado" });
+  res.json({ ok: true, attachment: a });
+}));
+router.delete("/:id/attachments/:aid", ah(async function (req, res) {
+  const id = str(req.params.id, 200), aid = str(req.params.aid, 200);
+  const c = await docs.get(COLL, id);
+  const a = await docs.get("attachments", aid);
+  if (a && a.contactId === id) await docs.del("attachments", aid);
+  if (c) { c.attachments = (c.attachments || []).filter(function (x) { return x.id !== aid; }); c.updatedAt = new Date().toISOString(); await docs.put(COLL, id, c); }
+  res.json({ ok: true, contact: c });
 }));
 
 router.post("/:id/scan", ah(async function (req, res) {

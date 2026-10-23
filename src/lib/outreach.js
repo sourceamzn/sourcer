@@ -25,6 +25,7 @@ const imapLib = require("./imap");
 const store = require("./store");
 const events = require("./events");
 const cal = require("./calendar");
+const mime = require("./mime");
 const { config } = require("../config");
 
 const COLL = "contacts";
@@ -385,6 +386,24 @@ async function createSuggestedDistributor(c, d) {
   return n;
 }
 
+/* Adjuntos de tarifa (Excel/CSV/PDF) de una respuesta: se guardan en la base
+   de datos (coleccion `attachments`) y se enlazan al contacto. */
+const ATT = "attachments";
+const SHEET_RE = /\.(xlsx|xlsm|xls|ods|csv|tsv)$/i;
+async function saveAttachments(c, f) {
+  const meta = [];
+  const list = f.attachments || [];
+  for (let i = 0; i < list.length; i++) {
+    const a = list[i];
+    const id = String(c.id).replace(/[^a-z0-9.-]/gi, "_") + "_" + Date.now().toString(36) + i;
+    const at = nowIso();
+    await docs.put(ATT, id, { id: id, contactId: c.id, filename: a.filename, mime: a.mime, size: a.size, at: at, from: f.from, subject: f.subject, b64: Buffer.isBuffer(a.data) ? a.data.toString("base64") : String(a.b64 || "") });
+    meta.push({ id: id, filename: a.filename, mime: a.mime, size: a.size, at: at, from: f.from });
+  }
+  if (meta.length) c.attachments = meta.concat(c.attachments || []).slice(0, 30);
+  return meta;
+}
+
 async function applyFinding(f) {
   const c = await docs.get(COLL, f.contact.id);
   if (!c) return;
@@ -420,7 +439,15 @@ async function applyFinding(f) {
     hist(c, "respuesta", "Pidió la baja: «" + f.snippet.slice(0, 160) + "»");
     await alert(c, "Baja: " + label(c), f.snippet);
   } else {
-    if (o.state === "respondido" && o.lastReplyFrom === f.from && o.lastReplySubject === f.subject) return;
+    const files = await saveAttachments(c, f);
+    if (f.note) hist(c, "adjuntos", f.note);
+    const sheet = files.some(function (a) { return SHEET_RE.test(a.filename) || /pdf/i.test(a.mime); });
+    /* Segundo correo del mismo hilo: se apunta y, si trae la tarifa, se avisa. */
+    if (o.state === "respondido" && o.lastReplyFrom === f.from && o.lastReplySubject === f.subject) {
+      hist(c, "respuesta", "Nuevo correo de " + f.from + (files.length ? " con " + files.length + " adjunto(s): " + files.map(function (a) { return a.filename; }).join(", ") : "") + ": «" + f.snippet.slice(0, 160) + "»");
+      if (sheet) { c.status = "tarifa"; await alert(c, "Tarifa recibida de " + label(c), files.map(function (a) { return a.filename; }).join(", ") + " — ábrela en Fabricantes / Distribuidores y pulsa «Cruzar con Amazon»."); }
+      c.updatedAt = now; await docs.put(COLL, c.id, c); return;
+    }
     /* Contesta cualquiera: se para la secuencia al instante. */
     o.state = "respondido"; o.nextAt = null; o.callAt = null; o.retryAt = null; o.draft = null;
     o.repliedAt = now; o.repliedAfter = o.attempts || 0; o.lastReplyFrom = f.from; o.lastReplySubject = f.subject;
@@ -428,7 +455,8 @@ async function applyFinding(f) {
     c.lastReply = { at: now, from: f.from, subject: f.subject, snippet: f.snippet, ai: ai };
     const tipo = ai ? ai.tipo : "";
     let title = "Ha respondido " + label(c), extra = "";
-    if (tipo === "tarifa") { c.status = "tarifa"; title = "Tarifa recibida de " + label(c); extra = "Revisa la tarifa y decide el primer pedido."; }
+    if (tipo === "tarifa" || (sheet && !tipo)) { c.status = "tarifa"; title = "Tarifa recibida de " + label(c); extra = files.length ? ("Adjunto(s): " + files.map(function (a) { return a.filename; }).join(", ") + ". Ábrelo en Fabricantes / Distribuidores y pulsa «Cruzar con Amazon».") : "Revisa la tarifa y decide el primer pedido."; }
+    else if (sheet) { c.status = "tarifa"; extra = "Trae adjunto(s): " + files.map(function (a) { return a.filename; }).join(", ") + " (pulsa «Cruzar con Amazon» en su ficha)."; }
     else if (tipo === "pide_alta" || tipo === "pide_info") { title = "Pide datos o documentación: " + label(c); extra = "Aprueba tú el envío de la documentación (la app no responde)."; }
     else if (tipo === "pregunta_canal") { title = "Pregunta por el canal de venta: " + label(c); extra = "Responde tú en persona. La app no contesta."; c.needsHuman = true; }
     else if (tipo === "solo_distribuidores") {
@@ -440,7 +468,7 @@ async function applyFinding(f) {
       title = "Rechazado: " + label(c); extra = "No se le volverá a escribir.";
     }
     if (tipo && tipo !== "tarifa") c.needsHuman = true;
-    hist(c, "respuesta", "Respuesta de " + f.from + ": «" + f.snippet.slice(0, 200) + "»" + (tipo ? " · IA: " + tipo : ""));
+    hist(c, "respuesta", "Respuesta de " + f.from + ": «" + f.snippet.slice(0, 200) + "»" + (tipo ? " · IA: " + tipo : "") + (files.length ? " · adjuntos: " + files.map(function (a) { return a.filename; }).join(", ") : ""));
     await alert(c, title, [extra, ai && ai.resumen ? "IA: " + ai.resumen : "", f.from + ": " + f.snippet].filter(Boolean).join(" — "));
   }
   c.updatedAt = now;
@@ -486,7 +514,16 @@ async function checkReplies(im, st) {
     const msgs = await im.fetchHeaders(uids.slice(i, i + 40), 4000);
     for (let j = 0; j < msgs.length; j++) {
       const f = classifyMessage(msgs[j], idx, config.mail.smtp.from);
-      if (f) { found++; await applyFinding(f); }
+      if (!f) continue;
+      /* Respuesta con adjuntos: se descarga el mensaje completo (max 25 MB). */
+      if (f.kind === "respuesta" && msgs[j].uid && mime.isMultipart(msgs[j].header)) {
+        try {
+          const full = await im.fetchFull(msgs[j].uid, 25 * 1024 * 1024);
+          if (full.raw) f.attachments = mime.tariffAttachments(full.raw);
+          else if (full.size) f.note = "Adjuntos demasiado grandes (" + Math.round(full.size / 1048576) + " MB): descárgalos desde el correo.";
+        } catch (e) { f.note = "No se pudieron leer los adjuntos: " + String(e && e.message || e).slice(0, 80); }
+      }
+      found++; await applyFinding(f);
     }
   }
   if (uids.length) st.imap.lastUid = Math.max.apply(null, [st.imap.lastUid || 0].concat(uids));

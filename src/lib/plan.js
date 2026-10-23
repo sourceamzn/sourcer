@@ -23,7 +23,10 @@ const PLAN_DEFAULT = {
      Se exigen al menos 2 FBA de terceros (sin contar Amazon). Los dos
      terceros distintos en la Buy Box son un modo estricto opcional. */
   bbManufacturerMin: 95, bbThirdMax: 5, bbSingleThird: 97,
-  requireTwoSellers: 1
+  /* La regla de 2 FBA de terceros que ganan la Buy Box (buyBoxStats) ya cubre
+     "no se comparte la Buy Box"; este modo extra (2 terceros distintos en el
+     historial) queda opcional, como lo envia la interfaz. */
+  requireTwoSellers: 0
 };
 
 function num(v, d) {
