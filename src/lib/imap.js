@@ -129,7 +129,7 @@ class Imap {
   /* Cabeceras + primeros bytes del texto de cada UID. */
   async fetchHeaders(uids, textBytes) {
     if (!uids.length) return [];
-    const items = "UID BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE CONTENT-TRANSFER-ENCODING)]" + (textBytes ? " BODY.PEEK[TEXT]<0." + textBytes + ">" : "");
+    const items = "UID BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE CONTENT-TRANSFER-ENCODING AUTO-SUBMITTED X-AUTORESPOND X-AUTOREPLY)]" + (textBytes ? " BODY.PEEK[TEXT]<0." + textBytes + ">" : "");
     const r = await this.cmd("UID FETCH " + uids.join(",") + " (" + items + ")");
     const out = [];
     r.untagged.forEach((parts) => {
@@ -181,7 +181,7 @@ function emailOf(s) {
   return m ? m[1].trim().toLowerCase() : "";
 }
 /* Texto legible del principio del cuerpo (plano, base64 o quoted-printable). */
-function readableText(header, text) {
+function readableText(header, text, max) {
   let t = String(text || "");
   const h = parseHeaders(header);
   const cte = String(h["content-transfer-encoding"] || "").toLowerCase();
@@ -196,7 +196,7 @@ function readableText(header, text) {
   t = t.replace(/<[^>]+>/g, " ");
   /* Se corta el texto citado ("El ... escribio:", lineas con >). */
   t = t.split(/\n>|\nEl .{5,80} escribi[oó]:|\nOn .{5,80} wrote:|-----Original Message-----|-----Mensaje original-----/i)[0];
-  return t.replace(/\s+/g, " ").trim().slice(0, 600);
+  return t.replace(/\s+/g, " ").trim().slice(0, max || 600);
 }
 
 module.exports = { Imap, parseHeaders, emailOf, decodeWords, readableText, quote };

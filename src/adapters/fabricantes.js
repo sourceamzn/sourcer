@@ -38,6 +38,10 @@ async function readPage(url, ms) {
   return null;
 }
 
+function withTimeout(p, ms) {
+  return Promise.race([p, new Promise(function (r) { const t = setTimeout(function () { r({ ok: false, reason: "timeout" }); }, ms); if (t.unref) t.unref(); })]);
+}
+
 async function find(body, hooks) {
   body = body || {};
   hooks = hooks || {};
@@ -55,10 +59,28 @@ async function find(body, hooks) {
   }
   const ctx = { eans: eans, brand: brand, manufacturer: String(body.manufacturer || "").trim(), brands: leadsLib.brandCandidates(Object.assign({}, body, { brand: brand })) };
   const queries = leadsLib.buildLeadQueries(Object.assign({}, body, { brand: brand }), { max: c.maxQueries, lang: (config.discovery && config.discovery.lang) || "es" });
-  const links = leadsLib.googleLinks(queries);
+  /* IA (Haiku): hasta 3 busquedas extra (titular real de la marca, terminos del sector). */
+  const aiLib = require("../lib/ai");
+  const aiCtx = { name: String(body.name || "").slice(0, 160), brand: brand, manufacturer: ctx.manufacturer, model: String(body.partNumber || body.model || ""), ean: leadsLib.bestEans(body)[0] || "" };
+  let aiInfo = { used: false };
+  if (aiLib.ready() && queries.length) {
+    try {
+      const sq = await withTimeout(aiLib.suggestSupplierQueries(Object.assign({ existing: queries.map(function (x) { return x.q; }) }, aiCtx)), 9000);
+      if (sq && sq.ok) {
+        aiInfo.used = true;
+        aiInfo.owner = sq.owner || null;
+        const seen = {};
+        queries.forEach(function (x) { seen[x.q.toLowerCase()] = 1; });
+        sq.queries.forEach(function (q) { if (!seen[q.toLowerCase()]) { seen[q.toLowerCase()] = 1; queries.push({ q: q, group: "ia", intent: "ia" }); } });
+        aiInfo.queries = sq.queries;
+        if (aiInfo.owner) { ctx.brands = ctx.brands.concat([aiInfo.owner]); }
+      }
+    } catch (e) {}
+  }
   if (!queries.length) {
     return { ok: false, reason: "sin_identidad", data: { queries: [], googleLinks: [], leads: [], retailers: [], note: "Sin EAN ni marca no se puede buscar fabricante/distribuidor." } };
   }
+  const links = leadsLib.googleLinks(queries);
   const discovery = require("./discovery");
   const sr = await discovery.searchQueries(queries, { perQuery: c.perQuery, timeoutMs: c.timeoutMs });
   const ranked = leadsLib.rankLeads(sr.results || [], ctx);
@@ -76,15 +98,40 @@ async function find(body, hooks) {
           if (!html) continue;
           checked++;
           leadsLib.applyPage(lead, leadsLib.pageSignals(html, ctx, lead.url));
+          /* Texto de la pagina para que la IA lo lea (no se devuelve). */
+          Object.defineProperty(lead, "_text", { value: String(html).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 1500), enumerable: false });
         } catch (e) {}
       }
     };
     await Promise.all([worker(), worker(), worker(), worker()]);
   }
-  /* La pagina puede haber convertido una pista en minorista. */
-  const leads = [], retailers = ranked.retailers.slice();
-  ranked.leads.forEach(function (l) {
-    if (l.role === "minorista" || l.role === "minorista_probable") retailers.push(l); else leads.push(l);
+  /* IA (Haiku): una sola llamada clasifica las mejores pistas leyendo titulo,
+     fragmento y texto de su web. Corrige lo que las reglas de palabras fallan
+     (un mayorista sin la palabra "mayorista", un blog con el EAN...). */
+  if (aiLib.ready()) {
+    try {
+      const pool = ranked.leads.slice(0, 16).concat(ranked.retailers.slice(0, 6));
+      const cl = await withTimeout(aiLib.classifyLeads(aiCtx, pool.map(function (l, i) { return { id: i, host: l.host, title: l.title, snippet: l.snippet, text: l._text || "" }; })), 20000);
+      if (cl && cl.ok) {
+        aiInfo.used = true;
+        aiInfo.classified = cl.items.length;
+        cl.items.forEach(function (w) {
+          const l = pool[Number(w.id)];
+          if (!l) return;
+          l.ai = { rol: w.rol, vende: w.vende_producto === true ? true : (w.vende_producto === false ? false : null), motivo: String(w.motivo || "").slice(0, 120) };
+          /* La regla del dominio de la marca manda sobre la IA para "fabricante". */
+          if (l.role !== "fabricante" || w.rol === "fabricante") l.role = w.rol;
+          l.roleLabel = leadsLib.ROLE_LABEL[l.role] || l.roleLabel;
+          if (l.ai.vende === true) l.score += 10;
+          if (l.ai.vende === false && l.role !== "fabricante") l.score -= 15;
+        });
+      } else if (cl && cl.reason) aiInfo.error = cl.reason;
+    } catch (e) {}
+  }
+  /* La pagina o la IA pueden haber convertido una pista en minorista o irrelevante. */
+  const leads = [], retailers = [];
+  ranked.leads.concat(ranked.retailers).forEach(function (l) {
+    if (l.role === "minorista" || l.role === "minorista_probable" || l.role === "irrelevante") retailers.push(l); else leads.push(l);
   });
   /* Precio del candidato frente al precio maximo de compra y al punto de
      equilibrio (lib/plan). Solo ordena y etiqueta: no descarta. */
@@ -97,7 +144,7 @@ async function find(body, hooks) {
      valida (arbitraje online): se sube a la lista principal, marcada. */
   for (let i = retailers.length - 1; i >= 0; i--) {
     const r = retailers[i];
-    if (r.priceCheck && r.priceCheck.band === "ok") {
+    if (r.role !== "irrelevante" && r.priceCheck && r.priceCheck.band === "ok") {
       r.retailOk = true;
       r.roleLabel = "Tienda con precio que deja margen";
       leads.push(r);
@@ -127,7 +174,7 @@ async function find(body, hooks) {
     source: "fabricantes", ean: leadsLib.bestEans(body)[0] || "", brand: brand, manufacturer: ctx.manufacturer,
     queries: queries, googleLinks: links, engines: engines, errors: sr.errors || [],
     rawResults: (sr.results || []).length, pagesChecked: checked,
-    leads: leads.slice(0, 30), retailers: retailers.slice(0, 20), counts: counts, target: target,
+    leads: leads.slice(0, 30), retailers: retailers.slice(0, 20), counts: counts, target: target, ai: aiInfo,
     diagnosis: diagnosis, ms: Date.now() - t0
   };
   try {

@@ -12,7 +12,9 @@ const { jsonFetch, isSafeRemoteUrl } = require("./http");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const LINK_RE = /(contact|contacto|aviso[-_ ]?legal|legal|quienes[-_ ]?somos|about|empresa|distribuidor|profesional|b2b|mayorista|wholesale|atencion[-_ ]?al[-_ ]?cliente)/i;
 const BAD_EMAIL = /\.(png|jpe?g|gif|webp|svg|css|js)$|sentry|wixpress|example\.|@2x|domain\.com|tudominio|yourdomain|email\.com$|ejemplo/i;
-const SALES = /^(ventas|comercial|pedidos|sales|b2b|mayorista|distribuidores|distribucion|export|orders|compras|clientes|info|hola|contacto|contact|administracion|atencion)/i;
+const SALES = /^(ventas|comercial|pedidos|sales|b2b|mayorista|distribuidores|distribucion|distributor|dealer|export|orders|trade|vertrieb|verkauf|commercial|vendite|vendas|compras|clientes|wholesale)/i;
+/* Buzones que no gestionan altas de clientes: al final (el plan pide evitarlos). */
+const AVOID = /^(soporte|support|sat|tecnico|technical|tech|rma|garantia|warranty|atencion|atencionalcliente|customerservice|service|servicio|rrhh|hr|empleo|jobs|careers|trabajo|privacidad|privacy|lopd|dpo|rgpd|gdpr|legal|noreply|no-reply|facturacion|billing|webmaster|prensa|press|marketing)/i;
 
 function stripTags(html) {
   return String(html || "").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&#64;|&#x40;/g, "@").replace(/\s+/g, " ");
@@ -57,6 +59,8 @@ function extract(html, baseUrl, acc) {
   /* CIF/NIF de empresa y razon social (aviso legal). */
   if (!acc.cif) { const c = text.match(/\b(?:CIF|NIF|C\.I\.F\.|N\.I\.F\.)\s*[:.]?\s*([ABCDEFGHJNPQRSUVW][-\s]?\d{7}[0-9A-J])\b/i); if (c) acc.cif = c[1].replace(/[-\s]/g, "").toUpperCase(); }
   if (!acc.company) { const s = text.match(/\b([A-Z][\w&.,'\- ]{2,60}?\s(?:S\.?L\.?U?|S\.?A\.?U?|S\.?L\.?L\.?|S\.?C\.?)\.?)(?=[\s,;])/); if (s) acc.company = s[1].trim(); }
+  /* Idioma de la web (<html lang="de">) para elegir idioma y zona horaria. */
+  if (!acc.pageLang) { const lg = raw.match(/<html[^>]*\slang\s*=\s*["']([a-zA-Z]{2})/i); if (lg) acc.pageLang = lg[1].toLowerCase(); }
   /* Formulario de contacto. */
   if (!acc.form && /<form[\s\S]{0,4000}?(?:email|correo|mensaje|message)/i.test(raw) && /contact|contacto/i.test(baseUrl)) acc.form = baseUrl;
   /* Enlaces a seguir. */
@@ -71,20 +75,28 @@ function extract(html, baseUrl, acc) {
   return links;
 }
 
+/* 0 ventas/distribuidores, 1 generico (info, contacto), 2 otros, 3 a evitar (soporte, SAT, RRHH...). */
+const GENERIC = /^(info|hola|hello|contacto|contact|administracion|admin|office|oficina|mail|correo)/i;
+function tierOf(e) {
+  const local = String(e).split("@")[0];
+  if (AVOID.test(local)) return 3;
+  if (GENERIC.test(local)) return 1;
+  if (SALES.test(local)) return 0;
+  return 2;
+}
 function rankEmails(emails, host) {
   const base = String(host || "").split(".").slice(-2).join(".");
   return emails.slice().sort(function (a, b) {
     const da = a.split("@")[1] || "", db = b.split("@")[1] || "";
     const oa = base && da.endsWith(base) ? 0 : 1, ob = base && db.endsWith(base) ? 0 : 1;
     if (oa !== ob) return oa - ob;
-    const sa = SALES.test(a) ? 0 : 1, sb = SALES.test(b) ? 0 : 1;
-    return sa - sb;
+    return tierOf(a) - tierOf(b);
   });
 }
 
 async function scan(url, opts) {
   opts = opts || {};
-  const acc = { emails: [], phones: [], whatsapp: [], cif: "", company: "", form: "", pages: [] };
+  const acc = { emails: [], phones: [], whatsapp: [], cif: "", company: "", form: "", pages: [], pageLang: "" };
   const host = hostOf(url);
   if (!host) return Object.assign(acc, { ok: false, reason: "url_invalida" });
   const origin = (function () { try { return new URL(url).origin; } catch (e) { return ""; } })();

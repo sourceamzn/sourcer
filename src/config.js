@@ -176,17 +176,31 @@ const config = {
   outreach: {
     enabled: clean(process.env.OUTREACH_ENABLED || "1") !== "0",
     autoStart: clean(process.env.OUTREACH_AUTO_START || "1") !== "0",
+    /* Plan de contacto Brunea: correo 1 el dia 0, recordatorio el dia 3 y
+       cierre el dia 7 (dias LABORABLES). Un correo por cada dia de la lista
+       (y por cada plantilla escrita). */
+    steps: (clean(process.env.OUTREACH_STEPS) || "0,3,7").split(",").map(function (x) { return parseInt(x, 10); }).filter(function (n) { return isFinite(n) && n >= 0; }).slice(0, 10),
     maxAttempts: Math.min(Math.max(parseInt(clean(process.env.OUTREACH_MAX_ATTEMPTS) || "10", 10) || 10, 1), 10),
-    minDays: Math.max(1, parseFloat(clean(process.env.OUTREACH_MIN_DAYS) || "2") || 2),
-    maxDays: Math.max(1, parseFloat(clean(process.env.OUTREACH_MAX_DAYS) || "3") || 3),
+    /* Sin respuesta: el dia 14 (7 laborables tras el ultimo) se propone llamar
+       o usar el formulario, y a los 60 dias se reintenta una vez. */
+    callAfterDays: Math.max(1, parseInt(clean(process.env.OUTREACH_CALL_AFTER_DAYS) || "7", 10) || 7),
+    retryDays: Math.max(0, parseInt(clean(process.env.OUTREACH_RETRY_DAYS) || "60", 10) || 0),
     dailyLimit: Math.min(Math.max(parseInt(clean(process.env.OUTREACH_DAILY_LIMIT) || "40", 10) || 40, 1), 300),
+    /* Primeras semanas: 10-20 primeros contactos nuevos al dia (rampa de entregabilidad). */
+    newPerDay: Math.min(Math.max(parseInt(clean(process.env.OUTREACH_NEW_PER_DAY) || "15", 10) || 15, 1), 300),
     perTick: Math.min(Math.max(parseInt(clean(process.env.OUTREACH_PER_TICK) || "6", 10) || 6, 1), 30),
     tickMin: Math.min(Math.max(parseInt(clean(process.env.OUTREACH_TICK_MIN) || "10", 10) || 10, 2), 120),
-    hours: clean(process.env.OUTREACH_HOURS) || "9-19",
-    weekdays: clean(process.env.OUTREACH_WEEKDAYS) || "1-5",
+    /* Martes a jueves de 9:00 a 11:00 en la hora del DESTINATARIO. */
+    hours: clean(process.env.OUTREACH_HOURS) || "9-11",
+    weekdays: clean(process.env.OUTREACH_WEEKDAYS) || "2-4",
     tz: clean(process.env.OUTREACH_TZ) || "Europe/Madrid",
+    /* Revision humana: los primeros N envios y el primero de cada idioma nuevo. */
+    reviewFirst: Math.max(0, parseInt(clean(process.env.OUTREACH_REVIEW_FIRST) || "20", 10) || 0),
+    reviewNewLanguage: clean(process.env.OUTREACH_REVIEW_NEW_LANGUAGE || "1") !== "0",
+    translate: clean(process.env.OUTREACH_TRANSLATE || "1") !== "0",
     saveSent: clean(process.env.OUTREACH_SAVE_SENT || "1") !== "0"
   },
+
   leads: {
     enabled: clean(process.env.LEADS_ENABLED || "1") !== "0",
     maxQueries: Math.min(Math.max(parseInt(clean(process.env.LEADS_MAX_QUERIES) || "8", 10) || 8, 2), 14),
@@ -221,7 +235,7 @@ const config = {
      heuristicas de imagecheck y todo queda "sin confirmar visualmente".
      Un solo proveedor activo: anthropic | openai | gemini | openrouter. */
   imageAi: {
-    enabled: clean(process.env.IMAGE_AI_ENABLED) !== "false",
+    enabled: clean(process.env.IMAGE_AI_ENABLED) === "true", /* apagada salvo IMAGE_AI_ENABLED=true */
     provider: clean(process.env.IMAGE_AI_PROVIDER) || "anthropic",
     /* Maximo de llamadas de vision por busqueda (0 = no llamar). */
     max: Math.max(0, parseInt(clean(process.env.IMAGE_AI_MAX) || "10", 10) || 0),
@@ -229,7 +243,7 @@ const config = {
     cacheMin: Math.max(0, parseInt(clean(process.env.IMAGE_AI_CACHE_MIN) || "1440", 10) || 0),
     anthropic: {
       apiKey: clean(process.env.ANTHROPIC_API_KEY),
-      model: clean(process.env.ANTHROPIC_MODEL) || "claude-sonnet-4-6"
+      model: clean(process.env.ANTHROPIC_MODEL) || "claude-haiku-5-5"
     },
     openai: {
       apiKey: clean(process.env.OPENAI_API_KEY),

@@ -1897,7 +1897,9 @@ async function candidatesLarge(body) {
   const liteBudget = Math.max(limit * 3, 90);
   const maxScan = Math.min(filteredPool.length, liteBudget * 4);
   let deepAsked = 0, preDropped = 0, stoppedForTokens = false, liteSpent = 0;
-  const dropWhy = { sin_precio: 0, fuera_de_busqueda: 0, una_oferta: 0, sin_fba_terceros: 0 };
+  const dropWhy = { sin_precio: 0, fuera_de_busqueda: 0, una_oferta: 0, sin_fba_terceros: 0, ia_descartados: 0 };
+  let aiCalls = 0, aiSuggestions = [], aiError = "";
+  const aiDropped = [];
   const dropSamples = {};
   let deepDropLogged = 0;
   while (out.length < limit && cursor < filteredPool.length && scanned < maxScan && liteSpent < liteBudget) {
@@ -1934,7 +1936,7 @@ async function candidatesLarge(body) {
     }
     /* Prefiltro barato: sin precio, fuera de la busqueda o con 0-1 ofertas
        (marca propia/monopolio, regla dura del PDF) no merecen Buy Box. */
-    const pre = (lite.products || []).map(metricsFromKeepa).filter(function (m) {
+    let pre = (lite.products || []).map(metricsFromKeepa).filter(function (m) {
       /* Muestra auditable de cada descarte (GET /debug/events?kind=cand). */
       const why = !(m.asin && m.pvp > 0) ? "sin_precio" : (!keywordRelevant(m) ? "fuera_de_busqueda" : ((p.bbRule && m.thirdParty != null && m.thirdParty <= 1) ? "una_oferta" : ((p.bbRule && m.fbaThird === 0) ? "sin_fba_terceros" : "")));
       if (why && (dropSamples[why] = (dropSamples[why] || 0) + 1) <= 4) {
@@ -1950,6 +1952,29 @@ async function candidatesLarge(body) {
       if (p.bbRule && m.fbaThird === 0) dropWhy.sin_fba_terceros++;
       return true;
     }).sort(function (a, b) { return (b.sales || 0) - (a.sales || 0) || (a.bsr || 1e12) - (b.bsr || 1e12); });
+    /* IA (Haiku): revisa los titulos y quita lo que claramente no es lo
+       buscado (repuestos, fundas, otra categoria) ANTES de pagar la Buy Box
+       (3 tokens por producto). Maximo 2 llamadas por busqueda. */
+    if (query && pre.length && aiCalls < 2) {
+      const aiLib = require("../lib/ai");
+      if (aiLib.ready()) {
+        aiCalls++;
+        try {
+          const rv = await withTimeout(aiLib.reviewTitles(query, pre.slice(0, 60)), 15000);
+          if (rv && rv.ok) {
+            const dropSet = {};
+            rv.drop.forEach(function (d) { dropSet[String(d.asin).toUpperCase()] = String(d.motivo || "").slice(0, 80); });
+            pre = pre.filter(function (m) {
+              if (dropSet[m.asin] == null) return true;
+              dropWhy.ia_descartados++;
+              if (aiDropped.length < 30) aiDropped.push({ asin: m.asin, title: String(m.title || "").slice(0, 120), motivo: dropSet[m.asin] });
+              return false;
+            });
+            if (rv.suggestions && rv.suggestions.length && !aiSuggestions.length) aiSuggestions = rv.suggestions;
+          } else if (rv && rv.reason) aiError = rv.reason;
+        } catch (e) {}
+      }
+    }
     const need = Math.max(1, Math.ceil((limit - out.length) * 1.5));
     let deepList = pre.slice(0, need).map(function (m) { return m.asin; });
     const bud2 = keepaCost.budget(40);
@@ -1996,6 +2021,7 @@ async function candidatesLarge(body) {
   if (!includeDiscards) notes.push("Se ocultan los descartados; activa 'Incluir descartados' para verlos.");
   notes.push("Keepa: " + scanned + " ASIN en barrido ligero, " + deepAsked + " con Buy Box, " + preDropped + " descartados antes de pedir Buy Box (0-1 ofertas)." + (keepaCost.usage.tokensLeft != null ? (" Tokens restantes: " + keepaCost.usage.tokensLeft + ".") : ""));
   try { events.add("cand", { phase: "resumen", via: via, pool: pool.length, scanned: scanned, liteSpent: liteSpent, deep: deepAsked, out: out.length, drop: JSON.stringify(dropWhy) }); } catch (e) {}
+  if (aiCalls) notes.push("IA (Haiku): " + dropWhy.ia_descartados + " resultado(s) quitados por no ser lo buscado antes de pedir la Buy Box" + (aiError ? (" · aviso: " + aiError) : "") + ".");
   notes.push("Barrido ligero: " + dropWhy.sin_fba_terceros + " parecen sin FBA de terceros (se confirma con la Buy Box), descartados: " + dropWhy.una_oferta + " con 0-1 ofertas, " + dropWhy.sin_precio + " sin precio, " + dropWhy.fuera_de_busqueda + " fuera de la busqueda.");
   if (stoppedForTokens) notes.push("Barrido recortado para no dejar Keepa sin tokens: pulsa 'Cargar mas' cuando se recargue el saldo.");
 
@@ -2064,7 +2090,7 @@ async function candidatesLarge(body) {
       seed: seed, page: num(body && body.page, 0),
       params: p, notes: notes,
       filters: { minFbaThird: p.minFbaThird, bbRule: p.bbRule, includeDiscards: includeDiscards, sort: sortKey, limit: limit },
-      dropped: dropWhy,
+      dropped: dropWhy, aiSuggestions: aiSuggestions, aiDropped: aiDropped,
       cost: { asinsScanned: scanned, bestsellerCalls: bestsellerCalls, estimatedTokens: tokensEstimate }
     }
   };

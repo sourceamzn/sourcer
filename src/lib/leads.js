@@ -280,12 +280,13 @@ function googleLinks(queries) {
 /* ---------- clasificacion ---------- */
 const ROLE_WEIGHT = {
   fabricante: 100, distribuidor_oficial: 95, mayorista: 85, marketplace_b2b: 60,
-  info_ean: 35, sin_clasificar: 40, minorista_probable: 12, minorista: 5
+  info_ean: 35, sin_clasificar: 40, minorista_probable: 12, minorista: 5, irrelevante: 0
 };
 const ROLE_LABEL = {
   fabricante: "Fabricante / marca", distribuidor_oficial: "Distribuidor oficial", mayorista: "Mayorista / distribuidor",
   marketplace_b2b: "Marketplace / directorio B2B", info_ean: "Base de datos de EAN (identifica al titular)",
-  sin_clasificar: "Sin clasificar (revisar)", minorista_probable: "Tienda minorista (probable)", minorista: "Tienda minorista"
+  sin_clasificar: "Sin clasificar (revisar)", minorista_probable: "Tienda minorista (probable)", minorista: "Tienda minorista",
+  irrelevante: "No es un proveedor (blog, foro, manual...)"
 };
 
 /* results: [{ url, title, description, query, group, position }]

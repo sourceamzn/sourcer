@@ -13,12 +13,12 @@ function env(name) {
 
 function fallbackConfig() {
   return {
-    enabled: env("IMAGE_AI_ENABLED") !== "false",
+    enabled: env("IMAGE_AI_ENABLED") === "true",
     provider: env("IMAGE_AI_PROVIDER") || "anthropic",
     max: Math.max(0, parseInt(env("IMAGE_AI_MAX") || "10", 10) || 0),
     timeoutMs: Math.min(Math.max(parseInt(env("IMAGE_AI_TIMEOUT_MS") || "12000", 10) || 12000, 2000), 30000),
     cacheMin: Math.max(0, parseInt(env("IMAGE_AI_CACHE_MIN") || "1440", 10) || 0),
-    anthropic: { apiKey: env("ANTHROPIC_API_KEY"), model: env("ANTHROPIC_MODEL") || "claude-sonnet-4-6" },
+    anthropic: { apiKey: env("ANTHROPIC_API_KEY"), model: env("ANTHROPIC_MODEL") || "claude-haiku-5-5" },
     openai: { apiKey: env("OPENAI_API_KEY"), model: env("OPENAI_MODEL") || "gpt-4o-mini" },
     gemini: { apiKey: env("GEMINI_API_KEY"), model: env("GEMINI_MODEL") || "gemini-2.0-flash" },
     openrouter: { apiKey: env("OPENROUTER_API_KEY"), model: env("OPENROUTER_MODEL") || "google/gemini-2.0-flash-001" }
@@ -35,7 +35,7 @@ function aiConfig() {
 }
 
 const PROVIDERS = {
-  anthropic: { url: "https://api.anthropic.com/v1/messages", model: "claude-sonnet-4-6" },
+  anthropic: { url: "https://api.anthropic.com/v1/messages", model: "claude-haiku-5-5" },
   openai: { url: "https://api.openai.com/v1/chat/completions", model: "gpt-4o-mini" },
   gemini: { url: "https://generativelanguage.googleapis.com/v1beta/models/", model: "gemini-2.0-flash" },
   openrouter: { url: "https://openrouter.ai/api/v1/chat/completions", model: "google/gemini-2.0-flash-001" }

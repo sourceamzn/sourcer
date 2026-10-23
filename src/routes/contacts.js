@@ -17,7 +17,7 @@ const { config } = require("../config");
 
 const router = express.Router();
 const COLL = "contacts";
-const STATUS = ["pendiente", "contactado", "respondido", "tarifa", "negociando", "sin_respuesta", "descartado"];
+const STATUS = ["pendiente", "contactado", "respondido", "tarifa", "negociando", "sin_respuesta", "rechazado", "descartado"];
 
 /* Arranque automatico de la secuencia: con email, SMTP y datos del remitente. */
 async function maybeAutoStart(c) {
@@ -25,6 +25,7 @@ async function maybeAutoStart(c) {
     if (!config.outreach.autoStart || !outreach.mailReady()) return false;
     if (!(c.emails || []).length || c.outreach || c.status !== "pendiente") return false;
     if (!outreach.senderOk(await outreach.getSender())) return false;
+    if (!outreach.templateCount(await outreach.getTemplates())) return false;
     outreach.startOutreach(c);
     return true;
   } catch (e) { return false; }
@@ -101,13 +102,18 @@ router.patch("/:id", ah(async function (req, res) {
     c.status = b.status;
     if (b.status === "contactado" && !c.contactedAt) c.contactedAt = now;
     /* Si lo marcas tu como respondido/tarifa/descartado, se para la secuencia. */
-    if (c.outreach && c.outreach.state === "activo" && ["respondido", "tarifa", "negociando", "descartado"].indexOf(b.status) !== -1) {
+    if (c.outreach && ["activo", "revision", "esperando", "llamar"].indexOf(c.outreach.state) !== -1 && ["respondido", "tarifa", "negociando", "descartado", "rechazado"].indexOf(b.status) !== -1) {
       c.outreach.state = b.status === "descartado" ? "parado" : "respondido"; c.outreach.nextAt = null;
     }
     if (b.status === "respondido" || b.status === "tarifa") c.starred = true;
   }
   if (b.notes != null) c.notes = str(b.notes, 4000);
   if (b.starred != null) c.starred = Boolean(b.starred);
+  /* Datos que usan las plantillas del plan de contacto. */
+  if (b.contactName != null) c.contactName = str(b.contactName, 80);
+  if (b.volume != null) c.volume = str(b.volume, 40);
+  if (b.lang != null) c.lang = str(b.lang, 5).toLowerCase();
+  if (b.country != null) c.country = str(b.country, 2).toUpperCase();
   if (Array.isArray(b.emails)) c.emails = uniq(b.emails, 8);
   if (Array.isArray(b.phones)) c.phones = uniq(b.phones, 6);
   if (b.removeProduct) c.products = (c.products || []).filter(function (p) { return p.key !== b.removeProduct; });
@@ -116,6 +122,14 @@ router.patch("/:id", ah(async function (req, res) {
   c.updatedAt = now;
   await docs.put(COLL, id, c);
   res.json({ ok: true, contact: c });
+}));
+
+/* Vaciar la lista entera (empezar de cero). Exige { confirm: "VACIAR" }. */
+router.post("/reset", ah(async function (req, res) {
+  if (String((req.body || {}).confirm || "") !== "VACIAR") return res.status(400).json({ ok: false, reason: "falta_confirmacion" });
+  const list = await docs.list(COLL);
+  for (let i = 0; i < list.length; i++) await docs.del(COLL, list[i].id);
+  res.json({ ok: true, deleted: list.length });
 }));
 
 router.delete("/:id", ah(async function (req, res) {
@@ -136,6 +150,7 @@ router.post("/:id/scan", ah(async function (req, res) {
   if (r.cif) c.cif = r.cif;
   if (r.company) c.company = r.company;
   if (r.form) c.form = r.form;
+  if (r.pageLang) c.pageLang = r.pageLang;
   c.scannedAt = now;
   c.history = (c.history || []).concat([{ at: now, type: "datos", text: r.ok ? ("Datos de contacto: " + (r.emails || []).length + " email(s), " + (r.phones || []).length + " telefono(s), " + (r.whatsapp || []).length + " WhatsApp; " + r.pages.length + " pagina(s) leidas.") : ("No se pudo leer la web (" + (r.reason || "error") + ").") }]).slice(-100);
   c.updatedAt = now;
@@ -152,10 +167,17 @@ router.post("/:id/outreach", ah(async function (req, res) {
   const action = str((req.body || {}).action, 20);
   if (action === "start" || action === "resume" || action === "sendnow") {
     if (!(c.emails || []).length) return res.status(400).json({ ok: false, reason: "sin_email", hint: "Pulsa «Buscar email / teléfono» o añade un email a mano." });
-    if (c.outreach && (c.outreach.state === "respondido" || c.outreach.state === "baja")) return res.status(400).json({ ok: false, reason: "ya_respondio" });
-    outreach.startOutreach(c, action === "sendnow" ? { at: new Date().toISOString() } : {});
-    if (action === "sendnow") c.outreach.nextAt = new Date().toISOString();
+    if (c.outreach && ["respondido", "baja", "rechazado"].indexOf(c.outreach.state) !== -1) return res.status(400).json({ ok: false, reason: "ya_respondio" });
+    if (!outreach.templateCount(await outreach.getTemplates())) return res.status(400).json({ ok: false, reason: "faltan_plantillas", hint: "Escribe al menos el correo de bienvenida en «Plantillas de correo»." });
+    outreach.startOutreach(c, action === "sendnow" ? { now: true } : {});
   } else if (action === "pause") outreach.pauseOutreach(c);
+  else if (action === "approve") {
+    const r = await outreach.approveDraft(c, { subject: (req.body || {}).subject, text: (req.body || {}).text });
+    if (!r.ok) return res.status(400).json(r);
+  } else if (action === "reject") {
+    const r = outreach.rejectDraft(c);
+    if (!r.ok) return res.status(400).json(r);
+  }
   else return res.status(400).json({ ok: false, reason: "accion_desconocida" });
   c.updatedAt = new Date().toISOString();
   await docs.put(COLL, id, c);
