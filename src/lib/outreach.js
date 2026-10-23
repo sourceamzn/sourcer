@@ -206,7 +206,12 @@ function sentCounters(st) {
   if (st.sent.newCount == null) st.sent.newCount = 0;
   return st.sent;
 }
-function smtpOpts() { const s = config.mail.smtp; return { host: s.host, port: s.port, user: s.user, pass: s.pass, rejectUnauthorized: config.mail.tlsStrict }; }
+function smtpOpts() {
+  const s = config.mail.smtp, rl = config.mail.relay || {};
+  const o = { host: s.host, port: s.port, user: s.user, pass: s.pass, rejectUnauthorized: config.mail.tlsStrict };
+  if (rl.url) Object.assign(o, { relayUrl: rl.url, relaySecret: rl.secret, relayHost: rl.host, relayPort: rl.port });
+  return o;
+}
 function imapOpts() { const i = config.mail.imap; return { host: i.host, port: i.port, rejectUnauthorized: config.mail.tlsStrict }; }
 
 /* Prepara el correo que toca (texto final, traducido si hace falta). */
@@ -701,7 +706,7 @@ async function status() {
   const c = cfg();
   const tpl = await getTemplates();
   return {
-    enabled: c.enabled, smtp: mailReady(), imap: imapReady(), autoStart: c.autoStart,
+    enabled: c.enabled, smtp: mailReady(), imap: imapReady(), autoStart: c.autoStart, via: (config.mail.relay && config.mail.relay.url) ? "relay" : "smtp",
     from: config.mail.smtp.from || "", host: config.mail.smtp.host || "",
     rules: { steps: c.steps, callAfterDays: c.callAfterDays, retryDays: c.retryDays, dailyLimit: c.dailyLimit, newPerDay: c.newPerDay, hours: c.hours, weekdays: c.weekdays, reviewFirst: c.reviewFirst, reviewNewLanguage: c.reviewNewLanguage, translate: c.translate },
     review: { approved: (st.review && st.review.approved) || 0, langs: Object.keys((st.review && st.review.langs) || {}) },

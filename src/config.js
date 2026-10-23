@@ -160,6 +160,11 @@ const config = {
      cPanel: servidor mail.tudominio.com, SMTP 465 (SSL) e IMAP 993 (SSL),
      usuario = direccion completa, contrasena de la cuenta de correo. */
   mail: {
+    /* Puente HTTPS -> SMTP en el hosting del correo (Railway bloquea SMTP salvo en Pro). */
+    relay: {
+      url: clean(process.env.MAIL_RELAY_URL), secret: process.env.MAIL_RELAY_SECRET || "",
+      host: clean(process.env.MAIL_RELAY_SMTP_HOST) || "localhost", port: parseInt(clean(process.env.MAIL_RELAY_SMTP_PORT) || "465", 10) || 465
+    },
     smtp: {
       host: clean(process.env.SMTP_HOST), port: parseInt(clean(process.env.SMTP_PORT) || "465", 10) || 465,
       user: clean(process.env.SMTP_USER), pass: process.env.SMTP_PASS || "",

@@ -97,7 +97,32 @@ function connect(opts) {
 
 /* opts: { host, port, secure, user, pass, timeoutMs, rejectUnauthorized }
    msg: ver buildMessage. Devuelve { ok, messageId, response } o lanza Error. */
+/* Railway (planes Free/Trial/Hobby) bloquea las conexiones SMTP salientes.
+   Con MAIL_RELAY_URL el mensaje ya montado se entrega por HTTPS a un PHP
+   (relay-correo.php) alojado en el propio hosting del correo, que lo envia
+   por SMTP local con la misma cuenta. Mismo remitente, misma firma DKIM. */
+async function sendViaRelay(opts, msg) {
+  const built = buildMessage(msg);
+  const ctrl = new AbortController();
+  const t = setTimeout(function () { ctrl.abort(); }, opts.timeoutMs || 45000);
+  let res, j = null, text = "";
+  try {
+    res = await fetch(opts.relayUrl, {
+      method: "POST", signal: ctrl.signal,
+      headers: { "Content-Type": "application/json", "User-Agent": "SourcingFBA-relay/1" },
+      body: JSON.stringify({ secret: opts.relaySecret || "", host: opts.relayHost || "localhost", port: Number(opts.relayPort) || 465, user: opts.user, pass: opts.pass, from: msg.from, to: [msg.to], raw: built.raw })
+    });
+    text = await res.text();
+    try { j = JSON.parse(text); } catch (e) {}
+  } catch (e) {
+    throw new Error("relay_sin_conexion: " + String((e && e.name === "AbortError") ? "tiempo agotado" : (e && e.message) || e).slice(0, 150));
+  } finally { clearTimeout(t); }
+  if (!res.ok || !j || !j.ok) throw new Error("relay_" + (res && res.status) + ": " + String((j && j.reason) || text || "sin respuesta").slice(0, 200));
+  return { ok: true, messageId: built.messageId, raw: built.raw, response: String(j.response || "").slice(0, 200), via: "relay" };
+}
+
 async function send(opts, msg) {
+  if (opts && opts.relayUrl) return sendViaRelay(opts, msg);
   const built = buildMessage(msg);
   let { sock, implicit } = await connect(opts);
   let r = reader(sock);

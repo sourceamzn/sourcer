@@ -525,7 +525,7 @@ function eanZeroResult(body, priceMax, reason, message) {
    lentos. Se reservan para la fase de palabra clave, que corre una sola vez,
    y asi dejan de competir entre si por el mismo token de Apify. */
   const NO_EAN_SOURCES = { a1688: 1, alibaba: 1, madeinchina: 1, globalsources: 1, europages: 1, indiamart: 1, dhgate: 1, thomasnet: 1, directindustry: 1, aliexpress: 1, aliexpress_apify: 1, discovery: 1, gshopping: 1 };
-const DEFAULT_DISABLED = "a1688,alibaba,madeinchina,globalsources,europages,indiamart,dhgate,thomasnet,directindustry,importyeti,aliexpress,aliexpress_apify,cjdropshipping,lidl,outletpc,iherb,selectavision,yesstyle,corteingles,zalandoprive,gemimarket,norica,famosa,planafabrega,vallesviasat,gshopping,foto";
+const DEFAULT_DISABLED = "a1688,alibaba,madeinchina,globalsources,europages,indiamart,dhgate,thomasnet,directindustry,importyeti,aliexpress,aliexpress_apify,cjdropshipping,lidl,outletpc,iherb,selectavision,yesstyle,corteingles,zalandoprive,gemimarket,norica,famosa,planafabrega,vallesviasat,gshopping,foto,bigbuy";
 function disabledSources() {
   const raw = String(process.env.SUPPLIER_SOURCES_DISABLED == null ? DEFAULT_DISABLED : process.env.SUPPLIER_SOURCES_DISABLED).trim();
   if (!raw || raw === "none") return [];
