@@ -1,3 +1,4 @@
+process.env.IMAGE_AI_ENABLED = "true"; /* la comparacion de fotos va apagada por defecto */
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const image = require("../src/lib/imagecheck");

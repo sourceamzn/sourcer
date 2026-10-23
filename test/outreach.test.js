@@ -128,6 +128,7 @@ test("outreach: envia la bienvenida, programa el seguimiento y detecta la respue
   Object.assign(config.mail.smtp, { host: "127.0.0.1", port: smtpSrv.address().port, user: "compras@acme.es", pass: "pw", from: "compras@acme.es", fromName: "" });
   Object.assign(config.mail.imap, { host: "127.0.0.1", port: imapSrv.address().port, user: "compras@acme.es", pass: "pw", sentBox: "" });
   config.outreach.enabled = true;
+  config.outreach.reviewFirst = 0; /* aqui se prueba el envio; la revision tiene su propia prueba */
   const smtpMod = require("../src/lib/smtp");
   const origSend = smtpMod.send;
   smtpMod.send = (o, m) => origSend(Object.assign({}, o, { secure: false }), m);
@@ -137,18 +138,26 @@ test("outreach: envia la bienvenida, programa el seguimiento y detecta la respue
   try {
     const out = require("../src/lib/outreach");
     await out.setSender({ name: "Kevin", company: "Brunea Group", phone: "600000000" });
+    /* Sin plantillas no se envia nada. */
+    const c0 = { id: "x.es", host: "x.es", status: "pendiente", emails: ["a@x.es"], products: [], history: [] };
+    out.startOutreach(c0, { now: true }); await docs.put("contacts", c0.id, c0);
+    const r0 = await out.tick("manual_force");
+    assert.equal(r0.sent, 0);
+    assert.ok(r0.errors.some((e) => /faltan_plantillas/.test(e)));
+    await docs.del("contacts", "x.es");
+    await out.setTemplates({ items: [{ subject: "Tarifa {marca} {referencia}", body: "Hola {proveedor},\n{productos}\n{firma}" }, { subject: "", body: "Seguimiento sobre {producto}" }] });
     const c = { id: "distrib.es", host: "distrib.es", status: "pendiente", emails: ["ventas@distrib.es"], products: [{ key: "B0A", name: "Teléfono T-71U", ean: "8410000000000", brand: "Tegui", model: "374240" }], history: [] };
-    out.startOutreach(c);
+    out.startOutreach(c, { now: true });
     await docs.put("contacts", c.id, c);
     const r1 = await out.tick("manual_force");
     assert.equal(r1.sent, 1, JSON.stringify(r1));
     assert.equal(sentMail.length, 1);
-    assert.match(sentMail[0], /Subject: =\?UTF-8\?B\?/);
+    assert.match(sentMail[0], /Subject: Tarifa Tegui 374240/);
     const c1 = await docs.get("contacts", "distrib.es");
     assert.equal(c1.outreach.attempts, 1);
     assert.equal(c1.status, "contactado");
     const gap = (Date.parse(c1.outreach.nextAt) - Date.now()) / 86400000;
-    assert.ok(gap >= 1.9 && gap <= 6, "siguiente en 2-3 dias (ajustado a horario laboral): " + gap);
+    assert.ok(gap >= 2.5 && gap <= 9, "siguiente: dia 3 laborable, martes a jueves: " + gap);
     assert.equal(box.appended.length, 1, "copia en Enviados");
     /* Llega la respuesta en el mismo hilo. */
     box.msgs.push({ uid: 11, header: "From: Juan <juan@distrib.es>\r\nSubject: Re: Solicitud\r\nIn-Reply-To: " + c1.outreach.messageIds[0] + "\r\n\r\n", text: "Buenos dias, le adjunto nuestra tarifa profesional." });
@@ -168,17 +177,20 @@ test("outreach: envia la bienvenida, programa el seguimiento y detecta la respue
   }
 });
 
-test("outreach: plantillas 1..10 (bienvenida + seguimientos en el hilo, con baja)", () => {
+test("outreach: plantillas del usuario con variables; sin plantilla no hay correo", () => {
   const out = require("../src/lib/outreach");
-  const c = { products: [{ name: "Batidora X200, 1000W", ean: "8412345678905", brand: "Acme", model: "X200" }] };
-  const sd = { name: "Kevin", company: "Brunea Group" };
-  const t1 = out.template(c, sd, 1), t2 = out.template(c, sd, 2), t10 = out.template(c, sd, 10);
-  assert.equal(t1.subject, "Solicitud de tarifa profesional · Acme X200");
-  assert.equal(t2.subject, "Re: " + t1.subject);
-  assert.match(t1.text, /EAN 8412345678905/);
-  assert.doesNotMatch(t1.text + t2.text + t10.text, /amazon/i);
-  for (let i = 1; i <= 10; i++) assert.match(out.template(c, sd, i).text, /«baja»/);
-  assert.notEqual(out.template(c, sd, 3).text, out.template(c, sd, 4).text);
+  const c = { company: "Distrib SL", products: [{ name: "Batidora X200, 1000W", ean: "8412345678905", brand: "Acme", model: "X200" }] };
+  const sd = { name: "Kevin", company: "Brunea Group", phone: "600" };
+  const tpl = { items: [{ subject: "Tarifa {marca} {referencia}", body: "Hola {proveedor}, EAN {ean}.\n{firma}" }, { subject: "", body: "¿Novedades sobre {producto}?" }] };
+  const t1 = out.render(c, sd, tpl, 1), t2 = out.render(c, sd, tpl, 2);
+  assert.equal(t1.subject, "Tarifa Acme X200");
+  assert.equal(t1.text.split("\n")[0], "Hola Distrib SL, EAN 8412345678905.");
+  assert.match(t1.text, /Kevin · Brunea Group/);
+  assert.equal(t2.subject, "Re: Tarifa Acme X200");
+  assert.equal(t2.text, "¿Novedades sobre Batidora X200?");
+  assert.equal(out.render(c, sd, tpl, 3), null);
+  assert.equal(out.templateCount(tpl), 2);
+  assert.equal(out.templateCount({ items: [] }), 0);
 });
 
 test("outreach: clasifica rebotes, bajas y respuestas por remitente/dominio", () => {
@@ -191,5 +203,164 @@ test("outreach: clasifica rebotes, bajas y respuestas por remitente/dominio", ()
   assert.equal(out.classifyMessage(mk("ventas@acme.es", "Re: x", "Por favor, baja"), idx, "me@me.es").kind, "baja");
   assert.equal(out.classifyMessage(mk("MAILER-DAEMON@mx.me.es", "Undelivered Mail", "Original message: <m1@me.es> to ventas@acme.es"), idx, "me@me.es").kind, "rebote");
   assert.equal(out.classifyMessage(mk("otro@gmail.com", "hola", "spam"), idx, "me@me.es"), null);
+  assert.equal(out.classifyMessage(mk("ventas@acme.es", "Fuera de la oficina: Re: x", "Estoy de vacaciones"), idx, "me@me.es").kind, "automatica");
+  assert.equal(out.classifyMessage(mk("ventas@acme.es", "Re: x", "hola", "Auto-Submitted: auto-replied\r\n"), idx, "me@me.es").kind, "automatica");
   assert.equal(out.classifyMessage(mk("me@me.es", "x", "x"), idx, "me@me.es"), null);
+});
+
+test("ia: Haiku lee la respuesta y extrae tarifa (API simulada)", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-test";
+  const http = require("../src/lib/http");
+  const orig = http.jsonFetch;
+  let sentBody = null;
+  http.jsonFetch = async (url, opts) => {
+    sentBody = JSON.parse(opts.body);
+    return { ok: true, status: 200, data: { usage: { input_tokens: 800, output_tokens: 200 }, content: [{ type: "text", text: '{"tipo":"tarifa","resumen":"Envian tarifa: 18,50 EUR sin IVA, minimo 24 uds.","precio_neto":18.5,"moneda":"EUR","iva_incluido":false,"pedido_minimo":"24 uds","condiciones":"Pago por transferencia","adjuntos_mencionados":true,"siguiente_paso":"Revisar la tarifa adjunta","borrador_respuesta":"Gracias..."}' }] } };
+  };
+  try {
+    const ai = require("../src/lib/ai");
+    const r = await ai.analyzeReply({ products: [{ name: "Batidora X200", ean: "8412345678905", priceMaxNet: 26.85 }], supplier: "Distrib", subject: "Re: tarifa", text: "Le adjunto tarifa. 18,50 sin IVA, pedido minimo 24.", senderName: "Kevin", senderCompany: "Brunea" });
+    assert.ok(r.ok);
+    assert.equal(r.analysis.tipo, "tarifa");
+    assert.equal(r.analysis.precio_neto, 18.5);
+    assert.equal(sentBody.model, "claude-haiku-5-5");
+    assert.match(sentBody.messages[0].content, /sin mencionar Amazon/);
+    const st = await ai.status();
+    assert.equal(st.usage.calls, 1);
+  } finally { http.jsonFetch = orig; delete process.env.ANTHROPIC_API_KEY; }
+});
+
+test("plan: plantillas del PDF con {nombre_contacto | equipo de ventas}, {lista_referencias} y bloque de volumen", () => {
+  const out = require("../src/lib/outreach");
+  const sd = { name: "Kevin De Porras", company: "Brunea Group", phone: "600000000", web: "www.bruneagroup.com" };
+  const tpl = { items: [
+    { subject: "Solicitud de tarifa y condiciones de alta como cliente – {marca}", subjectB: "Consulta de distribución – {marca}", body: "Buenos días {nombre_contacto | equipo de ventas},\n\nNos interesan estas referencias:\n\n{lista_referencias}\n\n{si_volumen}Calculamos pedidos de unas {volumen} unidades por referencia.{/si_volumen}\n\nUn saludo,\n{firma}" },
+    { subject: "", body: "Nos vendría muy bien recibir la tarifa de distribuidor de {referencias_resumidas}." },
+    { subject: "", body: "Si lo prefieres, lo hablamos por teléfono: {telefono_kevin}." }
+  ] };
+  const c = { id: "aaa.es", host: "aaa.es", products: [{ brand: "Tegui", model: "374240", ean: "8424299374240" }, { brand: "Tegui", model: "374241", ean: "8424299374241" }] };
+  const a = out.render(c, sd, tpl, 1, "A");
+  assert.equal(a.subject, "Solicitud de tarifa y condiciones de alta como cliente – Tegui");
+  assert.match(a.text, /^Buenos días equipo de ventas,/);
+  assert.match(a.text, /- 374240 – EAN 8424299374240\n- 374241 – EAN 8424299374241/);
+  assert.doesNotMatch(a.text, /Calculamos/, "sin volumen no aparece el bloque");
+  const b = out.render(Object.assign({}, c, { contactName: "Marta", volume: "100" }), sd, tpl, 1, "B");
+  assert.equal(b.subject, "Consulta de distribución – Tegui");
+  assert.match(b.text, /^Buenos días Marta,/);
+  assert.match(b.text, /unas 100 unidades/);
+  assert.equal(out.render(c, sd, tpl, 2, "A").subject, "Re: Solicitud de tarifa y condiciones de alta como cliente – Tegui");
+  assert.match(out.render(c, sd, tpl, 2, "A").text, /las referencias 374240 y 374241/);
+  assert.match(out.render(c, sd, tpl, 3, "A").text, /600000000/);
+});
+
+test("plan: calendario dias 0/3/7 laborables, martes a jueves 9-11 hora local, festivos", () => {
+  const cal = require("../src/lib/calendar");
+  const es = cal.localeOf("acme.es");
+  const opts = { hours: "9-11", weekdays: "2-4" };
+  /* Lunes 26/10/2026 -> primer hueco el martes 27 entre 9 y 11 (Madrid). */
+  const s0 = cal.slotOn("2026-10-26", es, opts, () => 0.5);
+  const lp = cal.localParts(s0, es.tz);
+  assert.equal(lp.ymd, "2026-10-27");
+  assert.ok(lp.hour >= 9 && lp.hour < 11);
+  /* Dia 3 laborable = viernes 30 -> no es martes-jueves -> martes 3/11. */
+  assert.equal(cal.localParts(cal.dueAt("2026-10-27", 3, es, opts, () => 0), es.tz).ymd, "2026-11-03");
+  assert.equal(cal.localParts(cal.dueAt("2026-10-27", 7, es, opts, () => 0), es.tz).ymd, "2026-11-05");
+  /* 8 de diciembre es festivo en Espana. */
+  assert.equal(cal.isWorking("2026-12-08", "ES"), false);
+  /* Hora del destinatario: en Alemania las 9:00 locales. */
+  const de = cal.localeOf("firma.de");
+  assert.equal(de.lang, "de");
+  const sd = cal.slotOn("2026-10-27", de, opts, () => 0);
+  assert.equal(cal.localParts(sd, "Europe/Berlin").hour, 9);
+});
+
+test("plan: los primeros envios y el primer envio de cada idioma quedan pendientes de revisar", () => {
+  const { config } = require("../src/config");
+  const out = require("../src/lib/outreach");
+  const prev = config.outreach.reviewFirst;
+  config.outreach.reviewFirst = 20;
+  try {
+    assert.match(out.needsReview({ review: { approved: 0, langs: {} } }, { lang: "es", translated: false }), /primeros_20/);
+    assert.equal(out.needsReview({ review: { approved: 20, langs: { es: true } } }, { lang: "es", translated: false }), "");
+    assert.match(out.needsReview({ review: { approved: 25, langs: { es: true } } }, { lang: "de", translated: true }), /primer_envio_en_de/);
+    assert.equal(out.needsReview({ review: { approved: 25, langs: { es: true, de: true } } }, { lang: "de", translated: true }), "");
+    assert.match(out.needsReview({ review: { approved: 25, langs: { es: true, de: true } } }, { lang: "de", translated: false }), /sin_traduccion/);
+  } finally { config.outreach.reviewFirst = prev; }
+});
+
+test("plan: con revision, el correo no sale hasta aprobarlo (y luego sale el aprobado, editado)", async () => {
+  const { config } = require("../src/config");
+  const docs = require("../src/lib/docstore");
+  const mem = {};
+  docs._setForTests({ kind: "mem", async list(c) { return Object.values(mem[c] || {}).map((x) => JSON.parse(JSON.stringify(x))); }, async get(c, id) { const v = (mem[c] || {})[id]; return v ? JSON.parse(JSON.stringify(v)) : null; }, async put(c, id, d) { mem[c] = mem[c] || {}; mem[c][id] = JSON.parse(JSON.stringify(d)); return d; }, async del(c, id) { const h = !!(mem[c] && mem[c][id]); if (h) delete mem[c][id]; return h; } });
+  const sentMail = [];
+  const srv = await fakeSmtp(sentMail);
+  Object.assign(config.mail.smtp, { host: "127.0.0.1", port: srv.address().port, user: "info@brunea.com", pass: "pw", from: "info@brunea.com", fromName: "" });
+  Object.assign(config.mail.imap, { host: "", user: "", pass: "" });
+  config.outreach.reviewFirst = 20;
+  const smtpMod = require("../src/lib/smtp");
+  const origSend = smtpMod.send;
+  smtpMod.send = (o, m) => origSend(Object.assign({}, o, { secure: false }), m);
+  try {
+    const out = require("../src/lib/outreach");
+    await out.setSender({ name: "Kevin", company: "Brunea Group" });
+    await out.setTemplates({ items: [{ subject: "Tarifa {marca}", body: "Hola {nombre_contacto | equipo de ventas}" }] });
+    const c = { id: "rev.es", host: "rev.es", status: "pendiente", emails: ["ventas@rev.es"], products: [{ brand: "Acme", model: "X1" }], history: [] };
+    out.startOutreach(c, { now: true }); await docs.put("contacts", c.id, c);
+    const r1 = await out.tick("manual_force");
+    assert.equal(r1.sent, 0); assert.equal(r1.toReview, 1);
+    let c1 = await docs.get("contacts", "rev.es");
+    assert.equal(c1.outreach.state, "revision");
+    assert.equal(c1.outreach.draft.text, "Hola equipo de ventas");
+    await out.approveDraft(c1, { text: "Hola equipo de ventas (revisado)" });
+    c1.outreach.nextAt = new Date(Date.now() - 1000).toISOString();
+    await docs.put("contacts", c1.id, c1);
+    const r2 = await out.tick("manual_force");
+    assert.equal(r2.sent, 1, JSON.stringify(r2));
+    const body = sentMail[0].split("\r\n\r\n")[1].replace(/\s+/g, "");
+    assert.equal(Buffer.from(body, "base64").toString("utf8"), "Hola equipo de ventas (revisado)");
+    const st = await out.status();
+    assert.equal(st.review.approved, 1);
+  } finally { smtpMod.send = origSend; srv.close(); config.outreach.reviewFirst = 0; }
+});
+
+test("plan: respuestas -> rechazo no se vuelve a escribir; solo distribuidores crea el contacto indicado; canal avisa a una persona", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-test";
+  const docs = require("../src/lib/docstore");
+  const mem = {};
+  docs._setForTests({ kind: "mem", async list(c) { return Object.values(mem[c] || {}).map((x) => JSON.parse(JSON.stringify(x))); }, async get(c, id) { const v = (mem[c] || {})[id]; return v ? JSON.parse(JSON.stringify(v)) : null; }, async put(c, id, d) { mem[c] = mem[c] || {}; mem[c][id] = JSON.parse(JSON.stringify(d)); return d; }, async del(c, id) { const h = !!(mem[c] && mem[c][id]); if (h) delete mem[c][id]; return h; } });
+  const http = require("../src/lib/http");
+  const orig = http.jsonFetch;
+  let next = null;
+  http.jsonFetch = async () => ({ ok: true, status: 200, data: { usage: {}, content: [{ type: "text", text: JSON.stringify(next) }] } });
+  try {
+    const out = require("../src/lib/outreach");
+    const base = (id) => ({ id: id, host: id, status: "contactado", emails: ["ventas@" + id], products: [{ brand: "Acme" }], outreach: { state: "activo", attempts: 1, messageIds: ["<m-" + id + "@b.com>"], nextAt: new Date().toISOString() }, history: [] });
+    for (const id of ["r1.es", "r2.es", "r3.es"]) await docs.put("contacts", id, base(id));
+    const idx = out.indexContacts(await docs.list("contacts"));
+    const mk = (id, text) => ({ header: "From: ventas@" + id + "\r\nSubject: Re: tarifa\r\nIn-Reply-To: <m-" + id + "@b.com>\r\n\r\n", text });
+    /* rechazo */
+    next = { tipo: "rechazo", resumen: "No trabajan con nuevos clientes" };
+    const f1 = out.classifyMessage(mk("r1.es", "No trabajamos con nuevos clientes"), idx, "info@b.com");
+    await require("../src/lib/outreach").__applyForTests(f1);
+    let c = await docs.get("contacts", "r1.es");
+    assert.equal(c.status, "rechazado"); assert.equal(c.outreach.state, "rechazado"); assert.equal(c.outreach.nextAt, null);
+    /* solo distribuidores */
+    next = { tipo: "solo_distribuidores", resumen: "Solo por distribuidor", distribuidor_indicado: { nombre: "Distrib Norte", web: "www.distribnorte.es", email: "pedidos@distribnorte.es" } };
+    await out.__applyForTests(out.classifyMessage(mk("r2.es", "Solo vendemos a traves de Distrib Norte"), idx, "info@b.com"));
+    const nd = await docs.get("contacts", "distribnorte.es");
+    assert.ok(nd); assert.equal(nd.status, "pendiente"); assert.deepEqual(nd.emails, ["pedidos@distribnorte.es"]);
+    /* pregunta por el canal */
+    next = { tipo: "pregunta_canal", resumen: "Preguntan donde venden", borrador_respuesta: null };
+    await out.__applyForTests(out.classifyMessage(mk("r3.es", "¿Donde venden sus productos?"), idx, "info@b.com"));
+    c = await docs.get("contacts", "r3.es");
+    assert.equal(c.needsHuman, true); assert.equal(c.outreach.state, "respondido");
+  } finally { http.jsonFetch = orig; delete process.env.ANTHROPIC_API_KEY; }
+});
+
+test("contactos: se prefieren los correos de ventas y se evitan soporte/SAT", () => {
+  const cs = require("../src/lib/contactscan");
+  const r = cs.rankEmails(["soporte@acme.es", "sat@acme.es", "info@acme.es", "distribuidores@acme.es"], "acme.es");
+  assert.equal(r[0], "distribuidores@acme.es");
+  assert.deepEqual(r.slice(-2).sort(), ["sat@acme.es", "soporte@acme.es"]);
 });
