@@ -1897,6 +1897,8 @@ async function candidatesLarge(body) {
   const maxScan = Math.min(filteredPool.length, liteBudget * 4);
   let deepAsked = 0, preDropped = 0, stoppedForTokens = false, liteSpent = 0;
   const dropWhy = { sin_precio: 0, fuera_de_busqueda: 0, una_oferta: 0, sin_fba_terceros: 0 };
+  const dropSamples = {};
+  let deepDropLogged = 0;
   while (out.length < limit && cursor < filteredPool.length && scanned < maxScan && liteSpent < liteBudget) {
     let take = Math.min(limit, filteredPool.length - cursor, maxScan - scanned);
     const bud = keepaCost.budget(40);
@@ -1918,6 +1920,9 @@ async function candidatesLarge(body) {
          batidora" pasaba el filtro por titulo y se colaba como candidato. */
       /* Solo si la palabra NO es lo que se busca: buscando "filtro de agua"
          antes se descartaban todos los filtros. */
+      /* En modo categoria (sin palabra clave) un adaptador o un filtro es un
+         producto mas de la categoria: no se descarta. */
+      if (!qWords.length) return true;
       const acc = t.match(/\b(repuesto|repuestos|recambio|accesorio|accesorios|pieza|piezas|cuchilla|embolo|filtro|junta|adaptador|manguera)\b/);
       if (acc && !qWords.some(function (w) { return acc[1].indexOf(w.slice(0, 5)) === 0 || w.indexOf(acc[1].slice(0, 5)) === 0; })) return false;
       /* El Product Finder por titulo es laxo: ademas de los accesorios devuelve
@@ -1929,11 +1934,19 @@ async function candidatesLarge(body) {
     /* Prefiltro barato: sin precio, fuera de la busqueda o con 0-1 ofertas
        (marca propia/monopolio, regla dura del PDF) no merecen Buy Box. */
     const pre = (lite.products || []).map(metricsFromKeepa).filter(function (m) {
+      /* Muestra auditable de cada descarte (GET /debug/events?kind=cand). */
+      const why = !(m.asin && m.pvp > 0) ? "sin_precio" : (!keywordRelevant(m) ? "fuera_de_busqueda" : ((p.bbRule && m.thirdParty != null && m.thirdParty <= 1) ? "una_oferta" : ((p.bbRule && m.fbaThird === 0) ? "sin_fba_terceros" : "")));
+      if (why && (dropSamples[why] = (dropSamples[why] || 0) + 1) <= 4) {
+        try { events.add("cand", { why: why, asin: m.asin, pvp: m.pvp, thirdParty: m.thirdParty, fbaThird: m.fbaThird, fbaSource: m.fbaSource, bbFbaThird: m.bbFbaThird, title: String(m.title || "").slice(0, 60) }); } catch (e) {}
+      }
       if (!(m.asin && m.pvp > 0)) { dropWhy.sin_precio++; return false; }
       if (!keywordRelevant(m)) { dropWhy.fuera_de_busqueda++; return false; }
       if (p.bbRule && m.thirdParty != null && m.thirdParty <= 1) { dropWhy.una_oferta++; preDropped++; counts.descarte = (counts.descarte || 0) + 1; return false; }
-      /* Ninguna oferta FBA de terceros ahora mismo: no hay Buy Box que compartir. */
-      if (p.bbRule && m.fbaThird === 0) { dropWhy.sin_fba_terceros++; preDropped++; counts.descarte = (counts.descarte || 0) + 1; return false; }
+      /* El recuento FBA del barrido ligero (sin Buy Box) no es fiable: solo se
+         anota. La regla de 2 FBA se aplica con el historial de Buy Box de 90 d
+         en la fase siguiente (planFor), y el Product Finder ya filtra que haya
+         oferta FBA de terceros. */
+      if (p.bbRule && m.fbaThird === 0) dropWhy.sin_fba_terceros++;
       return true;
     }).sort(function (a, b) { return (b.sales || 0) - (a.sales || 0) || (a.bsr || 1e12) - (b.bsr || 1e12); });
     const need = Math.max(1, Math.ceil((limit - out.length) * 1.5));
@@ -1973,12 +1986,16 @@ async function candidatesLarge(body) {
       m.plan = plan;
       m.estado = plan.estado;
       counts[m.estado] = (counts[m.estado] || 0) + 1;
+      if (m.estado === "descarte" && (deepDropLogged++) < 8) {
+        try { events.add("cand", { why: "plan", asin: m.asin, pvp: m.pvp, fbaThird: m.fbaThird, fbaSource: m.fbaSource, bbFbaThird: m.bbFbaThird, bb: plan.buyBox && plan.buyBox.kind, reason: String((plan.reasons || [])[0] || "").slice(0, 160) }); } catch (e) {}
+      }
       if (includeDiscards || m.estado !== "descarte") out.push(m);
     });
   }
   if (!includeDiscards) notes.push("Se ocultan los descartados; activa 'Incluir descartados' para verlos.");
-  notes.push("Keepa: " + scanned + " ASIN en barrido ligero, " + deepAsked + " con Buy Box, " + preDropped + " descartados antes de pedir Buy Box (0-1 ofertas o ningun FBA de terceros)." + (keepaCost.usage.tokensLeft != null ? (" Tokens restantes: " + keepaCost.usage.tokensLeft + ".") : ""));
-  notes.push("Descartes del barrido ligero: " + dropWhy.sin_fba_terceros + " sin FBA de terceros, " + dropWhy.una_oferta + " con 0-1 ofertas, " + dropWhy.sin_precio + " sin precio, " + dropWhy.fuera_de_busqueda + " fuera de la busqueda.");
+  notes.push("Keepa: " + scanned + " ASIN en barrido ligero, " + deepAsked + " con Buy Box, " + preDropped + " descartados antes de pedir Buy Box (0-1 ofertas)." + (keepaCost.usage.tokensLeft != null ? (" Tokens restantes: " + keepaCost.usage.tokensLeft + ".") : ""));
+  try { events.add("cand", { phase: "resumen", via: via, pool: pool.length, scanned: scanned, liteSpent: liteSpent, deep: deepAsked, out: out.length, drop: JSON.stringify(dropWhy) }); } catch (e) {}
+  notes.push("Barrido ligero: " + dropWhy.sin_fba_terceros + " parecen sin FBA de terceros (se confirma con la Buy Box), descartados: " + dropWhy.una_oferta + " con 0-1 ofertas, " + dropWhy.sin_precio + " sin precio, " + dropWhy.fuera_de_busqueda + " fuera de la busqueda.");
   if (stoppedForTokens) notes.push("Barrido recortado para no dejar Keepa sin tokens: pulsa 'Cargar mas' cuando se recargue el saldo.");
 
   const sortKey = String((body && body.sort) || "aptitud");
