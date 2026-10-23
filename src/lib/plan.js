@@ -143,7 +143,7 @@ function planFor(m, p) {
   if (!hardDrop) {
     if (pvp > 0 && pvp < num(p.minBB)) reasons.push("Precio Buy Box " + round2(pvp) + " EUR por debajo del minimo (" + p.minBB + " EUR): el descuento necesario puede no conseguirse.");
     if (sales < num(p.minSales)) reasons.push("Ventas/mes " + round2(sales) + " por debajo del minimo (" + p.minSales + "): poca rotacion.");
-    if (num(p.minThirdParty) > 0 && thirdParty < num(p.minThirdParty)) reasons.push("Solo " + thirdParty + " vendedor(es) tercero(s): si solo vende la marca, es marca privada.");
+    if (num(p.minThirdParty) > 0 && m.thirdParty != null && thirdParty < num(p.minThirdParty)) reasons.push("Solo " + thirdParty + " vendedor(es) tercero(s): si solo vende la marca, es marca privada.");
     if (historyDays != null && historyDays < num(p.minHistory)) reasons.push("Historial en Keepa de " + historyDays + " dias (minimo " + p.minHistory + "): listing nuevo, a revisar.");
     if (num(p.maxDiscount) > 0 && discPct > num(p.maxDiscount)) reasons.push("Descuento necesario " + discPct + " % supera el tope " + p.maxDiscount + " %: dificil de conseguir.");
     if (m.brandRestricted) reasons.push("Marca restringida: se puede solicitar en Seller Central (solo aviso).");

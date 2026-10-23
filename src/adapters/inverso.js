@@ -126,7 +126,11 @@ function metricsFromKeepa(prod) {
   /* Ventas: monthlySold de Amazon si existe; si no, caidas de BSR 30 d (suelo, no se dividen). */
   const sales = num(s.monthlySold) || num(s.salesRankDrops30) || 0;
   /* Keepa usa centinelas negativos (-1/-2) para "sin dato": nunca deben contar. */
-  const offersTotal = posNum(s.offerCount) || posNum(s.totalOfferCount) || 0;
+  /* Sin `offers` en la peticion Keepa no rellena totalOfferCount (-2). El
+     recuento de ofertas nuevas (csv 11 = COUNT_NEW) si viene en stats.current
+     y sirve de respaldo. Sin ningun dato -> null (desconocido), NUNCA 0:
+     un 0 activaba la regla "sin competencia" y descartaba el candidato. */
+  const offersTotal = posNum(s.offerCount) || posNum(s.totalOfferCount) || keepaCur(prod, 11, false) || 0;
   /* null = Keepa no dio dato (sin `offers` en la peticion). Antes valia 0 y
      disparaba siempre "menos de 2 FBA". */
   const fbaOffersList = fbaFromOffers(prod);
@@ -140,7 +144,7 @@ function metricsFromKeepa(prod) {
   /* Amazon vende si aparece en la Buy Box de 90 d (antes: precio actual + una lista mal leida). */
   const bb = buybox.analyze(prod && prod.buyBoxSellerIdHistory, 90, undefined, { brand: brand, manufacturer: manufacturer, sellerName: sellerName });
   const amazonSells = keepaFicha.amazonSellsFrom(prod, bb, keepaCur(prod, 0, true));
-  const thirdParty = offersTotal > 0 ? Math.max(0, offersTotal - (amazonSells ? 1 : 0)) : (offersFba || 0);
+  const thirdParty = offersTotal > 0 ? Math.max(0, offersTotal - (amazonSells ? 1 : 0)) : (offersFba != null ? offersFba : null);
   const fbaThird = fbaOffersList != null
     ? fbaOffersList
     : (offersFba == null ? null : Math.max(0, offersFba - (amazonSells ? 1 : 0)));
@@ -154,7 +158,7 @@ function metricsFromKeepa(prod) {
     imageSource: keepaImageUrl(prod) ? "amazon (Keepa)" : "",
     url: prod && prod.asin ? "https://www.amazon.es/dp/" + String(prod.asin).toUpperCase() : "",
     pvp: round2(pvp), bsr: bsr, sales: Math.round(sales),
-    thirdParty: Math.round(thirdParty), offersFba: offersFba == null ? null : Math.round(offersFba),
+    thirdParty: thirdParty == null ? null : Math.round(thirdParty), offersFba: offersFba == null ? null : Math.round(offersFba),
     fbaThird: fbaThird == null ? null : Math.round(fbaThird),
     historyDays: historyDays(prod), ean: String(ean || ""),
     categoryTree: (prod && prod.categoryTree) || [],
@@ -739,6 +743,7 @@ function buildSourcesPayload(out, body, priceMax) {
       matches: out.matches || [], searched: out.searched || [],
       overMax: out.overMax || [], diagnosis: out.diagnosis || null, summary: out.summary || null,
       review: out.review || [], phases: out.phases || null, policy: out.policy || "",
+      leads: out.leads || null,
       queries: out.queries || [],
       amazon: amazon, googleShopping: google, wholesaleDraft: wholesaleDraft,
       cheapestVerified: out.cheapestVerified || cheapestVerified(out.matches),
@@ -772,6 +777,65 @@ function raceBudget(workers, deadline) {
   return Promise.race([done, limit]);
 }
 
+/* Ficha de Amazon: si el frontend no manda EAN/modelo/referencia/fabricante,
+   se leen de Keepa (1 llamada). Se hace UNA vez por busqueda y la comparten
+   la cascada de ofertas y el buscador de fabricantes/distribuidores. */
+async function fichaFromKeepa(body) {
+  body = body || {};
+  if (body.__kpDone) return body;
+  let kpProd = null;
+  if (body.asin && keepaReady() && (!body.ean || !body.model || !body.partNumber || !body.categoryTree || !body.image || !body.manufacturer)) {
+    try {
+      const kp = await withTimeout(keepaProductsByAsins([String(body.asin).toUpperCase()], 0), 6000);
+      kpProd = (kp && kp.products && kp.products[0]) || null;
+    } catch (e) {}
+  }
+  if (kpProd) {
+    const fx = keepaFicha.fichaOf(kpProd);
+    const f = fx.ficha;
+    body = Object.assign({}, body, {
+      eans: gtinLib.normalizeAll([].concat(body.eans || [], body.ean || [], f.eans)),
+      ean: body.ean || f.eans[0] || "",
+      model: body.model || f.model || "",
+      partNumber: body.partNumber || f.partNumber || "",
+      brand: body.brand || String(kpProd.brand || ""),
+      manufacturer: body.manufacturer || f.manufacturer || "",
+      categoryTree: body.categoryTree || kpProd.categoryTree || null,
+      image: body.image || keepaImageUrl(kpProd),
+      features: (body.features && body.features.length) ? body.features : (f.features || []),
+      description: body.description || f.description || "",
+      color: body.color || f.color || "",
+      size: body.size || f.size || ""
+    });
+    try { events.add("job", { phase: "ficha", asin: body.asin, eans: (body.eans || []).length, model: body.model, partNumber: body.partNumber, missing: fx.missing.join(",") }); } catch (e) {}
+  }
+  return Object.assign({}, body, { __kpDone: true });
+}
+
+/* Fabricante / distribuidor / mayorista (lib/leads + adapters/fabricantes).
+   Corre en paralelo a la cascada de ofertas y se reporta como una fuente mas. */
+async function findLeads(body, hooks) {
+  hooks = hooks || {};
+  if (config.leads && config.leads.enabled === false) return null;
+  const fab = require("./fabricantes");
+  const id = "fabricantes";
+  const label = fab.label;
+  const t0 = Date.now();
+  if (hooks.onStart) { try { hooks.onStart(id, label); } catch (e) {} }
+  let r = null;
+  try {
+    r = await withTimeout(fab.find(body, hooks), ((config.leads && config.leads.timeoutMs) || 90000) + 30000);
+  } catch (e) { r = { ok: false, reason: String((e && e.message) || e) }; }
+  const data = r && r.ok ? r.data : null;
+  const n = data ? data.leads.length : 0;
+  const entry = {
+    source: id, sourceLabel: label, ok: n > 0, count: n, ms: Date.now() - t0, phase: 0,
+    reason: n ? null : ((data && data.diagnosis && data.diagnosis.reason) || (r && r.reason) || "sin_resultados")
+  };
+  if (hooks.onSource) { try { hooks.onSource(entry, []); } catch (e) {} }
+  return { entry: entry, data: data || { leads: [], retailers: [], queries: [], googleLinks: [], diagnosis: { reason: (r && r.reason) || "error", message: "El buscador de fabricantes no respondio: " + ((r && r.reason) || "error") + "." } } };
+}
+
 async function searchSuppliers(body, priceMax, hooks) {
   hooks = hooks || {};
   const { adapters } = require("./index"); /* lazy: evita el ciclo index<->inverso */
@@ -788,32 +852,7 @@ async function searchSuppliers(body, priceMax, hooks) {
     const ry = rank[adapters[y].kind] != null ? rank[adapters[y].kind] : 5;
     return rx - ry;
   });
-  /* Ficha de Amazon: si el frontend no manda EAN/modelo/referencia, se leen de Keepa (1 llamada). */
-  let kpProd = null;
-  if (body && body.asin && keepaReady() && (!body.ean || !body.model || !body.partNumber || !body.categoryTree || !body.image)) {
-    try {
-      const kp = await withTimeout(keepaProductsByAsins([String(body.asin).toUpperCase()], 0), 6000);
-      kpProd = (kp && kp.products && kp.products[0]) || null;
-    } catch (e) {}
-  }
-  if (kpProd) {
-    const fx = keepaFicha.fichaOf(kpProd);
-    const f = fx.ficha;
-    body = Object.assign({}, body, {
-      eans: gtinLib.normalizeAll([].concat(body.eans || [], body.ean || [], f.eans)),
-      ean: body.ean || f.eans[0] || "",
-      model: body.model || f.model || "",
-      partNumber: body.partNumber || f.partNumber || "",
-      brand: body.brand || String(kpProd.brand || ""),
-      categoryTree: body.categoryTree || kpProd.categoryTree || null,
-      image: body.image || keepaImageUrl(kpProd),
-      features: (body.features && body.features.length) ? body.features : (f.features || []),
-      description: body.description || f.description || "",
-      color: body.color || f.color || "",
-      size: body.size || f.size || ""
-    });
-    try { events.add("job", { phase: "ficha", asin: body.asin, eans: (body.eans || []).length, model: body.model, partNumber: body.partNumber, missing: fx.missing.join(",") }); } catch (e) {}
-  }
+  body = await fichaFromKeepa(body);
   const srcEans = gtinLib.normalizeAll([].concat((body && body.eans) || [], (body && body.ean) || []));
   /* Politica de identidad: "cascade" (por defecto en la 0.27) intenta EAN
      exacto y, solo si no queda nada verificado, marca+modelo+titulo+specs.
@@ -1689,7 +1728,7 @@ async function candidatesLarge(body) {
           title: query,
           perPage: Math.min(200, Math.max(100, limit * 3)),
           productType: [0, 1],
-          sort: [["current_SALES", "desc"]],
+          sort: [["current_SALES", "asc"]], /* current_SALES = BSR: asc = mas vendidos primero */
           current_SALES_gte: 1
         }
       });
@@ -1708,7 +1747,7 @@ async function candidatesLarge(body) {
       perPage: 200,
       page: page - 1,
       productType: [0, 1],
-      sort: [["current_SALES", "desc"]],
+      sort: [["current_SALES", "asc"]], /* current_SALES = BSR: asc = mas vendidos primero */
       current_SALES_gte: 1
     };
     if (catId) selection.categories_include = [String(catId)];
@@ -1773,7 +1812,10 @@ async function candidatesLarge(body) {
       const t = String(m.title || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
       /* Repuestos y accesorios no son el producto: "repuesto de embolo para
          batidora" pasaba el filtro por titulo y se colaba como candidato. */
-      if (/\b(repuesto|repuestos|recambio|accesorio|accesorios|pieza|piezas|cuchilla|embolo|filtro|junta|adaptador|manguera)\b/.test(t)) return false;
+      /* Solo si la palabra NO es lo que se busca: buscando "filtro de agua"
+         antes se descartaban todos los filtros. */
+      const acc = t.match(/\b(repuesto|repuestos|recambio|accesorio|accesorios|pieza|piezas|cuchilla|embolo|filtro|junta|adaptador|manguera)\b/);
+      if (acc && !qWords.some(function (w) { return acc[1].indexOf(w.slice(0, 5)) === 0 || w.indexOf(acc[1].slice(0, 5)) === 0; })) return false;
       /* El Product Finder por titulo es laxo: ademas de los accesorios devuelve
          productos que solo comparten una palabra lejana. Se exige que el titulo
          contenga la palabra buscada (raiz de 5 letras). */
@@ -2131,8 +2173,22 @@ const inverso = {
     /* Fase 2 · buscar donde comprar por debajo del precio maximo. */
     sources: async function (body, ctx, hooks) {
       const priceMax = num(body && (body.priceMax || body.maxPrice));
-      const out = await searchSuppliers(body || {}, priceMax, hooks);
-      return buildSourcesPayload(out, body, priceMax);
+      const full = await fichaFromKeepa(body || {});
+      /* Primero (y en paralelo) QUIEN lo suministra; despues, ofertas con precio. */
+      const leadsP = (body && body.leads === false) ? Promise.resolve(null) : findLeads(full, hooks);
+      const out = await searchSuppliers(full, priceMax, hooks);
+      const lr = await leadsP;
+      if (lr) {
+        out.leads = lr.data;
+        out.searched = [lr.entry].concat(out.searched || []);
+      }
+      return buildSourcesPayload(out, full, priceMax);
+    },
+    /* Solo fabricante/distribuidor, sin cascada de ofertas. */
+    leads: async function (body) {
+      const full = await fichaFromKeepa(body || {});
+      const lr = await findLeads(full, {});
+      return { ok: true, data: lr ? lr.data : null };
     }
   }
 };

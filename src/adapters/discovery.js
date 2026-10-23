@@ -363,6 +363,84 @@ async function search(body) {
   };
 }
 
+/* ---------- busqueda literal (sin variantes) para el buscador de
+   fabricantes/distribuidores ----------
+   queries: [{ q, group }]. Lanza EXACTAMENTE esas consultas (la busqueda
+   manual: "<EAN>" mayorista...) y devuelve cada resultado etiquetado con la
+   consulta que lo trajo y su posicion. Motores: Apify Google Search (una sola
+   ejecucion para todas), Brave y, si no hay nada, DuckDuckGo/Bing. */
+async function searchQueries(queries, opts) {
+  opts = opts || {};
+  const list = (queries || []).filter(function (x) { return x && x.q; });
+  if (!list.length) return { ok: false, reason: "query_required", results: [], engines: [] };
+  const perQuery = Math.min(Math.max(parseInt(opts.perQuery, 10) || 10, 5), 20);
+  const groupOf = {};
+  list.forEach(function (x) { groupOf[x.q.toLowerCase()] = x.group || ""; });
+  const results = [];
+  const engines = [];
+  const errors = [];
+  function push(o, q, pos, engine) {
+    const url = o && (o.url || o.link || o.href);
+    if (!/^https?:\/\//i.test(String(url || ""))) return;
+    results.push({
+      url: url, title: (o.title || o.name || ""), description: (o.description || o.snippet || ""),
+      query: q, group: groupOf[String(q || "").toLowerCase()] || "", position: pos, engine: engine
+    });
+  }
+  function cap(p, ms) {
+    return Promise.race([p, new Promise(function (r) { const t = setTimeout(function () { r({ ok: false, reason: "timeout" }); }, ms); if (t.unref) t.unref(); })]);
+  }
+  const jobs = [];
+  if (apifyReady()) {
+    jobs.push(cap(apify.runActor(config.apify.actors.search, {
+      queries: list.map(function (x) { return x.q; }).join("\n"),
+      countryCode: config.apify.country,
+      languageCode: config.discovery.lang,
+      resultsPerPage: perQuery,
+      maxPagesPerQuery: 1,
+      mobileResults: false,
+      saveHtml: false,
+      saveHtmlToKeyValueStore: false
+    }, { estCost: 0.01 * list.length, timeoutSec: 120 }), opts.timeoutMs || 90000).then(function (r) {
+      if (!r || !r.ok) { errors.push("apify:" + ((r && r.reason) || "error")); return; }
+      engines.push("google(apify)");
+      r.items.forEach(function (page) {
+        const q = (page && page.searchQuery && (page.searchQuery.term || page.searchQuery.q)) || "";
+        ((page && page.organicResults) || []).forEach(function (o, i) { push(o, q, o.position || (i + 1), "google"); });
+      });
+    }));
+  }
+  if (config.discovery.apiKey) {
+    jobs.push((async function () {
+      let ok = 0;
+      for (let i = 0; i < list.length; i++) {
+        const r = await cap(braveSearch(list[i].q, perQuery), 15000);
+        if (!r || !r.ok) { errors.push("brave:" + ((r && r.reason) || "error")); continue; }
+        ok++;
+        r.results.forEach(function (o, j) { push(o, list[i].q, j + 1, "brave"); });
+      }
+      if (ok) engines.push("brave");
+    })());
+  }
+  if (jobs.length) await Promise.all(jobs);
+  if (results.length < 3) {
+    /* Respaldo sin claves: DuckDuckGo y Bing desde el servidor (pocas consultas). */
+    const few = list.slice(0, 4);
+    const got = await Promise.all(few.map(async function (x) {
+      try {
+        let r = await web.actions.search({ query: x.q, engine: "ddg" });
+        if (!r.ok) r = await web.actions.search({ query: x.q, engine: "bing" });
+        return { q: x.q, list: r.ok ? parseWebResults(r.html) : [] };
+      } catch (e) { return { q: x.q, list: [] }; }
+    }));
+    let n = 0;
+    got.forEach(function (g) { g.list.forEach(function (o, j) { n++; push(o, g.q, j + 1, "web"); }); });
+    if (n) engines.push("web");
+    else errors.push("web:sin_resultados");
+  }
+  return { ok: results.length > 0, reason: results.length ? null : (errors[0] || "sin_resultados"), results: results, engines: engines, errors: errors };
+}
+
 const discovery = {
   id: "discovery",
   label: "Descubrimiento de proveedores (buscador)",
@@ -383,4 +461,6 @@ const discovery = {
   }
 };
 
+discovery.searchQueries = searchQueries;
+discovery.parseWebResults = parseWebResults;
 module.exports = discovery;

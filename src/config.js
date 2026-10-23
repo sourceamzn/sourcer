@@ -154,6 +154,16 @@ const config = {
   },
   /* Fase 4 · puntuacion de coincidencia. Enriquecimiento de ofertas "a
      revisar" sin EAN: cuantas fichas se abren por busqueda y con que timeout. */
+  /* Buscador de fabricante/distribuidor/mayorista por EAN (adapters/fabricantes).
+     Lanza la busqueda manual ("<EAN>" mayorista...) y clasifica dominios. */
+  leads: {
+    enabled: clean(process.env.LEADS_ENABLED || "1") !== "0",
+    maxQueries: Math.min(Math.max(parseInt(clean(process.env.LEADS_MAX_QUERIES) || "10", 10) || 10, 2), 14),
+    perQuery: Math.min(Math.max(parseInt(clean(process.env.LEADS_PER_QUERY) || "10", 10) || 10, 5), 20),
+    pageChecks: Math.min(Math.max(parseInt(clean(process.env.LEADS_PAGE_CHECKS) || "8", 10) || 0, 0), 20),
+    pageMs: Math.min(Math.max(parseInt(clean(process.env.LEADS_PAGE_MS) || "8000", 10) || 8000, 2000), 20000),
+    timeoutMs: Math.min(Math.max(parseInt(clean(process.env.LEADS_TIMEOUT_MS) || "90000", 10) || 90000, 20000), 150000)
+  },
   match: {
     /* Politica de identidad de /suppliers: "cascade" = EAN exacto y, solo si
        no hay coincidencias verificadas, marca+modelo+titulo+specs. "exact"
