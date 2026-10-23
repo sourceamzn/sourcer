@@ -81,9 +81,19 @@ const VARS = {
 };
 const TEMPLATE_SYNTAX = "Bloque condicional: {si_volumen}…{/si_volumen} solo aparece si hay volumen. Valor por defecto: {nombre_contacto | equipo de ventas}.";
 
+/* Plantillas del «Plan de primer contacto con fabricantes» (PDF del cliente),
+   copiadas literalmente; lo que el PDF marca para rellenar va como variable.
+   Se usan mientras no se guarden otras desde el editor. */
+const PLAN_TEMPLATES = { items: [
+  { subject: "Solicitud de tarifa y condiciones de alta como cliente – {marca}", subjectB: "Consulta de distribución – {marca}",
+    body: "Buenos días {nombre_contacto | equipo de ventas},\n\nMe llamo {nombre} y escribo desde {empresa} ({web}), una tienda online con sede en Barcelona.\n\nEstamos incorporando {marca} a nuestro catálogo y nos gustaría comprar directamente al fabricante de forma recurrente. Nos interesan estas referencias:\n\n{lista_referencias}\n\n¿Podríais enviarnos la tarifa de distribuidor con EAN y las condiciones para darnos de alta como cliente (pedido mínimo, descuentos por volumen, forma de pago y plazo de entrega)? Si tenéis el catálogo completo de la gama, también nos vendría bien para valorar más referencias.\n\n{si_volumen}Calculamos pedidos de unas {volumen} unidades por referencia (stock para unos dos meses), y estamos abiertos a ajustar la cantidad según vuestros tramos de descuento.{/si_volumen}\n\nPuedo enviar la documentación de la empresa que necesitéis.\n\nUn saludo,\n{nombre} · {empresa}\n{email} · {web}" },
+  { subject: "", body: "Buenos días {nombre_contacto | equipo de ventas},\n\nTe escribo por si mi mensaje anterior se ha quedado sin ver. Nos vendría muy bien recibir la tarifa de distribuidor de {referencias_resumidas}.\n\nSi el proceso para darse de alta es otro (un formulario, otra persona del equipo), dímelo y lo hago por ahí.\n\nGracias,\n{nombre} · {empresa}" },
+  { subject: "", body: "Buenos días {nombre_contacto | equipo de ventas},\n\nNo quiero ser pesado. Si no es vuestro departamento, ¿podrías indicarme con quién debo hablar para solicitar tarifa de distribuidor? Si lo prefieres, lo hablamos por teléfono unos minutos: {telefono_kevin}.\n\nY si ahora mismo no trabajáis con nuevos distribuidores, también me ayuda saberlo para no volver a escribiros.\n\nMuchas gracias,\n{nombre} · {empresa}\n{email}" }
+] };
 async function getTemplates() {
-  const t = (await docs.get("settings", "templates")) || {};
-  return { items: Array.isArray(t.items) ? t.items : [], whatsapp: String(t.whatsapp || ""), updatedAt: t.updatedAt || null };
+  const t = await docs.get("settings", "templates");
+  if (!t || !Array.isArray(t.items) || !t.items.length) return { items: JSON.parse(JSON.stringify(PLAN_TEMPLATES.items)), whatsapp: "", updatedAt: null, fromPlan: true };
+  return { items: t.items, whatsapp: String(t.whatsapp || ""), updatedAt: t.updatedAt || null };
 }
 async function setTemplates(t) {
   const items = (Array.isArray(t && t.items) ? t.items : []).slice(0, 10).map(function (x) {
@@ -668,6 +678,6 @@ async function status() {
 module.exports = {
   tick, testSend, status, metrics, startScheduler, startOutreach, pauseOutreach, approveDraft, rejectDraft,
   __applyForTests: applyFinding,
-  render, fill, varsFor, getTemplates, setTemplates, templateCount, sequenceLength, VARS,
+  PLAN_TEMPLATES, render, fill, varsFor, getTemplates, setTemplates, templateCount, sequenceLength, VARS,
   getSender, setSender, senderOk, mailReady, inWindow, inWindowFor, localeFor, classifyMessage, indexContacts, needsReview, prepare, variantOf
 };
