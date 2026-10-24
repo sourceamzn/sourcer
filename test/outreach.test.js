@@ -1,5 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
+/* Sin red en las pruebas: todos los dominios reciben correo. */
+require("../src/lib/mx")._setResolver({ mx: async function () { return [{ exchange: "mx.test", priority: 10 }]; }, a: async function () { return ["127.0.0.1"]; } });
 const net = require("net");
 const os = require("os");
 const path = require("path");

@@ -159,3 +159,99 @@ test("tarifcross: tarifa PVP estima la compra con el descuento de distribuidor",
   assert.ok(out.discNeeded > 0 && out.discNeeded < 100, String(out.discNeeded));
   assert.equal(out.estimated, true);
 });
+
+test("tarifcross motor amazon: fase 1 con SP-API (0 tokens), Keepa solo para lo que deja margen, comisiones y restricciones de la cuenta", async () => {
+  memDocs();
+  require("../src/lib/cache")._reset();
+  const cross = require("../src/lib/tarifcross");
+  const keepaCost = require("../src/lib/keepacost");
+  keepaCost.usage.tokensLeft = null;
+  const A = ean13("842000000001"), B = ean13("842000000002"), C = ean13("842000000003");
+  const calls = { code: 0, deep: [], restr: [] };
+  const sp = {
+    catalogByEans: async (eans) => ({ ok: true, byEan: {
+      [A]: [{ asin: "B0SPA00001", title: "Freidora", brand: "Acme", bsr: 900 }, { asin: "B0SPA0000X", title: "Freidora pack 2", brand: "Acme", bsr: 50000 }],
+      [B]: [{ asin: "B0SPA00002", title: "Plancha", brand: "Zeta", bsr: 4000 }],
+      [C]: []
+    } }),
+    offersBatch: async (asins) => ({ ok: true, byAsin: {
+      B0SPA00001: { price: 80, offers: 6, offersFba: 4, fbaThird: 4, thirdParty: 6, amazonSells: false },
+      B0SPA00002: { price: 15, offers: 3, offersFba: 2, fbaThird: 2, thirdParty: 3, amazonSells: false }
+    } }),
+    feesBatch: async (items) => {
+      const out = {};
+      items.forEach((x) => { out[x.asin] = { payload: { FeesEstimateResult: { Status: "Success", FeesEstimate: { FeeDetailList: [{ FeeType: "ReferralFee", FeeAmount: { Amount: x.price * 0.15 } }, { FeeType: "FBAFees", FeeAmount: { Amount: 5 } }] } } } }; });
+      return { ok: true, byAsin: out };
+    },
+    getListingsRestrictions: async (asin) => { calls.restr.push(asin); return { ok: true, data: { payload: { restrictions: [{ reasons: [{ message: "Necesitas aprobación para la marca Acme", reasonCode: "APPROVAL_REQUIRED" }] }] } } }; }
+  };
+  cross._forTests.setDeps({
+    keepaReady: () => true, amazonReady: () => true, spapi: sp,
+    sleep: async () => {},
+    keepaRequest: async () => { calls.code++; return { ok: false, reason: "no deberia llamarse" }; },
+    keepaProductsByAsins: async (asins) => { calls.deep.push(asins.slice()); return { ok: true, products: asins.map((a) => ({ asin: a, _m: { title: "Freidora", pvp: 80, sales: 300, thirdParty: 6, fbaThird: 4, offersFba: 4, amazonSells: false } })) }; },
+    metricsFromKeepa: (p) => Object.assign({ asin: p.asin, url: "https://www.amazon.es/dp/" + p.asin, historyDays: 400, fees: { referralPct: 15, fbaFee: 9, source: "keepa" } }, p._m)
+  });
+  const r = await cross.create({ fileName: "t.csv", vatMode: "sin", rows: [{ ean: A, price: 20 }, { ean: B, price: 14 }, { ean: C, price: 5 }] });
+  assert.equal(r.run.engine, "amazon");
+  for (let i = 0; i < 100 && !cross._forTests.idle(); i++) await new Promise((res) => setTimeout(res, 10));
+  const out = await cross.get(r.run.id);
+  assert.equal(out.run.state, "terminado", out.run.message);
+  assert.equal(calls.code, 0, "la fase 1 no gasta Keepa");
+  assert.equal(out.run.tokens, 0);
+  assert.deepEqual(calls.deep, [["B0SPA00001"]], "Keepa solo para el que deja margen");
+  const a = out.rows.find((x) => x.ean === A);
+  assert.equal(a.asin, "B0SPA00001", "elige la ficha con mejor BSR");
+  assert.equal(a.alternatives, 1);
+  assert.equal(a.feesSource, "spapi", "comisiones reales de la cuenta, no las de Keepa");
+  assert.equal(a.src, "amazon+keepa");
+  assert.equal(a.restricted, true);
+  assert.match(a.reasons[0], /aprobación/);
+  assert.equal(out.rows.find((x) => x.ean === B).verdict, "sin_margen");
+  assert.equal(out.run.notFound, 1);
+  assert.ok(/sin coste/.test(out.run.message));
+});
+
+test("tarifcross: sin Keepa, el motor amazon da veredicto con las ofertas actuales", async () => {
+  memDocs();
+  require("../src/lib/cache")._reset();
+  const cross = require("../src/lib/tarifcross");
+  const A = ean13("843000000001");
+  cross._forTests.setDeps({
+    keepaReady: () => false, amazonReady: () => true, sleep: async () => {},
+    spapi: {
+      catalogByEans: async () => ({ ok: true, byEan: { [A]: [{ asin: "B0NOKEEPA1", title: "Lámpara", brand: "Luz", bsr: 300 }] } }),
+      offersBatch: async () => ({ ok: true, byAsin: { B0NOKEEPA1: { price: 60, offers: 5, offersFba: 3, fbaThird: 3, thirdParty: 5, amazonSells: false } } }),
+      feesBatch: async () => ({ ok: true, byAsin: {} }),
+      getListingsRestrictions: async () => ({ ok: true, data: { payload: { restrictions: [] } } })
+    }
+  });
+  const r = await cross.create({ vatMode: "sin", rows: [{ ean: A, price: 12 }] });
+  for (let i = 0; i < 100 && !cross._forTests.idle(); i++) await new Promise((res) => setTimeout(res, 10));
+  const out = await cross.get(r.run.id);
+  assert.equal(out.run.state, "terminado");
+  assert.ok(["oportunidad", "revisar"].includes(out.rows[0].verdict), out.rows[0].verdict);
+  assert.ok(out.rows[0].reasons.some((x) => /Sin histórico/.test(x)));
+});
+
+test("tarifcross: volver a cruzar la misma tarifa no gasta Keepa en la fase 1 (cache)", async () => {
+  memDocs();
+  require("../src/lib/cache")._reset();
+  const cross = require("../src/lib/tarifcross");
+  require("../src/lib/keepacost").usage.tokensLeft = null;
+  const A = ean13("844000000001");
+  let codeCalls = 0;
+  cross._forTests.setDeps({
+    keepaReady: () => true, sleep: async () => {},
+    keepaRequest: async (path, params) => { codeCalls++; return { ok: true, data: { tokensConsumed: 1, products: [{ asin: "B0CACHE001", eanList: [A], _m: { title: "Cafetera", pvp: 20, sales: 10, thirdParty: 4 } }] } }; },
+    keepaProductsByAsins: async () => ({ ok: true, products: [] }),
+    metricsFromKeepa: (p) => Object.assign({ asin: p.asin, url: "", historyDays: 400 }, p._m)
+  });
+  for (let k = 0; k < 2; k++) {
+    const r = await cross.create({ vatMode: "sin", rows: [{ ean: A, price: 18 }] });
+    for (let i = 0; i < 100 && !cross._forTests.idle(); i++) await new Promise((res) => setTimeout(res, 10));
+    const out = await cross.get(r.run.id);
+    assert.equal(out.run.found, 1);
+  }
+  assert.equal(codeCalls, 1, "la segunda vez sale de cache");
+});
