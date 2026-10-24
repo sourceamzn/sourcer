@@ -21,6 +21,7 @@
 
 const docs = require("./docstore");
 const smtp = require("./smtp");
+const mxLib = require("./mx");
 const imapLib = require("./imap");
 const store = require("./store");
 const events = require("./events");
@@ -249,8 +250,17 @@ function needsReview(st, mail) {
 
 async function sendPrepared(c, sd, mail, session) {
   const o = c.outreach;
-  const to = (c.emails || [])[o.emailIdx || 0];
+  let to = (c.emails || [])[o.emailIdx || 0];
   if (!to) { o.state = "sin_email"; return { ok: false, reason: "sin_email" }; }
+  /* El dominio debe recibir correo; si no, se prueba la siguiente direccion. */
+  for (let guard = 0; guard < 6 && to; guard++) {
+    const mx = await mxLib.check(to);
+    if (mx.ok !== false) break;
+    hist(c, "aviso", "No se envía a " + to + ": el dominio " + mx.domain + " no recibe correo.");
+    o.emailIdx = (o.emailIdx || 0) + 1;
+    to = (c.emails || [])[o.emailIdx];
+  }
+  if (!to) { o.state = "sin_email"; o.lastError = "dominio_sin_correo"; return { ok: false, reason: "dominio_sin_correo" }; }
   const s = config.mail.smtp;
   const first = (o.messageIds || [])[0];
   const r = await smtp.send(smtpOpts(), {
@@ -307,6 +317,8 @@ async function sendManual(c, input) {
   const o = c.outreach || {};
   const to = String(input.to || (c.emails || [])[o.emailIdx || 0] || "").trim();
   if (!to) return { ok: false, reason: "sin_email" };
+  const mx = await mxLib.check(to);
+  if (mx.ok === false) return { ok: false, reason: "dominio_sin_correo", domain: mx.domain };
   const sd = await getSender();
   const s = config.mail.smtp;
   const th = c.thread || [];

@@ -94,6 +94,7 @@ async function runActor(actorId, input, opts) {
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
     if (op) { op.calls += 1; op.spent += Number(opts.estCost) || 0.01; }
+    try { require("./usage").add("apify", { runs: 1, estUsd: Number(opts.estCost) || 0.01, errors: res.ok ? 0 : 1 }); } catch (e) {}
     if (!res.ok) {
       /* El token nunca se devuelve ni se registra. */
       let msg = data && data.error && data.error.message ? String(data.error.message).slice(0, 300) : "";

@@ -122,6 +122,11 @@ async function sendViaRelay(opts, msg) {
 }
 
 async function send(opts, msg) {
+  const r = await sendRaw(opts, msg);
+  try { require("./usage").add("mail", { sent: 1 }); } catch (e) {}
+  return r;
+}
+async function sendRaw(opts, msg) {
   if (opts && opts.relayUrl) return sendViaRelay(opts, msg);
   const built = buildMessage(msg);
   let { sock, implicit } = await connect(opts);

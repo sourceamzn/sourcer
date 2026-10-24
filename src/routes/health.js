@@ -96,9 +96,17 @@ function health(req, res) {
       return {
         keepa: keepaReady(), apify: apifyReady(), ai: Boolean(ai),
         smtp: Boolean(mail.smtp && mail.smtp.host && mail.smtp.user), imap: Boolean(mail.imap && mail.imap.host && mail.imap.user),
-        database: db === "postgres", keepaTokens: require("../lib/keepacost").usage.tokensLeft
+        database: db === "postgres", keepaTokens: require("../lib/keepacost").usage.tokensLeft,
+        amazon: amazonReady(), amazonSellerId: Boolean(config.amazon.sellerId),
+        brave: Boolean(config.discovery && config.discovery.apiKey),
+        searchMode: config.discovery && config.discovery.mode,
+        braveLeft: require("../adapters/discovery").braveStats.monthLeft,
+        searchPrimary: (config.discovery && config.discovery.apiKey && config.discovery.primary !== "apify") ? "brave" : (apifyReady() ? "apify" : "web")
       };
     })(),
+    spapi: require("../lib/spapi").status(),
+    breakers: require("../lib/breaker").snapshot(),
+    brave: require("../adapters/discovery").braveStats,
     top20: top20.status(),
     adapters: list(),
     /* Catalogo del PDF con las particularidades por proveedor (EAN, stock
@@ -107,4 +115,21 @@ function health(req, res) {
   });
 }
 
+/* GET /health/amazon: prueba real de la conexion con SP-API (requiere clave API). */
+async function amazonCheck(req, res) {
+  try { res.json(await require("../lib/spapi").check()); }
+  catch (e) { res.json({ ok: false, reason: String((e && e.message) || e) }); }
+}
+/* GET /health/cache: estado de la cache compartida. POST con {clear:"ns"} la vacia. */
+async function cacheInfo(req, res) {
+  const c = require("../lib/cache");
+  if (req.method === "POST") {
+    const ns = req.body && typeof req.body.clear === "string" ? req.body.clear.replace(/[^a-z_]/g, "") : "";
+    await c.clear(ns || null);
+  }
+  res.json({ ok: true, cache: await c.snapshot() });
+}
+
 module.exports = health;
+module.exports.amazonCheck = amazonCheck;
+module.exports.cacheInfo = cacheInfo;

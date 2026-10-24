@@ -14,6 +14,7 @@
 const { config, apifyReady, discoveryReady } = require("../config");
 const { jsonFetch, isSafeRemoteUrl } = require("../lib/http");
 const leadsLib = require("../lib/leads");
+const cache = require("../lib/cache");
 const gtin = require("../lib/gtin");
 const events = require("../lib/events");
 
@@ -57,15 +58,38 @@ async function find(body, hooks) {
       if (info && info.ok && info.data && info.data.brand) brand = info.data.brand;
     } catch (e) {}
   }
-  const ctx = { eans: eans, brand: brand, manufacturer: String(body.manufacturer || "").trim(), brands: leadsLib.brandCandidates(Object.assign({}, body, { brand: brand })) };
-  const queries = leadsLib.buildLeadQueries(Object.assign({}, body, { brand: brand }), { max: c.maxQueries, lang: (config.discovery && config.discovery.lang) || "es" });
+  /* Sin marca o sin fabricante: Amazon (SP-API) los tiene en la ficha. */
+  let manufacturer = String(body.manufacturer || "").trim();
+  if ((!brand || !manufacturer) && body.asin) {
+    try {
+      const { amazonReady } = require("../config");
+      if (amazonReady()) {
+        const r = await withTimeout(require("../lib/spapi").getCatalogItem(String(body.asin).toUpperCase()), 8000);
+        const it = r && r.ok && r.data;
+        const attr = (it && it.attributes) || {};
+        const sum = ((it && it.summaries) || [])[0] || {};
+        const val = function (a) { return a && a[0] && (a[0].value || a[0].name) ? String(a[0].value || a[0].name).trim() : ""; };
+        if (!brand) brand = val(attr.brand) || sum.brand || "";
+        if (!manufacturer) manufacturer = val(attr.manufacturer) || sum.manufacturer || "";
+      }
+    } catch (e) {}
+  }
+  const ctx = { eans: eans, brand: brand, manufacturer: manufacturer, brands: leadsLib.brandCandidates(Object.assign({}, body, { brand: brand })) };
+  const queries = leadsLib.buildLeadQueries(Object.assign({}, body, { brand: brand, manufacturer: manufacturer }), { max: c.maxQueries, lang: (config.discovery && config.discovery.lang) || "es" });
   /* IA (Haiku): hasta 3 busquedas extra (titular real de la marca, terminos del sector). */
   const aiLib = require("../lib/ai");
   const aiCtx = { name: String(body.name || "").slice(0, 160), brand: brand, manufacturer: ctx.manufacturer, model: String(body.partNumber || body.model || ""), ean: leadsLib.bestEans(body)[0] || "" };
   let aiInfo = { used: false };
   if (aiLib.ready() && queries.length) {
     try {
-      const sq = await withTimeout(aiLib.suggestSupplierQueries(Object.assign({ existing: queries.map(function (x) { return x.q; }) }, aiCtx)), 9000);
+      /* Mismas busquedas extra para el mismo producto (30 d): si la IA
+         inventara otras cada vez, repetir la busqueda volveria a costar. */
+      const aiKey = eans[0] || String(brand + "|" + (body.partNumber || body.model || body.name || "")).toLowerCase().replace(/\s+/g, " ").slice(0, 120);
+      let sq = await cache.get("aiq", aiKey);
+      if (!sq) {
+        sq = await withTimeout(aiLib.suggestSupplierQueries(Object.assign({ existing: queries.map(function (x) { return x.q; }) }, aiCtx)), 9000);
+        if (sq && sq.ok) await cache.set("aiq", aiKey, { ok: true, owner: sq.owner || null, queries: sq.queries || [] }, 30 * cache.DAY);
+      }
       if (sq && sq.ok) {
         aiInfo.used = true;
         aiInfo.owner = sq.owner || null;
@@ -81,12 +105,38 @@ async function find(body, hooks) {
     return { ok: false, reason: "sin_identidad", data: { queries: [], googleLinks: [], leads: [], retailers: [], note: "Sin EAN ni marca no se puede buscar fabricante/distribuidor." } };
   }
   const links = leadsLib.googleLinks(queries);
+  /* GS1 dice que empresa es duena del codigo de barras: el fabricante real. */
+  if (eans[0]) links.unshift({ q: "Dueño del EAN (GS1)", url: "https://www.gs1.org/services/verified-by-gs1/results?gtin=" + eans[0] });
   const discovery = require("./discovery");
   const sr = await discovery.searchQueries(queries, { perQuery: c.perQuery, timeoutMs: c.timeoutMs });
   const ranked = leadsLib.rankLeads(sr.results || [], ctx);
 
+  /* Lo ya analizado para ESTE producto (lectura de la web + IA) se reutiliza:
+     repetir la busqueda no vuelve a leer paginas ni a pagar IA; solo las webs
+     nuevas se analizan. Y se marca que proveedores son nuevos. */
+  const ctxKey = eans[0] || String(brand + "|" + (body.partNumber || body.model || body.name || "")).toLowerCase().replace(/\s+/g, " ").slice(0, 120);
+  const hostKey = function (l) { return ctxKey + "|" + String(l.host || "").replace(/^www\d?\./, "").toLowerCase(); };
+  const allRanked = ranked.leads.concat(ranked.retailers);
+  const known = await cache.getMany("leadinfo", allRanked.map(hostKey));
+  const prevSet = (await cache.get("leadset", ctxKey)) || null;
+  let reused = 0;
+  allRanked.forEach(function (l) {
+    const k = known[hostKey(l)];
+    if (!k) return;
+    reused++;
+    l.role = k.role; l.roleLabel = k.roleLabel; l.score = (l.score || 0) + (k.scoreAdj || 0);
+    if (k.ai) l.ai = k.ai;
+    if (k.page) l.page = k.page;
+    if (k.signals) l.signals = k.signals;
+    Object.defineProperty(l, "_known", { value: true, enumerable: false });
+  });
+  allRanked.forEach(function (l) { Object.defineProperty(l, "_score0", { value: l.score || 0, enumerable: false, writable: true }); });
+  /* Si ya estaba resuelto, quizas haya pasado de minorista a pista o al reves. */
+  for (let i = ranked.leads.length - 1; i >= 0; i--) { const l = ranked.leads[i]; if (l._known && (l.role === "minorista" || l.role === "minorista_probable" || l.role === "irrelevante")) { ranked.retailers.push(l); ranked.leads.splice(i, 1); } }
+  for (let i = ranked.retailers.length - 1; i >= 0; i--) { const l = ranked.retailers[i]; if (l._known && !(l.role === "minorista" || l.role === "minorista_probable" || l.role === "irrelevante")) { ranked.leads.push(l); ranked.retailers.splice(i, 1); } }
+
   /* Confirmar en la pagina las mejores pistas (no minoristas, no bases EAN). */
-  const toCheck = ranked.leads.filter(function (l) { return l.role !== "info_ean"; }).slice(0, c.pageChecks);
+  const toCheck = ranked.leads.filter(function (l) { return l.role !== "info_ean" && !l._known; }).slice(0, c.pageChecks);
   let checked = 0;
   if (toCheck.length) {
     let i = 0;
@@ -110,7 +160,8 @@ async function find(body, hooks) {
      (un mayorista sin la palabra "mayorista", un blog con el EAN...). */
   if (aiLib.ready()) {
     try {
-      const pool = ranked.leads.slice(0, 16).concat(ranked.retailers.slice(0, 6));
+      const pool = ranked.leads.filter(function (l) { return !l._known; }).slice(0, 16).concat(ranked.retailers.filter(function (l) { return !l._known; }).slice(0, 6));
+      if (!pool.length) throw new Error("nada_nuevo");
       const cl = await withTimeout(aiLib.classifyLeads(aiCtx, pool.map(function (l, i) { return { id: i, host: l.host, title: l.title, snippet: l.snippet, text: l._text || "" }; })), 20000);
       if (cl && cl.ok) {
         aiInfo.used = true;
@@ -165,6 +216,35 @@ async function find(body, hooks) {
     learnInfo = { known: L.known.length, hidden: ap.hidden.length, boosted: leads.filter(function (l) { return l.learned; }).length, hiddenHosts: ap.hidden.map(function (l) { return l.host; }).slice(0, 30) };
   } catch (e) {}
   leads.sort(leadsLib.compareLeads);
+  /* Guardar lo analizado (30 d) y marcar las webs nuevas frente a la ultima vez. */
+  const LEAD_TTL = 30 * cache.DAY;
+  const seenNow = [];
+  for (const l of allRanked) {
+    const h = hostKey(l);
+    seenNow.push(String(l.host || "").replace(/^www\d?\./, "").toLowerCase());
+    if (l._known) continue;
+    await cache.set("leadinfo", h, { role: l.role, roleLabel: l.roleLabel, ai: l.ai || null, page: l.page || null, signals: l.signals || null, scoreAdj: (l.score || 0) - (l._score0 || 0) }, LEAD_TTL);
+  }
+  let newCount = 0;
+  if (prevSet) {
+    const before = {};
+    prevSet.forEach(function (h) { before[h] = 1; });
+    leads.forEach(function (l) { const h = String(l.host || "").replace(/^www\d?\./, "").toLowerCase(); if (!before[h] && !l.learned) { l.isNew = true; newCount++; } });
+  }
+  await cache.set("leadset", ctxKey, Array.from(new Set((prevSet || []).concat(seenNow))).slice(-400), 90 * cache.DAY);
+  /* Que buscador encontro cada web (para medir calidad por buscador). */
+  const engOf = {};
+  (sr.results || []).forEach(function (r) {
+    let h = "";
+    try { h = new URL(r.url).hostname.replace(/^www\d?\./, "").toLowerCase(); } catch (e) {}
+    if (!h) return;
+    (engOf[h] = engOf[h] || {})[r.engine || "web"] = 1;
+  });
+  leads.concat(retailers).forEach(function (l) {
+    const h = String(l.host || "").replace(/^www\d?\./, "").toLowerCase();
+    if (engOf[h]) l.engines = Object.keys(engOf[h]);
+  });
+  try { await require("../lib/learn").engineHits(leads.filter(function (l) { return !l.retailOk; })); } catch (e) {}
 
   const counts = {};
   leads.forEach(function (l) { counts[l.role] = (counts[l.role] || 0) + 1; });
@@ -188,6 +268,7 @@ async function find(body, hooks) {
     queries: queries, googleLinks: links, engines: engines, errors: sr.errors || [],
     rawResults: (sr.results || []).length, pagesChecked: checked,
     leads: leads.slice(0, 30), retailers: retailers.slice(0, 20), counts: counts, target: target, ai: aiInfo, learned: learnInfo,
+    reuse: { reused: reused, analyzed: allRanked.length - reused, newCount: newCount, firstTime: !prevSet, cachedQueries: sr.cachedQueries || 0, queries: queries.length },
     diagnosis: diagnosis, ms: Date.now() - t0
   };
   try {

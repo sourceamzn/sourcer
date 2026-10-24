@@ -66,6 +66,16 @@ const config = {
      marca+modelo, devuelve paginas de mayoristas/distribuidores reales. */
   discovery: {
     provider: clean(process.env.DISCOVERY_PROVIDER) || "brave",
+    /* Buscador principal para proveedores: "brave" (oficial, por defecto si
+       hay BRAVE_API_KEY) o "apify". El otro queda de respaldo automatico. */
+    primary: clean(process.env.SEARCH_PRIMARY).toLowerCase(),
+    /* "both" (por defecto): Brave y Google a la vez, se suman los resultados
+       (no se pierde ningun proveedor; tarda lo que el mas lento). "fallback":
+       el principal y, solo si falla o da pocos, el otro (mas barato). */
+    mode: (clean(process.env.SEARCH_MODE).toLowerCase() === "fallback") ? "fallback" : "both",
+    /* Si el principal da menos resultados que esto, se completa con el respaldo. */
+    minResults: Math.max(0, parseInt(clean(process.env.SEARCH_MIN_RESULTS) || "12", 10) || 0),
+    cacheDays: Math.max(0, parseInt(clean(process.env.SEARCH_CACHE_DAYS) || "30", 10) || 0),
     apiKey: clean(process.env.BRAVE_API_KEY),
     country: clean(process.env.DISCOVERY_COUNTRY) || "es",
     lang: clean(process.env.DISCOVERY_LANG) || "es"
@@ -310,9 +320,7 @@ function amazonReady() {
   return Boolean(
     config.amazon.clientId &&
       config.amazon.clientSecret &&
-      config.amazon.refreshToken &&
-      config.amazon.accessKeyId &&
-      config.amazon.secretAccessKey
+      config.amazon.refreshToken
   );
 }
 

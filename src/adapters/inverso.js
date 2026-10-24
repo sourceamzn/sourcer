@@ -68,6 +68,7 @@ const gtinLib = require("../lib/gtin");
 const queriesLib = require("../lib/queries");
 const feesLib = require("../lib/fees");
 const spapi = require("../lib/spapi");
+const sharedCache = require("../lib/cache");
 const keepaCost = require("../lib/keepacost");
 
 /* ---------- metricas desde un producto Keepa ---------- */
@@ -222,12 +223,26 @@ async function keepaProductsByAsins(asins, offers, opts) {
      cada 10 ofertas y producto. Sin ella Keepa no da el recuento FBA fiable. */
   const nOffers = offers === undefined ? 20 : Math.max(0, Math.min(parseInt(offers, 10) || 0, 100));
   const variant = nOffers >= 20 ? ("o" + nOffers) : (withBB ? "b" : "p");
-  const missing = [];
+  let missing = [];
   asins.forEach(function (a) {
     const k = String(a || "").toUpperCase();
     const hit = keepaCost.get(k, variant);
     if (hit) out.push(hit); else missing.push(k);
   });
+  /* Cache persistente (sobrevive reinicios): misma caducidad que la de memoria. */
+  if (missing.length && keepaCost.ttlMs() > 0) {
+    const keys = [];
+    missing.forEach(function (k) { keys.push(k + "|" + variant); if (variant === "p") keys.push(k + "|b"); });
+    const got = await sharedCache.getMany("kp", keys);
+    missing = missing.filter(function (k) {
+      const p = got[k + "|" + variant] || (variant === "p" ? got[k + "|b"] : null);
+      if (!p) return true;
+      keepaCost.set(k, variant, p);
+      keepaCost.usage.cacheHits += 1;
+      out.push(p);
+      return false;
+    });
+  }
   for (let i = 0; i < missing.length; i += 100) {
     const chunk = missing.slice(i, i + 100).join(",");
     /* stats=90: buyBoxStats y medias sobre 90 dias (sin coste extra). */
@@ -237,7 +252,10 @@ async function keepaProductsByAsins(asins, offers, opts) {
     const r = await keepaRequest("product", params);
     if (r.ok && r.data && Array.isArray(r.data.products)) {
       r.data.products.forEach(function (p) {
-        if (p && p.asin) keepaCost.set(String(p.asin).toUpperCase(), variant, p);
+        if (p && p.asin) {
+          keepaCost.set(String(p.asin).toUpperCase(), variant, p);
+          sharedCache.set("kp", String(p.asin).toUpperCase() + "|" + variant, p, keepaCost.ttlMs()).catch(function () {});
+        }
         out.push(p);
       });
     } else if (!r.ok) {
@@ -347,12 +365,52 @@ async function keepaFinder(body) {
    pagar tokens por descubrirlo despues. Si Keepa rechaza algun filtro, se
    repite la consulta sin filtros (nunca se queda sin pool por esto). */
 const ARBITRAGE_FILTERS = { current_COUNT_NEW_gte: 3, current_NEW_FBA_gte: 100 };
-async function finderSafe(selection, notes, extra) {
-  const withF = Object.assign({}, selection, ARBITRAGE_FILTERS, extra || {});
-  let f = await keepaFinder({ selection: withF });
-  if (f.ok && f.asins.length) { f.filtered = true; return f; }
-  if (!f.ok && notes) notes.push("Product Finder rechazo los filtros de arbitraje (" + (f.reason || "error") + "); se repite sin filtros.");
-  f = await keepaFinder({ selection: selection });
+/* Filtros de arbitraje FBA en el propio Product Finder (no cuestan tokens de
+   ficha): rotacion, Buy Box que se reparte de verdad en 90 dias y Amazon sin
+   acapararla. Se aplican por niveles: si el estricto da poco, se relaja y se
+   suma lo que falta; nunca se queda sin resultados por un filtro.
+     1 · estricto: ventas (caidas de BSR 90 d), >= 2 FBA, Amazon <= 30 % de la
+         Buy Box, >= 2 vendedores distintos la han ganado y ninguno > 90 %.
+     2 · sin exigir el reparto entre vendedores (solo Amazon <= 30 %).
+     3 · el filtro antiguo (3+ ofertas y una FBA con precio).
+     4 · sin filtros. */
+function arbitrageTiers(p) {
+  p = p || {};
+  const minSales = num(p.minSales) > 0 ? num(p.minSales) : num(process.env.FINDER_MIN_SALES || 10);
+  const minFba = Math.max(2, num(p.minFbaThird) || 2);
+  const amzMax = num(process.env.FINDER_AMAZON_BB_MAX || 30);
+  const base = { current_COUNT_NEW_gte: 3, offerCountFBA_gte: minFba, salesRankDrops90_gte: Math.max(3, Math.round(minSales * 3)), buyBoxStatsAmazon90_lte: amzMax, isAdultProduct: false };
+  return [
+    { label: "Buy Box compartida + rotación", f: Object.assign({}, base, { buyBoxStatsSellerCount90_gte: 2, buyBoxStatsTopSeller90_lte: 90 }) },
+    { label: "rotación + Amazon sin acaparar", f: base },
+    { label: "3+ ofertas y FBA de terceros", f: ARBITRAGE_FILTERS }
+  ];
+}
+function salesShare(m) {
+  const sales = num(m && m.sales);
+  if (!(sales > 0)) return 0;
+  const fba = m.fbaThird != null ? num(m.fbaThird) : (m.thirdParty != null ? num(m.thirdParty) : 3);
+  return Math.round(sales / (fba + (m.amazonSells ? 1 : 0) + 1));
+}
+async function finderSafe(selection, notes, extra, p) {
+  const want = Math.max(15, Math.round((num(selection && selection.perPage) || 100) / 4));
+  let pool = [], used = [], lastErr = null;
+  const tiers = arbitrageTiers(p);
+  for (let i = 0; i < tiers.length && pool.length < want; i++) {
+    const f = await keepaFinder({ selection: Object.assign({}, selection, tiers[i].f, extra || {}) });
+    if (!f.ok) { lastErr = f.reason; continue; }
+    if (f.asins.length) {
+      const before = pool.length;
+      pool = uniqAsins(pool.concat(f.asins));
+      used.push(tiers[i].label + ": " + (pool.length - before));
+    }
+  }
+  if (pool.length) {
+    if (notes) notes.push("Filtros de arbitraje en Keepa · " + used.join(" · ") + ".");
+    return { ok: true, asins: pool, filtered: true, tiers: used };
+  }
+  if (notes && lastErr) notes.push("Product Finder rechazo los filtros de arbitraje (" + lastErr + "); se repite sin filtros.");
+  const f = await keepaFinder({ selection: selection });
   f.filtered = false;
   return f;
 }
@@ -855,6 +913,21 @@ async function fichaFromKeepa(body) {
   body = body || {};
   if (body.__kpDone) return body;
   let kpProd = null;
+  /* La identidad del producto (EAN, modelo, marca, fabricante) no cambia:
+     se guarda 30 dias y repetir la busqueda de proveedor no gasta Keepa. */
+  const fk = body.asin ? String(body.asin).toUpperCase() : "";
+  if (fk) {
+    const hit = await sharedCache.get("ficha", fk);
+    if (hit) {
+      const merged = Object.assign({}, body);
+      Object.keys(hit).forEach(function (k) {
+        const cur = merged[k];
+        if (cur == null || cur === "" || (Array.isArray(cur) && !cur.length)) merged[k] = hit[k];
+      });
+      merged.eans = gtinLib.normalizeAll([].concat(body.eans || [], body.ean || [], hit.eans || []));
+      return Object.assign(merged, { __kpDone: true });
+    }
+  }
   if (body.asin && keepaReady() && (!body.ean || !body.model || !body.partNumber || !body.categoryTree || !body.image || !body.manufacturer)) {
     try {
       const kp = await withTimeout(keepaProductsByAsins([String(body.asin).toUpperCase()], 0), 6000);
@@ -878,6 +951,11 @@ async function fichaFromKeepa(body) {
       color: body.color || f.color || "",
       size: body.size || f.size || ""
     });
+    if (fk) {
+      const keep = {};
+      ["eans", "ean", "model", "partNumber", "brand", "manufacturer", "categoryTree", "image", "features", "description", "color", "size"].forEach(function (k) { if (body[k] != null && body[k] !== "") keep[k] = body[k]; });
+      sharedCache.set("ficha", fk, keep, 30 * sharedCache.DAY).catch(function () {});
+    }
     try { events.add("job", { phase: "ficha", asin: body.asin, eans: (body.eans || []).length, model: body.model, partNumber: body.partNumber, missing: fx.missing.join(",") }); } catch (e) {}
   }
   return Object.assign({}, body, { __kpDone: true });
@@ -1788,12 +1866,12 @@ async function candidatesLarge(body) {
     const band = {};
     if (num(body && body.priceMin) > 0) band.current_BUY_BOX_SHIPPING_gte = Math.round(num(body.priceMin) * 100);
     if (num(body && body.priceMaxBB) > 0) band.current_BUY_BOX_SHIPPING_lte = Math.round(num(body.priceMaxBB) * 100);
-    let fc = await finderSafe(Object.assign({ rootCategory: [Number(categoryDigits)] }, baseSel), notes, band);
+    let fc = await finderSafe(Object.assign({ rootCategory: [Number(categoryDigits)] }, baseSel), notes, band, p);
     /* Si Keepa no acepta rootCategory, se prueba con categories_include. */
-    if (!fc.ok || !fc.asins.length) fc = await finderSafe(Object.assign({ categories_include: [String(categoryDigits)] }, baseSel), notes);
+    if (!fc.ok || !fc.asins.length) fc = await finderSafe(Object.assign({ categories_include: [String(categoryDigits)] }, baseSel), notes, band, p);
     if (fc.ok && fc.asins.length) {
       pool = fc.asins; via = "product_finder_categoria";
-      notes.push("Product Finder categoria" + (fc.filtered ? " (con 3+ ofertas y FBA de terceros)" : "") + ": " + fc.asins.length + " ASIN.");
+      notes.push("Product Finder categoria: " + fc.asins.length + " ASIN.");
     } else if (!fc.ok) errors.push("finder_categoria:" + (fc.reason || "error"));
   }
   if (!pool.length && categoryDigits) {
@@ -1836,7 +1914,7 @@ async function candidatesLarge(body) {
           productType: [0, 1],
           sort: [["current_SALES", "asc"]], /* current_SALES = BSR: asc = mas vendidos primero */
           current_SALES_gte: 1
-      }, notes);
+      }, notes, null, p);
       if (f.ok && f.asins.length) {
         const before = pool.length;
         pool = uniqAsins(pool.concat(f.asins));
@@ -2052,6 +2130,8 @@ async function candidatesLarge(body) {
     return pv > 0 ? (m.plan.costMax || 0) / pv : 0;
   };
   const rankOf = function (m) { return m.estado === "apt" ? 0 : (m.estado === "casi" ? 1 : 2); };
+  /* Tu parte: ventas/mes repartidas entre los que ya venden FBA (+ Amazon) y tu. */
+  const shareOf = function (m) { return salesShare(m); };
   out.sort(function (a, b) {
     if (sortKey === "precio") {
       const d = (b.pvp || 0) - (a.pvp || 0); if (d) return d;
@@ -2066,6 +2146,7 @@ async function candidatesLarge(body) {
       /* Lo mas apto primero: aptos > casi > descartados y, dentro de cada
          grupo, la mejor combinacion de rotacion (ventas/mes y BSR) y margen. */
       const e = rankOf(a) - rankOf(b); if (e) return e;
+      const sh = shareOf(b) - shareOf(a); if (sh) return sh;
       const d = (b.sales || 0) - (a.sales || 0); if (d) return d;
       const r = (a.bsr || 1e12) - (b.bsr || 1e12); if (r) return r;
       const m = roomOf(b) - roomOf(a); if (m) return m;
@@ -2079,6 +2160,7 @@ async function candidatesLarge(body) {
   });
   out.slice(0, limit).forEach(function (m) {
     m.rotation = Math.round(m.sales || 0);
+    m.salesShare = salesShare(m);
     delete m.__bbHist;
   });
 
@@ -2284,17 +2366,19 @@ const inverso = {
       const cfgSp = config.spapi || {};
       let spFees = 0;
       if (amazonReady() && cfgSp.feesMax > 0) {
-        const need = baseM.filter(function (m) {
-          return !m.fees || m.fees.referralPct == null || m.fees.fbaFee == null;
-        }).slice(0, cfgSp.feesMax);
-        for (let i = 0; i < need.length; i++) {
-          try {
-            const r = await spapi.getMyFeesEstimate(need[i].asin, need[i].pvp, "EUR");
-            if (!r.ok) continue;
-            const f = feesLib.fromEstimate(r.data, need[i].pvp);
-            if (f.referralPct != null || f.fbaFee != null) { need[i].fees = f; spFees++; }
-          } catch (e) {}
-        }
+        /* Por lotes de 20 (getMyFeesEstimates): con SP-API las comisiones son
+           las de TU cuenta, asi que se piden para todos los candidatos con
+           precio, no solo los que Keepa dejo sin dato (tope SPAPI_FEES_MAX x 5). */
+        const need = baseM.filter(function (m) { return m.asin && m.pvp > 0; }).slice(0, cfgSp.feesMax * 5);
+        try {
+          const r = await spapi.feesBatch(need.map(function (m) { return { asin: m.asin, price: m.pvp }; }));
+          need.forEach(function (m) {
+            const raw = r && r.byAsin && r.byAsin[String(m.asin).toUpperCase()];
+            if (!raw) return;
+            const f = feesLib.fromEstimate(raw, m.pvp);
+            if (f.referralPct != null || f.fbaFee != null) { m.fees = f; spFees++; }
+          });
+        } catch (e) {}
       }
       const realFees = baseM.filter(function (m) {
         return m.fees && !m.fees.partial && m.fees.source !== "estimado";
@@ -2429,3 +2513,6 @@ module.exports.keepaCategories = keepaCategories;
 module.exports.keepaTokens = keepaTokens;
 module.exports.keepaReady = keepaReady;
 module.exports.keepaRequest = keepaRequest;
+module.exports.finderSafe = finderSafe;
+module.exports.arbitrageTiers = arbitrageTiers;
+module.exports.salesShare = salesShare;

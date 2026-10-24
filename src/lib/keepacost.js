@@ -24,6 +24,7 @@ function note(path, data) {
   if (data && data.refillRate != null) usage.refillRate = Number(data.refillRate);
   if (data && data.refillIn != null) usage.refillInMs = Number(data.refillIn);
   usage.at = new Date().toISOString();
+  try { require("./usage").add("keepa", { tokens: c, requests: 1 }); } catch (e) {}
   try { events.add("keepa_cost", { path: path, consumed: c, left: usage.tokensLeft }); } catch (e) {}
 }
 
@@ -61,4 +62,4 @@ function snapshot() {
   return Object.assign({}, usage, { cacheSize: cache.size, cacheMin: Math.round(ttlMs() / 60000) });
 }
 
-module.exports = { note, get, set, budget, snapshot, usage };
+module.exports = { note, get, set, budget, snapshot, usage, ttlMs };

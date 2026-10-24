@@ -13,6 +13,14 @@
        para aplicar la regla del cliente (Amazon o la marca solos, o sin 2
        vendedores FBA de terceros = no es oportunidad).
 
+   Con SP-API conectada (motor "amazon", por defecto si hay credenciales) la
+   fase 1 la hace Amazon directamente y GRATIS: catalogo por EAN (20 por
+   llamada), ofertas actuales y comisiones reales de TU cuenta (20 por
+   llamada). Keepa solo se gasta en la fase 2 (historico de Buy Box) de lo
+   que deja margen. Si SP-API falla, se sigue con Keepa sin perder trabajo.
+   En ambos motores, a lo que deja margen se le piden a SP-API las comisiones
+   reales y si tu cuenta puede venderlo (restricciones de marca/categoria).
+
    Keepa recarga ~21 tokens/min: el trabajo corre en segundo plano, espera la
    recarga cuando no hay saldo y guarda el progreso en la base de datos
    (colecciones `tariff_runs` = resumen, `tariff_run_data` = filas). Si el
@@ -41,9 +49,18 @@ function inv() {
     keepaProductsByAsins: inverso.keepaProductsByAsins,
     metricsFromKeepa: inverso.metricsFromKeepa,
     keepaReady: inverso.keepaReady,
+    spapi: require("./spapi"),
+    amazonReady: require("../config").amazonReady,
     sleep: function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   };
 }
+/* SP-API disponible (en tests solo si se inyecta). */
+function sp() {
+  const d = inv();
+  return d.spapi && typeof d.amazonReady === "function" && d.amazonReady() ? d.spapi : null;
+}
+const cache = require("./cache");
+const feesLib = require("./fees");
 
 function num(v) { const n = Number(v); return isFinite(n) ? n : 0; }
 function r2(n) { return Math.round(num(n) * 100) / 100; }
@@ -163,6 +180,7 @@ async function create(input) {
   const run = {
     id: id, createdAt: now(), updatedAt: now(), state: "en_cola",
     fileName: String(input.fileName || "").slice(0, 120), source: String(input.source || "").slice(0, 60),
+    engine: chooseEngine(input.engine),
     contactId: String(input.contactId || "").slice(0, 200), vatMode: ["con", "pvp"].indexOf(input.vatMode) !== -1 ? input.vatMode : "sin",
     pvpDiscount: Math.min(0.7, Math.max(0, (Number(input.pvpDiscount) || 30) / 100)),
     params: input.params && typeof input.params === "object" ? input.params : {},
@@ -174,6 +192,14 @@ async function create(input) {
   await prune();
   kick();
   return { ok: true, run: run };
+}
+
+/* "amazon" = fase 1 con SP-API (gratis); "keepa" = fase 1 con Keepa. */
+function chooseEngine(want) {
+  const w = String(want || "auto").toLowerCase();
+  if (w === "keepa") return "keepa";
+  if (w === "amazon") return sp() ? "amazon" : "keepa";
+  return sp() ? "amazon" : "keepa";
 }
 
 async function prune() {
@@ -269,11 +295,69 @@ async function waitTokens(run, need) {
   return 0;
 }
 
+/* Metricas a partir de los datos de SP-API (fase 1 motor "amazon"). */
+function metricsFromSp(item, off, fee) {
+  const price = off && off.price;
+  const m = {
+    asin: item.asin, title: item.title, brand: item.brand, manufacturer: item.manufacturer || "",
+    image: item.image || "", url: "https://www.amazon.es/dp/" + item.asin,
+    pvp: price || 0, bsr: item.bsr || 0, sales: 0, historyDays: null,
+    thirdParty: off && !off.error ? off.thirdParty : null,
+    offersFba: off && !off.error ? off.offersFba : null,
+    fbaThird: off && !off.error ? off.fbaThird : null,
+    amazonSells: Boolean(off && off.amazonSells), buyBox: null
+  };
+  if (fee) m.fees = fee;
+  m.pack = packOf({ title: item.title, packageQuantity: item.packageQuantity });
+  return m;
+}
+
+/* Comisiones reales de la cuenta para varias filas (lotes de 20). */
+async function spFeesFor(list, data) {
+  const api = sp();
+  if (!api || !list.length) return 0;
+  data.spFees = data.spFees || {};
+  const need = list.filter(function (x) { return x.asin && x.price > 0 && !data.spFees[x.asin]; });
+  if (!need.length) return 0;
+  const r = await api.feesBatch(need);
+  let n = 0;
+  Object.keys((r && r.byAsin) || {}).forEach(function (asin) {
+    const src = need.filter(function (x) { return x.asin === asin; })[0];
+    const f = feesLib.fromEstimate(r.byAsin[asin], src ? src.price : 0);
+    if (f.referralPct != null || f.fbaFee != null) { data.spFees[asin] = { referralPct: f.referralPct, fbaFee: f.fbaFee, source: "spapi" }; n++; }
+  });
+  return n;
+}
+
+/* Restricciones de la cuenta (solo aviso) para las filas buenas. */
+async function spRestrictions(rows, run) {
+  const api = sp();
+  if (!api || !rows.length) return;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row.asin || row.restrictionsChecked) continue;
+    const r = await api.getListingsRestrictions(row.asin);
+    if (!r.ok) { if (r.reason === "seller_id_missing" || r.reason === "spapi_pausado") return; continue; }
+    row.restrictionsChecked = true;
+    const rs = feesLib.restrictionsFrom(r.data);
+    if (rs.length) {
+      row.restricted = true;
+      row.restrictions = rs.slice(0, 3);
+      row.reasons = ["Tu cuenta necesita aprobación para venderlo: " + rs[0]].concat((row.reasons || []).filter(function (x) { return !/aprobaci/i.test(x); })).slice(0, 5);
+      run.restricted = (run.restricted || 0) + 1;
+    }
+  }
+}
+
 async function process1(run) {
   const d = inv();
   const data = (await docs.get(DATA, run.id)) || { items: [], rows: [], cursor: 0 };
-  if (!d.keepaReady()) {
-    run.state = "error"; run.message = "Keepa no esta configurado (KEEPA_API_KEY)."; await save(run); return;
+  if (!run.engine) run.engine = "keepa";
+  if (run.engine === "amazon" && !sp()) run.engine = "keepa";
+  const keepaOn = Boolean(d.keepaReady());
+  if (run.engine === "keepa" && !keepaOn) {
+    if (sp()) run.engine = "amazon";
+    else { run.state = "error"; run.message = "Ni Keepa (KEEPA_API_KEY) ni Amazon SP-API están configurados."; await save(run); return; }
   }
   const params = planLib.planParams({ params: run.params || {} });
   run.state = "cruzando";
@@ -283,32 +367,96 @@ async function process1(run) {
   data.rows.forEach(function (r) { rowsByEan[r.ean] = r; });
   const itemsByEan = {};
   data.items.forEach(function (it) { itemsByEan[it.ean] = it; });
+  run.spCalls = run.spCalls || 0;
 
-  /* ----- Fase 1: EAN -> producto (sin buybox) ----- */
+  /* ----- Fase 1 con Amazon (SP-API, sin coste) ----- */
+  while (run.engine === "amazon" && data.cursor < data.items.length) {
+    const api = sp();
+    const chunk = data.items.slice(data.cursor, data.cursor + 100);
+    run.state = "cruzando";
+    run.message = "Fase 1 · Amazon directo " + (data.cursor + 1) + "–" + (data.cursor + chunk.length) + " de " + data.items.length;
+    if (!(await save(run))) return;
+    const cat = api ? await api.catalogByEans(chunk.map(function (x) { return x.ean; })) : { ok: false, reason: "spapi" };
+    if (!cat.ok) {
+      /* SP-API no responde: se sigue con Keepa desde este punto. */
+      run.spError = String(cat.message || cat.reason || "error").slice(0, 160);
+      if (keepaOn) { run.engine = "keepa"; run.message = "Amazon no responde (" + run.spError + "); sigo con Keepa."; await save(run); break; }
+      run.state = "error"; run.message = "Amazon SP-API respondió con error: " + run.spError; await save(run, data); return;
+    }
+    /* Un EAN puede tener varias fichas (variantes, packs): la de mejor BSR. */
+    const pick = {};
+    chunk.forEach(function (it) {
+      const list = (cat.byEan[it.ean] || []).filter(function (x) { return x.asin; });
+      if (!list.length) return;
+      list.sort(function (a, b) { return (a.bsr || 1e12) - (b.bsr || 1e12); });
+      pick[it.ean] = { item: list[0], alt: list.length - 1 };
+    });
+    const asins = Object.keys(pick).map(function (e) { return pick[e].item.asin; });
+    const offs = asins.length ? await api.offersBatch(asins) : { ok: true, byAsin: {} };
+    const byA = (offs && offs.byAsin) || {};
+    const feeReq = asins.map(function (a) { return { asin: a, price: byA[a] && byA[a].price }; }).filter(function (x) { return x.price > 0; });
+    await spFeesFor(feeReq, data);
+    chunk.forEach(function (it) {
+      const pk = pick[it.ean];
+      if (!pk) { run.notFound++; return; }
+      const m = metricsFromSp(pk.item, byA[pk.item.asin], data.spFees && data.spFees[pk.item.asin]);
+      /* Sin Keepa no habra fase 2: el veredicto sale ya con las ofertas actuales. */
+      const row = evaluate(it, m, params, run.vatMode, keepaOn ? 1 : 2, run.pvpDiscount);
+      row.src = "amazon";
+      if (!keepaOn && (row.verdict === "oportunidad" || row.verdict === "revisar")) row.reasons.push("Sin histórico de 90 días (Keepa no disponible): veredicto con las ofertas de ahora.");
+      if (pk.alt) row.alternatives = pk.alt;
+      rowsByEan[it.ean] = row;
+    });
+    data.cursor += chunk.length;
+    run.looked = data.cursor;
+    data.rows = Object.keys(rowsByEan).map(function (k) { return rowsByEan[k]; });
+    summarize(run, data.rows);
+    if (!(await save(run, data))) return;
+  }
+
+  /* ----- Fase 1 con Keepa (1 token por producto; lo cacheado, gratis) ----- */
   while (data.cursor < data.items.length) {
     const left = data.items.length - data.cursor;
-    const can = await waitTokens(run, Math.min(BATCH, left));
-    if (can < 0) return;
-    const n = Math.max(1, Math.min(BATCH, left, can || BATCH));
-    const chunk = data.items.slice(data.cursor, data.cursor + n);
-    run.state = "cruzando";
-    run.message = "Fase 1 · buscando en Amazon " + (data.cursor + 1) + "–" + (data.cursor + chunk.length) + " de " + data.items.length;
-    if (!(await save(run))) return;
-    const r = await d.keepaRequest("product", { code: chunk.map(function (x) { return x.ean; }).join(","), stats: "90", "code-limit": "3" });
-    if (!r.ok) {
-      const err = JSON.stringify(r.error || r.reason || "").toLowerCase();
-      /* 429 / sin tokens: se espera y se reintenta el mismo lote. */
-      if (/429|token/.test(err) || /keepa_http_429/.test(String(r.reason))) { keepaCost.usage.tokensLeft = 0; continue; }
-      run.state = "error"; run.message = "Keepa respondio con error: " + String(r.reason || "error"); await save(run, data); return;
+    let chunk = data.items.slice(data.cursor, data.cursor + Math.min(BATCH, left));
+    /* Lo que ya se cruzo hace poco no se vuelve a pagar. */
+    const fromCache = await cachedKeepa(chunk.map(function (x) { return x.ean; }));
+    const pending = chunk.filter(function (it) { return !fromCache[it.ean]; });
+    let prods = [];
+    Object.keys(fromCache).forEach(function (e) { fromCache[e].forEach(function (p) { prods.push(p); }); });
+    if (pending.length) {
+      const can = await waitTokens(run, pending.length);
+      if (can < 0) return;
+      const n = Math.max(1, Math.min(pending.length, can || BATCH));
+      if (n < pending.length) {
+        /* No hay saldo para todo el lote: se cruza lo que se pueda y se sigue. */
+        const lastEan = pending[n - 1].ean;
+        chunk = chunk.slice(0, chunk.findIndex(function (it) { return it.ean === lastEan; }) + 1);
+      }
+      const ask = chunk.filter(function (it) { return !fromCache[it.ean]; });
+      run.state = "cruzando";
+      run.message = "Fase 1 · buscando en Amazon " + (data.cursor + 1) + "–" + (data.cursor + chunk.length) + " de " + data.items.length;
+      if (!(await save(run))) return;
+      const r = await d.keepaRequest("product", { code: ask.map(function (x) { return x.ean; }).join(","), stats: "90", "code-limit": "3" });
+      if (!r.ok) {
+        const err = JSON.stringify(r.error || r.reason || "").toLowerCase();
+        /* 429 / sin tokens: se espera y se reintenta el mismo lote. */
+        if (/429|token/.test(err) || /keepa_http_429/.test(String(r.reason))) { keepaCost.usage.tokensLeft = 0; continue; }
+        run.state = "error"; run.message = "Keepa respondio con error: " + String(r.reason || "error"); await save(run, data); return;
+      }
+      run.tokens += num(r.data && r.data.tokensConsumed);
+      const got = (r.data && r.data.products) || [];
+      await rememberKeepa(ask.map(function (x) { return x.ean; }), got);
+      prods = prods.concat(got);
+    } else {
+      run.message = "Fase 1 · " + (data.cursor + 1) + "–" + (data.cursor + chunk.length) + " de " + data.items.length + " (ya consultados, sin coste)";
     }
-    run.tokens += num(r.data && r.data.tokensConsumed);
-    const prods = (r.data && r.data.products) || [];
     /* Un EAN puede dar varios ASIN (variantes, packs): se elige el que mas vende. */
     const best = {};
     prods.forEach(function (p) {
       const codes = [].concat(p.eanList || [], p.upcList || []).map(function (c) { return gtin.normalize(gtin.digitsOnly(String(c))); });
       chunk.forEach(function (it) {
         if (codes.indexOf(it.ean) === -1) return;
+        if (best[it.ean] && best[it.ean].p.asin === p.asin) return;
         const rank = (p.stats && p.stats.current && num(p.stats.current[3]) > 0) ? num(p.stats.current[3]) : 1e12;
         if (!best[it.ean] || rank < best[it.ean].rank) best[it.ean] = { p: p, rank: rank, alt: best[it.ean] ? best[it.ean].alt + 1 : 0 };
         else best[it.ean].alt++;
@@ -320,6 +468,7 @@ async function process1(run) {
       const m = d.metricsFromKeepa(b.p);
       m.pack = packOf(b.p);
       const row = evaluate(it, m, params, run.vatMode, 1, run.pvpDiscount);
+      row.src = "keepa";
       if (b.alt) row.alternatives = b.alt;
       rowsByEan[it.ean] = row;
     });
@@ -330,10 +479,10 @@ async function process1(run) {
     if (!(await save(run, data))) return;
   }
 
-  /* ----- Fase 2: Buy Box 90 d solo para los que dejan margen ----- */
+  /* ----- Fase 2: Buy Box 90 d (Keepa) solo para los que dejan margen ----- */
   if (!data.deepQueue) {
-    data.deepQueue = data.rows.filter(function (r) { return r.phase === 1 && r.verdict === "pendiente"; })
-      .sort(function (a, b) { return num(b.profit) - num(a.profit); }).map(function (r) { return r.asin + "|" + r.ean; });
+    data.deepQueue = keepaOn ? data.rows.filter(function (r) { return r.phase === 1 && r.verdict === "pendiente"; })
+      .sort(function (a, b) { return num(b.profit) - num(a.profit); }).map(function (r) { return r.asin + "|" + r.ean; }) : [];
     run.deep = data.deepQueue.length;
   }
   while (data.deepQueue.length) {
@@ -344,6 +493,8 @@ async function process1(run) {
     run.state = "cruzando";
     run.message = "Fase 2 · Buy Box 90 d de los que dejan margen (" + (run.deepDone + 1) + "–" + (run.deepDone + chunk.length) + " de " + run.deep + ")";
     if (!(await save(run))) return;
+    /* Comisiones reales de tu cuenta antes de evaluar (SP-API, gratis). */
+    await spFeesFor(chunk.map(function (k) { const r = rowsByEan[k.split("|")[1]]; return { asin: k.split("|")[0], price: r ? r.pvp : 0 }; }), data);
     const before = keepaCost.usage.consumed;
     const r = await d.keepaProductsByAsins(chunk.map(function (x) { return x.split("|")[0]; }), 0, { buybox: true });
     run.tokens += Math.max(0, keepaCost.usage.consumed - before);
@@ -354,29 +505,78 @@ async function process1(run) {
     }
     const byAsin = {};
     (r.products || []).forEach(function (p) { if (p && p.asin) byAsin[String(p.asin).toUpperCase()] = p; });
+    const good = [];
     chunk.forEach(function (k) {
       const asin = k.split("|")[0], ean = k.split("|")[1];
       const p = byAsin[asin], it = itemsByEan[ean];
       if (!p || !it) return;
       const m = d.metricsFromKeepa(p);
       m.pack = packOf(p);
+      if (data.spFees && data.spFees[asin]) m.fees = data.spFees[asin];
       const row = evaluate(it, m, params, run.vatMode, 2, run.pvpDiscount);
-      if (rowsByEan[ean] && rowsByEan[ean].alternatives) row.alternatives = rowsByEan[ean].alternatives;
+      const prev = rowsByEan[ean];
+      if (prev && prev.alternatives) row.alternatives = prev.alternatives;
+      row.src = prev && prev.src === "amazon" ? "amazon+keepa" : "keepa";
       rowsByEan[ean] = row;
+      if (row.verdict === "oportunidad" || row.verdict === "revisar" || row.verdict === "justo") good.push(row);
     });
+    await spRestrictions(good, run);
     data.deepQueue = data.deepQueue.slice(chunk.length);
     run.deepDone += chunk.length;
     data.rows = Object.keys(rowsByEan).map(function (k) { return rowsByEan[k]; });
     summarize(run, data.rows);
     if (!(await save(run, data))) return;
   }
+  /* Sin Keepa: restricciones de lo que ha salido bueno con SP-API. */
+  if (!keepaOn && !data.restrDone) {
+    const good = data.rows.filter(function (r) { return r.verdict === "oportunidad" || r.verdict === "revisar" || r.verdict === "justo"; }).slice(0, 300);
+    await spRestrictions(good, run);
+    data.restrDone = true;
+  }
   run.state = "terminado";
   run.finishedAt = now();
   const c = run.counts || {};
-  run.message = "Terminado: " + run.found + " de " + run.total + " EAN existen en Amazon · " + (c.oportunidad || 0) + " oportunidad(es) · " + (c.revisar || 0) + " a revisar · " + (c.justo || 0) + " justos · " + run.tokens + " tokens Keepa.";
+  run.message = "Terminado: " + run.found + " de " + run.total + " EAN existen en Amazon · " + (c.oportunidad || 0) + " oportunidad(es) · " + (c.revisar || 0) + " a revisar · " + (c.justo || 0) + " justos · " + run.tokens + " tokens Keepa" + (run.engine === "amazon" ? " (fase 1 con Amazon, sin coste)" : "") + (run.restricted ? " · " + run.restricted + " necesitan aprobación" : "") + ".";
   await save(run, data);
   if (run.contactId) { try { await require("./learn").tariffResult(run.contactId, data.rows); } catch (e) {} }
-  try { events.add("tarifa_cruce", { phase: "fin", id: run.id, total: run.total, found: run.found, ops: c.oportunidad || 0, tokens: run.tokens }); } catch (e) {}
+  try { events.add("tarifa_cruce", { phase: "fin", id: run.id, total: run.total, found: run.found, ops: c.oportunidad || 0, tokens: run.tokens, engine: run.engine }); } catch (e) {}
+}
+
+/* Cache EAN -> productos Keepa (fase 1). El mapa EAN->ASIN dura 30 d; el
+   producto, lo que dure la cache de Keepa (KEEPA_CACHE_MIN). */
+async function cachedKeepa(eans) {
+  const out = {};
+  if (!(keepaCost.ttlMs() > 0)) return out;
+  const map = await cache.getMany("ean_asin", eans);
+  const keys = [];
+  Object.keys(map).forEach(function (e) { (map[e] || []).forEach(function (a) { keys.push(a + "|p"); keys.push(a + "|b"); }); });
+  const prods = keys.length ? await cache.getMany("kp", keys) : {};
+  Object.keys(map).forEach(function (e) {
+    const asins = map[e] || [];
+    if (!asins.length) { out[e] = []; return; }
+    const ps = asins.map(function (a) { return prods[a + "|b"] || prods[a + "|p"]; });
+    if (ps.every(Boolean)) out[e] = ps;
+  });
+  return out;
+}
+async function rememberKeepa(eans, prods) {
+  const by = {};
+  prods.forEach(function (p) {
+    if (!p || !p.asin) return;
+    const asin = String(p.asin).toUpperCase();
+    [].concat(p.eanList || [], p.upcList || []).forEach(function (c) {
+      const e = gtin.normalize(gtin.digitsOnly(String(c)));
+      if (eans.indexOf(e) !== -1) (by[e] = by[e] || []).indexOf(asin) === -1 && by[e].push(asin);
+    });
+    if (keepaCost.ttlMs() > 0) {
+      keepaCost.set(asin, "p", p);
+      cache.set("kp", asin + "|p", p, keepaCost.ttlMs()).catch(function () {});
+    }
+  });
+  for (let i = 0; i < eans.length; i++) {
+    const e = eans[i];
+    await cache.set("ean_asin", e, by[e] || [], (by[e] ? 30 : 7) * cache.DAY);
+  }
 }
 
 /* Al arrancar el servidor: retoma los trabajos a medias. */
@@ -384,5 +584,5 @@ function resume() { setTimeout(function () { nextRun().then(function (r) { if (r
 
 module.exports = {
   create, list, get, remove, cancel, resume, kick,
-  _forTests: { evaluate: evaluate, packOf: packOf, netOf: netOf, sortRows: sortRows, setDeps: function (x) { deps = x; }, loop: loop, idle: function () { return !running; } }
+  _forTests: { metricsFromSp: metricsFromSp, chooseEngine: chooseEngine, evaluate: evaluate, packOf: packOf, netOf: netOf, sortRows: sortRows, setDeps: function (x) { deps = x; }, loop: loop, idle: function () { return !running; } }
 };

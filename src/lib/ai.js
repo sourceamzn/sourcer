@@ -38,6 +38,9 @@ async function note(purpose, data, model) {
     u.byPurpose[purpose] = (u.byPurpose[purpose] || 0) + 1;
     u.model = model;
     await docs.put("settings", "ai_usage", u);
+    const inT = Number(data && data.usage && data.usage.input_tokens) || 0, outT = Number(data && data.usage && data.usage.output_tokens) || 0;
+    /* Precio de Haiku 4.5: 1 $ / millon de entrada, 5 $ / millon de salida. */
+    require("./usage").add("ai", { calls: 1, inTok: inT, outTok: outT, estUsd: inT / 1e6 * 1 + outT / 1e6 * 5 });
   } catch (e) {}
 }
 

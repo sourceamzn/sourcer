@@ -187,4 +187,46 @@ function apply(leads, learned, leadsLib) {
   return { leads: out, hidden: hidden };
 }
 
-module.exports = { syncContact, contactRemoved, tariffResult, block, unblock, forget, forgetBrand, all, forSearch, apply, scoreOf, norm, hostOf };
+/* ---------- calidad por buscador ----------
+   Cada proveedor (no minorista) que sale en una busqueda guarda que
+   buscador(es) lo encontraron. Cruzado con lo que paso despues (guardado,
+   responde, tarifa, tarifa con margen) dice que buscador trae proveedores
+   que sirven, y cuales solo los encuentra uno de ellos. */
+const HITS = "engine_hits";
+async function engineHits(leads) {
+  for (let i = 0; i < (leads || []).length && i < 30; i++) {
+    const l = leads[i];
+    const host = hostOf(l.host || l.url);
+    const engs = (l.engines || []).filter(function (e) { return e === "brave" || e === "google" || e === "web"; });
+    if (!host || !engs.length) continue;
+    const d = (await docs.get(HITS, host)) || { host: host, engines: {}, seen: 0, firstAt: new Date().toISOString() };
+    engs.forEach(function (e) { d.engines[e] = (d.engines[e] || 0) + 1; });
+    d.seen++;
+    d.role = l.role || d.role || "";
+    d.lastAt = new Date().toISOString();
+    await docs.put(HITS, host, d);
+  }
+}
+async function engineStats() {
+  const hits = await docs.list(HITS);
+  const dom = {};
+  (await docs.list(COLL)).forEach(function (d) { dom[d.host] = d; });
+  const E = ["brave", "google"];
+  const out = {};
+  E.concat(["ambos"]).forEach(function (e) { out[e] = { proveedores: 0, guardados: 0, responden: 0, tarifas: 0, conMargen: 0 }; });
+  hits.forEach(function (h) {
+    const by = E.filter(function (e) { return (h.engines || {})[e]; });
+    if (!by.length) return;
+    const key = by.length > 1 ? "ambos" : by[0];
+    const d = dom[h.host] || {};
+    const o = out[key];
+    o.proveedores++;
+    if (d.saved) o.guardados++;
+    if (d.replied) o.responden++;
+    if (d.tariff) o.tarifas++;
+    if ((d.marginHits || 0) > 0) o.conMargen++;
+  });
+  return { soloBrave: out.brave, soloGoogle: out.google, ambos: out.ambos, desde: hits.reduce(function (m, h) { return !m || (h.firstAt && h.firstAt < m) ? h.firstAt : m; }, "") };
+}
+
+module.exports = { engineHits, engineStats, syncContact, contactRemoved, tariffResult, block, unblock, forget, forgetBrand, all, forSearch, apply, scoreOf, norm, hostOf };

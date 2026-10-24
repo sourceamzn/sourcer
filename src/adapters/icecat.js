@@ -69,6 +69,7 @@ async function request(params) {
     method: "GET",
     headers: headers
   }, 20000);
+  try { require("../lib/usage").add("icecat", { calls: 1, errors: res.ok ? 0 : 1 }); } catch (e) {}
   if (!res.ok) return { ok: false, res, reason: "icecat_http_" + (res.status || 0), hint: hintFor(res) };
   const body = res.data || {};
   const data = body.data || null;

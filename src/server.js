@@ -42,6 +42,9 @@ const beaconGuard = security.beaconGuard({ maxBytes: function () { return config
 
 app.get("/", (req, res) => res.json({ ok: true, service: pkg.name, version: pkg.version, docs: "/health" }));
 app.get("/health", health);
+app.get("/health/amazon", apiLimit, requireApiKey, health.amazonCheck);
+app.get("/health/cache", apiLimit, requireApiKey, health.cacheInfo);
+app.post("/health/cache", apiLimit, requireApiKey, health.cacheInfo);
 app.get("/coverage", coverage);
 app.post("/selftest", apiLimit, requireApiKey, selftest);
 app.use("/alerts", apiLimit, requireApiKey, alerts);
@@ -58,6 +61,8 @@ app.get("/product/:ean", apiLimit, requireApiKey, product.productByEan);
 app.post("/tarifas/import", apiLimit, requireApiKey, tariffs.importTariffs);
 app.use("/tarifas/cruces", apiLimit, requireApiKey, tarifCrossRoutes);
 app.use("/learn", apiLimit, requireApiKey, learnRoutes);
+app.use("/radar", apiLimit, requireApiKey, require("./routes/radar"));
+app.use("/usage", apiLimit, requireApiKey, require("./routes/usage"));
 
 /* Inicializa el almacen del vigilante en segundo plano (no bloquea el arranque). */
 store.init().catch(function () {});
@@ -77,6 +82,7 @@ if (require.main === module) {
   scheduler.start();
   outreachLib.startScheduler();
   tarifCross.resume();
+  require("./lib/radar").start();
 }
 
 module.exports = app;

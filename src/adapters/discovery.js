@@ -14,6 +14,8 @@ const apify = require("../lib/apify");
 const { jsonFetch } = require("../lib/http");
 const eanLib = require("../lib/ean");
 const web = require("./web");
+const cache = require("../lib/cache");
+const breaker = require("../lib/breaker");
 
 const SUPPLIER_HINTS = [
   "mayorista", "al por mayor", "por mayor", "distribuidor", "wholesale", "supplier",
@@ -142,6 +144,26 @@ function toItem(r) {
   };
 }
 
+/* Ritmo de Brave: el plan gratuito/antiguo admite 1 consulta por segundo
+   (BRAVE_RPS, por defecto 1). Todas las llamadas pasan por la misma cola. */
+const braveStats = { calls: 0, ok: 0, throttled: 0, monthLimit: null, monthLeft: null, lastError: "" };
+let braveNext = 0;
+function braveRps() { const n = Number(process.env.BRAVE_RPS || 1); return isFinite(n) && n > 0 ? Math.min(n, 50) : 1; }
+async function braveGate() {
+  const gap = Math.ceil(1000 / braveRps()) + 50;
+  const now = Date.now();
+  const at = Math.max(now, braveNext);
+  braveNext = at + gap;
+  if (at > now) await new Promise(function (r) { setTimeout(r, at - now); });
+}
+/* Cabeceras de Brave: "X-RateLimit-Remaining: <por segundo>, <por mes>". */
+function braveQuota(h) {
+  if (!h) return;
+  const lim = String(h["x-ratelimit-limit"] || "").split(",").map(function (x) { return Number(x.trim()); });
+  const rem = String(h["x-ratelimit-remaining"] || "").split(",").map(function (x) { return Number(x.trim()); });
+  if (lim.length > 1 && isFinite(lim[1])) braveStats.monthLimit = lim[1];
+  if (rem.length > 1 && isFinite(rem[1])) braveStats.monthLeft = rem[1];
+}
 async function braveSearch(q, count) {
   const url =
     "https://api.search.brave.com/res/v1/web/search?q=" +
@@ -149,12 +171,22 @@ async function braveSearch(q, count) {
     "&count=" + count +
     "&country=" + encodeURIComponent(config.discovery.country) +
     "&search_lang=" + encodeURIComponent(config.discovery.lang);
+  await braveGate();
+  braveStats.calls++;
   const res = await jsonFetch(
     url,
     { method: "GET", headers: { Accept: "application/json", "X-Subscription-Token": config.discovery.apiKey } },
     20000
   );
-  if (!res.ok) return { ok: false, reason: "brave_http_" + res.status, status: res.status };
+  braveQuota(res.headers);
+  try { require("../lib/usage").add("brave", { queries: 1, errors: res.ok ? 0 : 1 }); } catch (e) {}
+  if (!res.ok) {
+    if (res.status === 429) braveStats.throttled++;
+    const quotaGone = res.status === 429 && braveStats.monthLeft === 0;
+    braveStats.lastError = quotaGone ? "cupo mensual agotado" : ("HTTP " + res.status);
+    return { ok: false, reason: quotaGone ? "brave_cupo_agotado" : "brave_http_" + res.status, status: res.status, quotaGone: quotaGone };
+  }
+  braveStats.ok++;
   const results = (res.data && res.data.web && res.data.web.results) || [];
   return { ok: true, results: results };
 }
@@ -369,60 +401,152 @@ async function search(body) {
    manual: "<EAN>" mayorista...) y devuelve cada resultado etiquetado con la
    consulta que lo trajo y su posicion. Motores: Apify Google Search (una sola
    ejecucion para todas), Brave y, si no hay nada, DuckDuckGo/Bing. */
+/* Busqueda de proveedores con varias consultas.
+   Orden: buscador principal (Brave, API oficial) -> si falla, esta pausado o
+   da pocos resultados, respaldo (Google via Apify) -> si ninguno tiene clave
+   o ambos fallan, lectura directa de DuckDuckGo/Bing. Cada consulta se
+   guarda en cache (SEARCH_CACHE_DAYS, 30 d por defecto): repetir la misma
+   marca no vuelve a pagar. */
+function engineOrder() {
+  const hasBrave = Boolean(config.discovery.apiKey);
+  const hasApify = apifyReady();
+  const want = config.discovery.primary;
+  const order = [];
+  if (want === "apify" && hasApify) order.push("apify");
+  if (hasBrave) order.push("brave");
+  if (hasApify && order.indexOf("apify") === -1) order.push("apify");
+  return order;
+}
+function qKey(engine, q, perQuery) {
+  return [engine, config.discovery.country, config.discovery.lang, perQuery, String(q).toLowerCase().replace(/\s+/g, " ").trim()].join("|");
+}
+const SEARCH_TTL = function () { return (config.discovery.cacheDays || 0) * cache.DAY; };
+
+async function braveQueries(list, perQuery, deadline) {
+  const out = { ok: 0, results: [], errors: [], cached: 0 };
+  const keys = list.map(function (x) { return qKey("brave", x.q, perQuery); });
+  const hit = SEARCH_TTL() ? await cache.getMany("search", keys) : {};
+  const todo = [];
+  list.forEach(function (x, i) {
+    if (hit[keys[i]]) { out.ok++; out.cached++; hit[keys[i]].forEach(function (o, j) { out.results.push({ o: o, q: x.q, pos: j + 1 }); }); }
+    else todo.push({ x: x, k: keys[i] });
+  });
+  let idx = 0;
+  async function worker() {
+    while (idx < todo.length) {
+      const t = todo[idx++];
+      if (Date.now() > deadline) { out.errors.push("brave:timeout"); return; }
+      if (!breaker.allow("brave")) { out.errors.push("brave:pausado"); return; }
+      let r = await braveSearch(t.x.q, perQuery);
+      if (!r.ok && r.status === 429 && !r.quotaGone) r = await braveSearch(t.x.q, perQuery);
+      if (!r.ok) {
+        out.errors.push("brave:" + (r.reason || "error"));
+        /* Clave invalida o cupo del mes agotado: se aparta y entra el respaldo. */
+        const hard = r.status === 401 || r.status === 403 || r.status === 402 || r.quotaGone;
+        breaker.failure("brave", r.reason, { hard: hard, coolMs: r.quotaGone ? 12 * 3600000 : (hard ? 30 * 60000 : 5 * 60000) });
+        if (hard) return;
+        continue;
+      }
+      breaker.success("brave");
+      out.ok++;
+      const slim = r.results.map(function (o) { return { url: o.url, title: o.title, description: o.description }; });
+      if (SEARCH_TTL()) await cache.set("search", t.k, slim, SEARCH_TTL());
+      slim.forEach(function (o, j) { out.results.push({ o: o, q: t.x.q, pos: j + 1 }); });
+    }
+  }
+  await Promise.all(braveRps() >= 2 ? [worker(), worker()] : [worker()]);
+  return out;
+}
+
+async function apifyQueries(list, perQuery, timeoutMs) {
+  const out = { ok: 0, results: [], errors: [], cached: 0 };
+  const keys = list.map(function (x) { return qKey("google", x.q, perQuery); });
+  const hit = SEARCH_TTL() ? await cache.getMany("search", keys) : {};
+  const todo = [];
+  list.forEach(function (x, i) {
+    if (hit[keys[i]]) { out.ok++; out.cached++; hit[keys[i]].forEach(function (o, j) { out.results.push({ o: o, q: x.q, pos: o.position || (j + 1) }); }); }
+    else todo.push({ x: x, k: keys[i] });
+  });
+  if (!todo.length) return out;
+  if (!breaker.allow("apify_search")) { out.errors.push("apify:pausado"); return out; }
+  const r = await Promise.race([
+    apify.runActor(config.apify.actors.search, {
+      queries: todo.map(function (t) { return t.x.q; }).join("\n"),
+      countryCode: config.apify.country, languageCode: config.discovery.lang,
+      resultsPerPage: perQuery, maxPagesPerQuery: 1, mobileResults: false, saveHtml: false, saveHtmlToKeyValueStore: false
+    }, { estCost: 0.01 * todo.length, timeoutSec: 120 }),
+    new Promise(function (res) { const t = setTimeout(function () { res({ ok: false, reason: "timeout" }); }, timeoutMs); if (t.unref) t.unref(); })
+  ]);
+  if (!r || !r.ok) {
+    out.errors.push("apify:" + ((r && r.reason) || "error"));
+    breaker.failure("apify_search", r && r.reason, { hard: /sin_token|401|403|402|saldo|limit/i.test(String(r && r.reason)), coolMs: 10 * 60000 });
+    return out;
+  }
+  breaker.success("apify_search");
+  const byQ = {};
+  r.items.forEach(function (page) {
+    const q = (page && page.searchQuery && (page.searchQuery.term || page.searchQuery.q)) || "";
+    ((page && page.organicResults) || []).forEach(function (o, i) {
+      (byQ[q.toLowerCase()] = byQ[q.toLowerCase()] || []).push({ url: o.url || o.link, title: o.title, description: o.description || o.snippet, position: o.position || (i + 1) });
+    });
+  });
+  for (let i = 0; i < todo.length; i++) {
+    const got = byQ[todo[i].x.q.toLowerCase()] || [];
+    if (got.length) { out.ok++; if (SEARCH_TTL()) await cache.set("search", todo[i].k, got, SEARCH_TTL()); }
+    got.forEach(function (o, j) { out.results.push({ o: o, q: todo[i].x.q, pos: o.position || (j + 1) }); });
+  }
+  return out;
+}
+
 async function searchQueries(queries, opts) {
   opts = opts || {};
   const list = (queries || []).filter(function (x) { return x && x.q; });
   if (!list.length) return { ok: false, reason: "query_required", results: [], engines: [] };
   const perQuery = Math.min(Math.max(parseInt(opts.perQuery, 10) || 10, 5), 20);
+  const timeoutMs = opts.timeoutMs || 90000;
+  const deadline = Date.now() + timeoutMs;
   const groupOf = {};
   list.forEach(function (x) { groupOf[x.q.toLowerCase()] = x.group || ""; });
-  const results = [];
-  const engines = [];
-  const errors = [];
+  const results = [], engines = [], errors = [];
+  let cachedQ = 0;
+  const seen = {};
   function push(o, q, pos, engine) {
     const url = o && (o.url || o.link || o.href);
     if (!/^https?:\/\//i.test(String(url || ""))) return;
-    results.push({
-      url: url, title: (o.title || o.name || ""), description: (o.description || o.snippet || ""),
-      query: q, group: groupOf[String(q || "").toLowerCase()] || "", position: pos, engine: engine
-    });
+    const k = engine + "|" + String(q).toLowerCase() + "|" + url;
+    if (seen[k]) return;
+    seen[k] = 1;
+    results.push({ url: url, title: (o.title || o.name || ""), description: (o.description || o.snippet || ""), query: q, group: groupOf[String(q || "").toLowerCase()] || "", position: pos, engine: engine });
   }
-  function cap(p, ms) {
-    return Promise.race([p, new Promise(function (r) { const t = setTimeout(function () { r({ ok: false, reason: "timeout" }); }, ms); if (t.unref) t.unref(); })]);
-  }
-  const jobs = [];
-  if (apifyReady()) {
-    jobs.push(cap(apify.runActor(config.apify.actors.search, {
-      queries: list.map(function (x) { return x.q; }).join("\n"),
-      countryCode: config.apify.country,
-      languageCode: config.discovery.lang,
-      resultsPerPage: perQuery,
-      maxPagesPerQuery: 1,
-      mobileResults: false,
-      saveHtml: false,
-      saveHtmlToKeyValueStore: false
-    }, { estCost: 0.01 * list.length, timeoutSec: 120 }), opts.timeoutMs || 90000).then(function (r) {
-      if (!r || !r.ok) { errors.push("apify:" + ((r && r.reason) || "error")); return; }
-      engines.push("google(apify)");
-      r.items.forEach(function (page) {
-        const q = (page && page.searchQuery && (page.searchQuery.term || page.searchQuery.q)) || "";
-        ((page && page.organicResults) || []).forEach(function (o, i) { push(o, q, o.position || (i + 1), "google"); });
-      });
+  const order = engineOrder();
+  const minResults = config.discovery.minResults || 0;
+  if (config.discovery.mode === "both" && order.length > 1) {
+    /* Los dos a la vez: cada uno encuentra webs que el otro no tiene. */
+    const got = await Promise.all(order.map(function (eng) {
+      return eng === "brave" ? braveQueries(list, perQuery, deadline) : apifyQueries(list, perQuery, Math.max(15000, deadline - Date.now()));
     }));
+    got.forEach(function (r, i) {
+      const eng = order[i];
+      r.errors.forEach(function (e) { errors.push(e); });
+      cachedQ += r.cached;
+      r.results.forEach(function (x) { push(x.o, x.q, x.pos, eng === "brave" ? "brave" : "google"); });
+      if (r.ok) engines.push(eng === "brave" ? "brave" : "google(apify)");
+    });
+    order.length = 0;
   }
-  if (config.discovery.apiKey) {
-    jobs.push((async function () {
-      let ok = 0;
-      for (let i = 0; i < list.length; i++) {
-        const r = await cap(braveSearch(list[i].q, perQuery), 15000);
-        if (!r || !r.ok) { errors.push("brave:" + ((r && r.reason) || "error")); continue; }
-        ok++;
-        r.results.forEach(function (o, j) { push(o, list[i].q, j + 1, "brave"); });
-      }
-      if (ok) engines.push("brave");
-    })());
+  for (let i = 0; i < order.length; i++) {
+    const eng = order[i];
+    if (i > 0 && results.length >= minResults) break;
+    if (Date.now() > deadline) break;
+    const r = eng === "brave"
+      ? await braveQueries(list, perQuery, deadline)
+      : await apifyQueries(list, perQuery, Math.max(15000, deadline - Date.now()));
+    r.errors.forEach(function (e) { errors.push(e); });
+    cachedQ += r.cached;
+    const label = eng === "brave" ? "brave" : "google(apify)";
+    r.results.forEach(function (x) { push(x.o, x.q, x.pos, eng === "brave" ? "brave" : "google"); });
+    if (r.ok) engines.push(label + (i > 0 ? " (respaldo)" : ""));
   }
-  if (jobs.length) await Promise.all(jobs);
   if (results.length < 3) {
     /* Respaldo sin claves: DuckDuckGo y Bing desde el servidor (pocas consultas). */
     const few = list.slice(0, 4);
@@ -438,7 +562,7 @@ async function searchQueries(queries, opts) {
     if (n) engines.push("web");
     else errors.push("web:sin_resultados");
   }
-  return { ok: results.length > 0, reason: results.length ? null : (errors[0] || "sin_resultados"), results: results, engines: engines, errors: errors };
+  return { ok: results.length > 0, reason: results.length ? null : (errors[0] || "sin_resultados"), results: results, engines: engines, errors: errors, cachedQueries: cachedQ };
 }
 
 const discovery = {
@@ -462,5 +586,6 @@ const discovery = {
 };
 
 discovery.searchQueries = searchQueries;
+discovery.braveStats = braveStats;
 discovery.parseWebResults = parseWebResults;
 module.exports = discovery;

@@ -19,7 +19,9 @@ router.get("/", ah(async function (req, res) {
     list = await learn.all();
   }
   list.sort(function (a, b) { return (b.score || 0) - (a.score || 0); });
-  res.json({ ok: true, domains: list });
+  let engines = null;
+  try { engines = await learn.engineStats(); } catch (e) {}
+  res.json({ ok: true, domains: list, engines: engines });
 }));
 router.post("/block", ah(async function (req, res) {
   const b = req.body || {};
