@@ -225,6 +225,7 @@ async function find(body, hooks) {
     if (l._known) continue;
     await cache.set("leadinfo", h, { role: l.role, roleLabel: l.roleLabel, ai: l.ai || null, page: l.page || null, signals: l.signals || null, scoreAdj: (l.score || 0) - (l._score0 || 0) }, LEAD_TTL);
   }
+  try { require("../lib/usage").add("value", { busquedasProveedor: 1, websReutilizadas: reused, consultasCache: sr.cachedQueries || 0, proveedores: leads.length }); } catch (e) {}
   let newCount = 0;
   if (prevSet) {
     const before = {};

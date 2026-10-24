@@ -42,6 +42,8 @@ const beaconGuard = security.beaconGuard({ maxBytes: function () { return config
 
 app.get("/", (req, res) => res.json({ ok: true, service: pkg.name, version: pkg.version, docs: "/health" }));
 app.get("/health", health);
+/* Panel de APIs (pagina sin datos; los datos piden la clave API en /usage). */
+app.get(["/panel", "/panel/"], (req, res) => { res.setHeader("X-Robots-Tag", "noindex"); res.sendFile(require("path").join(__dirname, "public", "panel.html")); });
 app.get("/health/amazon", apiLimit, requireApiKey, health.amazonCheck);
 app.get("/health/cache", apiLimit, requireApiKey, health.cacheInfo);
 app.post("/health/cache", apiLimit, requireApiKey, health.cacheInfo);

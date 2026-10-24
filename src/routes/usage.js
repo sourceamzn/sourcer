@@ -47,6 +47,7 @@ async function liveInfo(force) {
   return live.data;
 }
 
+function n(v) { return Math.round(Number(v) || 0); }
 function br(name) { const b = breaker.snapshot()[name]; return b && b.open ? b : null; }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
@@ -61,6 +62,10 @@ router.get("/", ah(async function (req, res) {
   const proj = function (eur) { return round2((eur / Math.max(1, dom)) * dim); };
   const alerts = [];
   const S = [];
+  const V = t.value || {};
+  let eng = null;
+  try { eng = await require("../lib/learn").engineStats(); } catch (e) {}
+  const eg = function (k) { return (eng && eng[k]) || {}; };
 
   /* Keepa */
   const kt = t.keepa || {}, kl = L.keepa;
@@ -71,6 +76,7 @@ router.get("/", ah(async function (req, res) {
   S.push({ id: "keepa", name: "Keepa", role: "Histórico de Amazon: Buy Box 90 d, ventas, vendedores", configured: keepaReady(),
     status: !keepaReady() ? "off" : (kLeft != null && kLeft < 100 ? "warn" : "ok"),
     metrics: [["Tokens gastados este mes", kt.tokens || 0], ["Peticiones", kt.requests || 0], ["Tokens disponibles ahora", kLeft == null ? "—" : kLeft], ["Recarga", refill ? refill + "/min" : "—"]],
+    aporta: [["Productos analizados", n(kt.productos)], ["Oportunidades detectadas en búsquedas", n(kt.aptos)], ["Servidos de caché (tokens ahorrados)", n(kt.cacheHits)]],
     costEur: kPlan, projectedEur: kPlan, costNote: kPlan ? "Plan fijo mensual (" + refill + " tokens/min)" : "Plan fijo mensual",
     dashboard: "https://keepa.com/#!api", docs: "https://keepa.com/api-docs/" });
 
@@ -81,6 +87,7 @@ router.get("/", ah(async function (req, res) {
   S.push({ id: "spapi", name: "Amazon SP-API", role: "Tu cuenta: comisiones reales, restricciones, ofertas actuales, catálogo por EAN", configured: amazonReady(),
     status: !amazonReady() ? "off" : (spOpen ? "bad" : (sp.usage.errors && !sp.usage.ok ? "warn" : "ok")),
     metrics: [["Llamadas este mes", (t.spapi || {}).calls || 0], ["Desde el arranque: correctas", sp.usage.ok], ["Esperas por límite", sp.usage.throttled], ["Último error", sp.usage.lastError || "—"]],
+    aporta: [["EAN resueltos gratis en tarifas (tokens Keepa ahorrados)", n((t.spapi || {}).eansFree)], ["Comisiones reales de tu cuenta", n((t.spapi || {}).feesReal)], ["Productos que necesitan aprobación detectados", n((t.spapi || {}).restrictions)]],
     costEur: 0, projectedEur: 0, costNote: "Gratis", dashboard: "https://solutionproviderportal.amazon.com", docs: "https://developer-docs.amazon.com/sp-api" });
 
   /* Brave */
@@ -92,6 +99,7 @@ router.get("/", ah(async function (req, res) {
   S.push({ id: "brave", name: "Brave Search", role: "Buscador de fabricantes y distribuidores", configured: braveOn,
     status: !braveOn ? "off" : (br("brave") ? "bad" : (bs.monthLeft != null && bs.monthLimit && bs.monthLeft / bs.monthLimit < 0.15 ? "warn" : "ok")),
     metrics: [["Consultas este mes", bt.queries || 0], ["Quedan del cupo", bs.monthLeft == null ? "—" : bs.monthLeft + (bs.monthLimit ? " de " + bs.monthLimit : "")], ["Errores", bt.errors || 0]],
+    aporta: [["Proveedores que solo encontró Brave", n(eg("soloBrave").proveedores)], ["De ellos guardados / responden / tarifa", n(eg("soloBrave").guardados) + " / " + n(eg("soloBrave").responden) + " / " + n(eg("soloBrave").tarifas)], ["Encontrados también por Google", n(eg("ambos").proveedores)]],
     costEur: round2(bUsd * USD_EUR), projectedEur: proj(bUsd * USD_EUR), costNote: "5 $ / 1.000 consultas; los primeros 5 $ del mes son crédito",
     dashboard: "https://api-dashboard.search.brave.com/app/dashboard", docs: "https://api-dashboard.search.brave.com/app/documentation" });
 
@@ -103,6 +111,7 @@ router.get("/", ah(async function (req, res) {
   S.push({ id: "apify", name: "Apify (Google)", role: "Búsqueda en Google de proveedores", configured: apifyReady(),
     status: !apifyReady() ? "off" : (br("apify_search") ? "bad" : (al && al.limitUsd && al.usedUsd / al.limitUsd > 0.8 ? "warn" : "ok")),
     metrics: [["Ejecuciones este mes", at.runs || 0], ["Gastado (cuenta Apify)", al && al.usedUsd != null ? round2(al.usedUsd) + " $" : "—"], ["Límite mensual", al && al.limitUsd != null ? al.limitUsd + " $" : "—"], ["Plan", al && al.plan ? al.plan : "—"]],
+    aporta: [["Proveedores que solo encontró Google", n(eg("soloGoogle").proveedores)], ["De ellos guardados / responden / tarifa", n(eg("soloGoogle").guardados) + " / " + n(eg("soloGoogle").responden) + " / " + n(eg("soloGoogle").tarifas)], ["Encontrados también por Brave", n(eg("ambos").proveedores)]],
     costEur: round2(aUsd * USD_EUR), projectedEur: proj(aUsd * USD_EUR), costNote: al && al.usedUsd != null ? "Dato real de tu cuenta Apify" : "Estimado por la herramienta",
     dashboard: "https://console.apify.com/billing", docs: "https://docs.apify.com/api/v2" });
 
@@ -116,6 +125,7 @@ router.get("/", ah(async function (req, res) {
   S.push({ id: "ai", name: "IA (Anthropic · Claude)", role: "Clasifica webs, lee respuestas de proveedores, traduce, propone búsquedas", configured: aiOn,
     status: !aiOn ? "off" : (aiSt.dailyLimit && today >= aiSt.dailyLimit ? "bad" : (aiSt.dailyLimit && today / aiSt.dailyLimit > 0.85 ? "warn" : "ok")),
     metrics: [["Llamadas este mes", ait.calls || 0], ["Tokens entrada / salida", (ait.inTok || 0).toLocaleString("es-ES") + " / " + (ait.outTok || 0).toLocaleString("es-ES")], ["Hoy", today + (aiSt && aiSt.dailyLimit ? " de " + aiSt.dailyLimit : "")], ["Modelo", (aiSt && aiSt.model) || "—"]],
+    aporta: [["Respuestas de proveedores leídas y resumidas", n(ait.p_respuesta)], ["Webs clasificadas (fabricante, distribuidor, tienda)", n(ait.p_proveedores_clasificar)], ["Correos traducidos", n(ait.p_traducir_correo)], ["Búsquedas de proveedor propuestas", n(ait.p_proveedores_consultas)], ["Resultados de producto revisados", n(ait.p_productos_titulos)]],
     costEur: round2((ait.estUsd || 0) * USD_EUR), projectedEur: proj((ait.estUsd || 0) * USD_EUR), costNote: "Estimado con precios de Haiku",
     dashboard: "https://console.anthropic.com", docs: "https://docs.claude.com" });
 
@@ -123,13 +133,14 @@ router.get("/", ah(async function (req, res) {
   const it = t.icecat || {};
   const icOn = require("../config").icecatReady();
   S.push({ id: "icecat", name: "Icecat", role: "Marca, fabricante y ficha por EAN", configured: icOn, status: icOn ? "ok" : "off",
-    metrics: [["Consultas este mes", it.calls || 0], ["Errores", it.errors || 0]], costEur: 0, projectedEur: 0, costNote: "Gratis (catálogo abierto)",
+    metrics: [["Consultas este mes", it.calls || 0], ["Errores", it.errors || 0]], aporta: [["Fichas con marca y fabricante encontradas", n(it.fichas)]], costEur: 0, projectedEur: 0, costNote: "Gratis (catálogo abierto)",
     dashboard: "https://icecat.biz", docs: "https://iceclog.com/manual-for-icecat-json-product-requests/" });
 
   /* Correo */
   const mt = t.mail || {};
   const mailOn = Boolean(config.mail && config.mail.smtp && config.mail.smtp.host);
   S.push({ id: "mail", name: "Correo (SMTP + puente)", role: "Envía la secuencia y los mensajes del chat", configured: mailOn, status: mailOn ? "ok" : "off",
+    aporta: [["Respuestas de proveedores recibidas", n(mt.replies)], ["Respuestas con tarifa adjunta", n(mt.tariffs)]],
     metrics: [["Correos enviados este mes", mt.sent || 0], ["Vía", config.mail && config.mail.relay && config.mail.relay.url ? "puente PHP" : "SMTP directo"]], costEur: 0, projectedEur: 0, costNote: "Incluido en tu hosting",
     dashboard: "", docs: "" });
 
@@ -139,6 +150,7 @@ router.get("/", ah(async function (req, res) {
   const cache = await require("../lib/cache").snapshot();
   S.push({ id: "railway", name: "Servidor (Railway) y base de datos", role: "Donde vive el backend, la base de datos y la caché", configured: true, status: "ok",
     metrics: [["Base de datos", db && db.mb != null ? db.mb + " MB" : "—"], ["Caché: aciertos", cache.hitRate == null ? "—" : cache.hitRate + " %"], ["Caché: elementos", cache.rows != null ? cache.rows : cache.l1], ["Versión", require("../../package.json").version]],
+    aporta: [["Búsquedas de proveedor repetidas sin coste (webs reutilizadas)", n(V.websReutilizadas)], ["Consultas al buscador servidas de caché", n(V.consultasCache)]],
     costEur: null, projectedEur: null, costNote: "Ver en Railway", dashboard: "https://railway.com/dashboard", docs: "" });
 
   const known = S.filter(function (x) { return x.costEur != null; });
@@ -146,6 +158,7 @@ router.get("/", ah(async function (req, res) {
     ok: true, month: m.month, generatedAt: now.toISOString(), usdEur: USD_EUR,
     totalEur: round2(known.reduce(function (n, x) { return n + (x.costEur || 0); }, 0)),
     projectedEur: round2(known.reduce(function (n, x) { return n + (x.projectedEur || 0); }, 0)),
+    value: { oportunidadesTarifa: n(V.oportunidades), tarifasCruzadas: n(V.tarifas), filasCruzadas: n(V.tarifaFilas), radarNuevas: n(V.radar), busquedasProveedor: n(V.busquedasProveedor), proveedoresEncontrados: n(V.proveedores), aptosBusqueda: n(kt.aptos), respuestas: n(mt.replies), tarifasRecibidas: n(mt.tariffs), correos: n(mt.sent) },
     services: S, alerts: alerts, days: days, cache: cache, breakers: breaker.snapshot()
   });
 }));

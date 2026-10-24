@@ -326,6 +326,7 @@ async function spFeesFor(list, data) {
     const f = feesLib.fromEstimate(r.byAsin[asin], src ? src.price : 0);
     if (f.referralPct != null || f.fbaFee != null) { data.spFees[asin] = { referralPct: f.referralPct, fbaFee: f.fbaFee, source: "spapi" }; n++; }
   });
+  if (n) { try { require("./usage").add("spapi", { feesReal: n }); } catch (e) {} }
   return n;
 }
 
@@ -345,6 +346,7 @@ async function spRestrictions(rows, run) {
       row.restrictions = rs.slice(0, 3);
       row.reasons = ["Tu cuenta necesita aprobación para venderlo: " + rs[0]].concat((row.reasons || []).filter(function (x) { return !/aprobaci/i.test(x); })).slice(0, 5);
       run.restricted = (run.restricted || 0) + 1;
+      try { require("./usage").add("spapi", { restrictions: 1 }); } catch (e) {}
     }
   }
 }
@@ -407,6 +409,7 @@ async function process1(run) {
       if (pk.alt) row.alternatives = pk.alt;
       rowsByEan[it.ean] = row;
     });
+    try { require("./usage").add("spapi", { eansFree: Object.keys(pick).length }); } catch (e) {}
     data.cursor += chunk.length;
     run.looked = data.cursor;
     data.rows = Object.keys(rowsByEan).map(function (k) { return rowsByEan[k]; });
@@ -423,6 +426,7 @@ async function process1(run) {
     const pending = chunk.filter(function (it) { return !fromCache[it.ean]; });
     let prods = [];
     Object.keys(fromCache).forEach(function (e) { fromCache[e].forEach(function (p) { prods.push(p); }); });
+    if (Object.keys(fromCache).length) { try { require("./usage").add("keepa", { cacheHits: Object.keys(fromCache).length }); } catch (e) {} }
     if (pending.length) {
       const can = await waitTokens(run, pending.length);
       if (can < 0) return;
@@ -538,6 +542,7 @@ async function process1(run) {
   const c = run.counts || {};
   run.message = "Terminado: " + run.found + " de " + run.total + " EAN existen en Amazon · " + (c.oportunidad || 0) + " oportunidad(es) · " + (c.revisar || 0) + " a revisar · " + (c.justo || 0) + " justos · " + run.tokens + " tokens Keepa" + (run.engine === "amazon" ? " (fase 1 con Amazon, sin coste)" : "") + (run.restricted ? " · " + run.restricted + " necesitan aprobación" : "") + ".";
   await save(run, data);
+  try { require("./usage").add("value", { tarifas: 1, tarifaFilas: run.total || 0, oportunidades: c.oportunidad || 0 }); } catch (e) {}
   if (run.contactId) { try { await require("./learn").tariffResult(run.contactId, data.rows); } catch (e) {} }
   try { events.add("tarifa_cruce", { phase: "fin", id: run.id, total: run.total, found: run.found, ops: c.oportunidad || 0, tokens: run.tokens, engine: run.engine }); } catch (e) {}
 }

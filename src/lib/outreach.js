@@ -487,6 +487,7 @@ async function applyFinding(f) {
     } catch (e) {}
   }
   if (f.kind !== "automatica") c.unread = (c.unread || 0) + 1;
+  try { require("./usage").add("mail", { replies: 1, tariffs: (f.attachments || []).length ? 1 : 0 }); } catch (e) {}
   threadAdd(c, { dir: "in", msgId: f.msgId || "", from: f.from, subject: f.subject || "", text: f.full || f.snippet || "", kind: f.kind, ai: ai ? { tipo: ai.tipo, resumen: ai.resumen || "" } : null, files: (f.attachments || []).map(function (a) { return a.filename; }) });
   if (f.kind === "automatica") {
     hist(c, "automatica", "Respuesta automática de " + f.from + " (no para la secuencia): «" + String(f.subject || "").slice(0, 120) + "»");

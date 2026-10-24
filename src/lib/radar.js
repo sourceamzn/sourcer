@@ -136,6 +136,7 @@ async function run(actor) {
         known[asin] = it;
       }
       out.found += found; out.nuevos += nuevos;
+      try { require("./usage").add("value", { radar: nuevos }); } catch (e) {}
       out.byCat.push({ id: cat.id, name: cat.name, found: found, nuevos: nuevos, tokens: Math.max(0, keepaCost.usage.consumed - before), error: r && r.ok ? "" : String((r && r.reason) || "error") });
     }
     await prune();

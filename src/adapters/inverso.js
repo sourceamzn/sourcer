@@ -262,6 +262,7 @@ async function keepaProductsByAsins(asins, offers, opts) {
       return { ok: out.length > 0, products: out, reason: r.reason, fetched: missing.length };
     }
   }
+  try { const saved = asins.length - missing.length; if (saved > 0) require("../lib/usage").add("keepa", { cacheHits: saved }); if (missing.length) require("../lib/usage").add("keepa", { productos: missing.length }); } catch (e) {}
   return { ok: true, products: out, fetched: missing.length };
 }
 const _sellerCache = {};
@@ -2383,6 +2384,7 @@ const inverso = {
       const realFees = baseM.filter(function (m) {
         return m.fees && !m.fees.partial && m.fees.source !== "estimado";
       }).length;
+      if (spFees) { try { require("../lib/usage").add("spapi", { feesReal: spFees }); } catch (e) {} }
       if (baseM.length) {
         notes.push("Tarifas reales: " + realFees + "/" + baseM.length +
           (spFees ? " (" + spFees + " por SP-API)" : "") + "; el resto, estimacion del PDF.");
@@ -2414,12 +2416,14 @@ const inverso = {
             top[i].estado = plan.estado;
           } catch (e) {}
         }
+        if (restricted) { try { require("../lib/usage").add("spapi", { restrictions: restricted }); } catch (e) {} }
         if (restricted) notes.push("Restricciones de listado en " + restricted + " candidato(s): solo aviso, no descarte.");
       }
       cands.sort(byRank);
 
       const counts = { apt: 0, casi: 0, descarte: 0 };
       cands.forEach(function (c) { counts[c.estado] = (counts[c.estado] || 0) + 1; });
+      try { require("../lib/usage").add("keepa", { aptos: counts.apt || 0 }); } catch (e) {}
       return {
         ok: true,
         data: {
