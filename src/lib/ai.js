@@ -96,6 +96,15 @@ async function askJson(purpose, system, user, maxTokens) {
   return { ok: Boolean(json), text: text, json: json, model: model, reason: json ? null : "respuesta_no_json" };
 }
 
+/* Correcciones del usuario («Esto esta mal») como ejemplos para la IA. */
+async function lessons(purpose, n) {
+  try {
+    const ex = await require("./feedback").examples(purpose, n || 8);
+    if (!ex.length) return "";
+    return "\n\nCorrecciones que hizo el usuario en casos anteriores (aprende de ellas y no repitas esos errores):\n" + JSON.stringify(ex);
+  } catch (e) { return ""; }
+}
+
 /* ---------- 1. Leer la respuesta de un proveedor ---------- */
 const REPLY_TYPES = ["tarifa", "pide_alta", "pide_info", "pregunta_canal", "solo_distribuidores", "no_distribuye", "rechazo", "baja", "automatica", "otro"];
 async function analyzeReply(ctx) {
@@ -117,7 +126,7 @@ async function analyzeReply(ctx) {
     "\"adjuntos_mencionados\": true/false," +
     "\"siguiente_paso\": \"que deberiamos hacer ahora, en una frase\"," +
     "\"borrador_respuesta\": \"respuesta breve y educada, en el idioma del proveedor, para que la revisemos antes de enviarla, firmada con nuestro nombre y empresa; sin inventar precios, cantidades ni compromisos; sin mencionar Amazon ni marketplaces, sin revelar precio objetivo ni datos de ventas; si preguntan por el canal de venta, pon null (eso lo responde una persona)\"}";
-  const r = await askJson("respuesta", system, user, 2000);
+  const r = await askJson("respuesta", system, user + (await lessons("respuesta", 6)), 2000);
   if (!r.ok) return r;
   const j = r.json;
   if (REPLY_TYPES.indexOf(j.tipo) === -1) j.tipo = "otro";
@@ -167,7 +176,7 @@ async function classifyLeads(ctx, items) {
   const user = prodLine(ctx) + "\n\nWebs:\n" + JSON.stringify(list) +
     "\n\nPara cada web devuelve su papel: fabricante (la marca o su fabricante), distribuidor_oficial, mayorista (vende a profesionales/B2B, aunque no sea oficial), marketplace_b2b (Alibaba, Ankorstore...), info_ean (base de datos de codigos), minorista (tienda al consumidor), irrelevante (blog, foro, noticia, manual, otra cosa)." +
     "\nDevuelve: {\"webs\": [{\"id\": ..., \"rol\": uno de " + JSON.stringify(LEAD_ROLES) + ", \"vende_producto\": true/false/null (si ofrece este producto o esta marca), \"motivo\": \"max 12 palabras\"}]}";
-  const r = await askJson("proveedores_clasificar", system, user, 3000);
+  const r = await askJson("proveedores_clasificar", system, user + (await lessons("proveedores_clasificar", 10)), 3000);
   if (!r.ok) return r;
   const out = (Array.isArray(r.json.webs) ? r.json.webs : []).filter(function (w) { return w && LEAD_ROLES.indexOf(w.rol) !== -1; });
   return { ok: true, items: out };
@@ -182,7 +191,7 @@ async function reviewTitles(query, items) {
     "\n\nMarca para descartar SOLO los que claramente no son lo que el usuario busca: repuestos o accesorios de otro producto, fundas, recambios, productos de otra categoria. NO descartes por precio, marca o calidad." +
     "\nAnade hasta 4 busquedas relacionadas (en espanol, 1-3 palabras) con buen potencial para arbitraje en Amazon.es." +
     "\nDevuelve: {\"descartar\": [{\"asin\": \"...\", \"motivo\": \"max 8 palabras\"}], \"sugerencias\": [\"...\"]}";
-  const r = await askJson("productos_titulos", system, user, 1500);
+  const r = await askJson("productos_titulos", system, user + (await lessons("productos_titulos", 8)), 1500);
   if (!r.ok) return r;
   const valid = {};
   items.forEach(function (x) { valid[x.asin] = 1; });

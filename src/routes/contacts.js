@@ -98,6 +98,7 @@ router.post("/", ah(async function (req, res) {
   prev.phones = uniq([].concat(prev.phones || [], c.phones || []), 6);
   const prod = productOf(b.product);
   prod.leadUrl = str(lead.url, 500);
+  try { require("../lib/journal").add("decision", { what: "guardar_proveedor", host: host, role: lead.role || "", product: prod.asin || prod.ean || "", engines: lead.engines || [] }); } catch (e) {}
   prod.price = lead.price && lead.price.price > 0 ? { price: Number(lead.price.price), vat: lead.price.vat || null } : null;
   prod.band = (lead.priceCheck && lead.priceCheck.band) || "";
   if (prod.key) {
@@ -118,6 +119,7 @@ router.patch("/:id", ah(async function (req, res) {
   if (!c) return res.status(404).json({ ok: false, reason: "no_encontrado" });
   const b = req.body || {};
   const now = new Date().toISOString();
+  if (b.status && b.status !== c.status) { try { require("../lib/journal").add("decision", { what: "estado_proveedor", host: id, from: c.status, to: b.status }); } catch (e) {} }
   if (b.undo) {
     const r = restore(c);
     if (r === "ya_enviado") return res.status(400).json({ ok: false, reason: "ya_enviado", hint: "El correo ya salió: no se puede deshacer el envío." });
@@ -184,6 +186,7 @@ router.delete("/:id", ah(async function (req, res) {
   if (c) { c.deletedAt = new Date().toISOString(); await docs.put(TRASH, id, c); }
   const ok = await docs.del(COLL, id);
   if (c) await learn.contactRemoved(c.host || id);
+  try { require("../lib/journal").add("decision", { what: "quitar_proveedor", host: id, status: c && c.status }); } catch (e) {}
   res.json({ ok: ok });
 }));
 router.post("/:id/restore", ah(async function (req, res) {

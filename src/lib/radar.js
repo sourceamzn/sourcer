@@ -74,6 +74,7 @@ async function setStatus(asin, status) {
   if (["nuevo", "visto", "descartado"].indexOf(status) === -1) return null;
   it.prevStatus = it.status;
   it.status = status;
+  try { require("./journal").add("decision", { what: "radar_" + status, asin: it.asin, title: it.title, estado: it.estado }); } catch (e) {}
   await docs.put(ITEMS, it.asin, it);
   return it;
 }

@@ -367,6 +367,10 @@ async function process1(run) {
   if (!(await save(run))) return;
   const rowsByEan = {};
   data.rows.forEach(function (r) { rowsByEan[r.ean] = r; });
+  /* EAN -> ASIN que el usuario marco como «no es el mismo producto». */
+  let bad = {};
+  try { bad = await require("./feedback").badMatches(); } catch (e) {}
+  const isBad = function (ean, asin) { return (bad[ean] || []).indexOf(String(asin || "").toUpperCase()) !== -1; };
   const itemsByEan = {};
   data.items.forEach(function (it) { itemsByEan[it.ean] = it; });
   run.spCalls = run.spCalls || 0;
@@ -388,7 +392,7 @@ async function process1(run) {
     /* Un EAN puede tener varias fichas (variantes, packs): la de mejor BSR. */
     const pick = {};
     chunk.forEach(function (it) {
-      const list = (cat.byEan[it.ean] || []).filter(function (x) { return x.asin; });
+      const list = (cat.byEan[it.ean] || []).filter(function (x) { return x.asin && !isBad(it.ean, x.asin); });
       if (!list.length) return;
       list.sort(function (a, b) { return (a.bsr || 1e12) - (b.bsr || 1e12); });
       pick[it.ean] = { item: list[0], alt: list.length - 1 };
@@ -459,7 +463,7 @@ async function process1(run) {
     prods.forEach(function (p) {
       const codes = [].concat(p.eanList || [], p.upcList || []).map(function (c) { return gtin.normalize(gtin.digitsOnly(String(c))); });
       chunk.forEach(function (it) {
-        if (codes.indexOf(it.ean) === -1) return;
+        if (codes.indexOf(it.ean) === -1 || isBad(it.ean, p.asin)) return;
         if (best[it.ean] && best[it.ean].p.asin === p.asin) return;
         const rank = (p.stats && p.stats.current && num(p.stats.current[3]) > 0) ? num(p.stats.current[3]) : 1e12;
         if (!best[it.ean] || rank < best[it.ean].rank) best[it.ean] = { p: p, rank: rank, alt: best[it.ean] ? best[it.ean].alt + 1 : 0 };

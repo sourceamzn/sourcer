@@ -211,6 +211,18 @@ async function find(body, hooks) {
     const L = await learnLib.forSearch([brand, ctx.manufacturer].concat(ctx.brands || []).filter(Boolean));
     const ap = learnLib.apply(leads, L, leadsLib);
     leads = ap.leads;
+    /* Corregido por el usuario: una «tienda» sale de la lista de proveedores y
+       una tienda marcada como distribuidor/mayorista/fabricante entra. */
+    for (let i = leads.length - 1; i >= 0; i--) if (leads[i].learned && leads[i].learned.corrected && /minorista|irrelevante/.test(leads[i].role)) { retailers.push(leads[i]); leads.splice(i, 1); }
+    for (let i = retailers.length - 1; i >= 0; i--) {
+      const d = L.byHost[learnLib.hostOf(retailers[i].host || retailers[i].url)];
+      if (d && d.roleOverride && !/minorista|irrelevante/.test(d.roleOverride)) {
+        const r = retailers.splice(i, 1)[0];
+        r.role = d.roleOverride; r.roleLabel = leadsLib.ROLE_LABEL[d.roleOverride] || r.roleLabel;
+        r.learned = { score: d.score, why: "lo corregiste: " + r.roleLabel, corrected: true };
+        leads.push(r);
+      }
+    }
     for (let i = retailers.length - 1; i >= 0; i--) if (L.blocked[learnLib.hostOf(retailers[i].host || retailers[i].url)]) { ap.hidden.push(retailers[i]); retailers.splice(i, 1); }
     leads.forEach(function (l) { if (!l.priceCheck) l.priceCheck = leadsLib.priceBand(l, target); });
     learnInfo = { known: L.known.length, hidden: ap.hidden.length, boosted: leads.filter(function (l) { return l.learned; }).length, hiddenHosts: ap.hidden.map(function (l) { return l.host; }).slice(0, 30) };
@@ -225,6 +237,7 @@ async function find(body, hooks) {
     if (l._known) continue;
     await cache.set("leadinfo", h, { role: l.role, roleLabel: l.roleLabel, ai: l.ai || null, page: l.page || null, signals: l.signals || null, scoreAdj: (l.score || 0) - (l._score0 || 0) }, LEAD_TTL);
   }
+  try { require("../lib/journal").add("busqueda_proveedor", { ean: eans[0] || "", asin: body.asin || "", brand: brand, manufacturer: manufacturer, queries: queries.map(function (x) { return x.q; }).slice(0, 12), engines: sr.engines || [], raw: (sr.results || []).length, leads: leads.slice(0, 15).map(function (l) { return { host: l.host, role: l.role, score: l.score, engines: l.engines || [], nuevo: Boolean(l.isNew), ia: l.ai ? l.ai.rol : "" }; }), tiendas: retailers.length, reutilizadas: reused, errores: sr.errors || [] }); } catch (e) {}
   try { require("../lib/usage").add("value", { busquedasProveedor: 1, websReutilizadas: reused, consultasCache: sr.cachedQueries || 0, proveedores: leads.length }); } catch (e) {}
   let newCount = 0;
   if (prevSet) {

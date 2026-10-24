@@ -28,6 +28,12 @@ function add(kind, data) {
   seq += 1;
   buf.push({ n: seq, t: new Date().toISOString(), kind: String(kind || "evt"), d: clean(data) });
   if (buf.length > MAX) buf.shift();
+  /* Lo importante tambien va al diario permanente (lib/journal). */
+  const k = String(kind || "");
+  const d = data || {};
+  const keep = k === "error" || k === "radar" || (k === "tarifa_cruce" && d.phase !== "lote") ||
+    (k === "outreach" && d.phase !== "tick") || ((k === "apify" || k === "ai") && d.ok === false);
+  if (keep) { try { require("./journal").add(k, d); } catch (e) {} }
 }
 
 function list(opts) {

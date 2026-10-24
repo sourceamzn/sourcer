@@ -41,6 +41,19 @@ function apiKeyGuard(opts) {
       return next();
     }
     const got = req.headers && req.headers["x-api-key"];
+    /* Clave de auditoria (AUDIT_KEYS): SOLO lectura (GET) y solo en las rutas
+       de consulta. Sirve para que una auditoria automatica lea el diario y el
+       consumo sin poder cambiar ni enviar nada. */
+    const ro = (o.readOnlyKeys ? o.readOnlyKeys() : []) || [];
+    if (got && ro.length && ro.some(function (k) { return safeEqual(k, got); })) {
+      const path = String(req.originalUrl || req.url || "").split("?")[0];
+      const allowed = ["/usage", "/feedback", "/learn", "/radar", "/tarifas/cruces", "/contacts", "/health"];
+      if (req.method === "GET" && allowed.some(function (p) { return path === p || path.indexOf(p + "/") === 0; })) {
+        req.apiKey = "audit"; req.readOnly = true;
+        return next();
+      }
+      return res.status(403).json({ ok: false, reason: "clave_solo_lectura", hint: "La clave de auditoria solo puede consultar." });
+    }
     if (!got || !list.some(function (k) { return safeEqual(k, got); })) {
       return res.status(401).json({
         ok: false,

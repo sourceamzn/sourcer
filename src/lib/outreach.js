@@ -352,8 +352,13 @@ async function sendManual(c, input) {
 async function approveDraft(c, edit) {
   const o = c.outreach;
   if (!o || o.state !== "revision" || !o.draft) return { ok: false, reason: "sin_borrador" };
+  const before = { subject: o.draft.subject || "", text: o.draft.text || "" };
   if (edit && edit.subject) o.draft.subject = String(edit.subject).slice(0, 300);
   if (edit && edit.text) o.draft.text = String(edit.text).slice(0, 10000);
+  if (before.subject !== o.draft.subject || before.text !== o.draft.text) {
+    /* Lo que cambias antes de enviar dice que falla en las plantillas. */
+    try { require("./journal").add("borrador_editado", { contact: c.id, n: o.draft.n, lang: o.draft.lang || "es", asuntoAntes: before.subject, asuntoDespues: o.draft.subject, textoAntes: before.text.slice(0, 1500), textoDespues: o.draft.text.slice(0, 1500) }); } catch (e) {}
+  }
   o.draft.approved = true;
   o.draft.approvedAt = nowIso();
   o.state = "activo";

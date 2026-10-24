@@ -26,6 +26,7 @@ router.get("/", ah(async function (req, res) {
 router.post("/block", ah(async function (req, res) {
   const b = req.body || {};
   const d = await learn.block(b.host || b.url, { title: b.title, url: b.url });
+  try { require("../lib/journal").add("decision", { what: "no_es_proveedor", host: b.host || b.url }); } catch (e) {}
   if (!d) return res.status(400).json({ ok: false, reason: "sin_web" });
   res.json({ ok: true, domain: d });
 }));

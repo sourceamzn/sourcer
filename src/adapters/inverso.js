@@ -2237,6 +2237,12 @@ const inverso = {
         } catch (e) {}
       }
       const r = await candidatesLarge(body);
+      try {
+        const d = (r && r.data) || {};
+        require("../lib/journal").add("busqueda_producto", { query: String(body.query || body.q || ""), categoryId: String(body.categoryId || body.category || ""), via: d.via || "", ok: Boolean(r && r.ok), reason: r && !r.ok ? (r.reason || "") : "", counts: d.counts || null, mas: page > 0 || Boolean((body.exclude || []).length),
+          top: (d.candidates || []).slice(0, 12).map(function (c) { return { asin: c.asin, estado: c.estado, ventas: c.sales, fba: c.fbaThird, pvp: c.pvp, dto: c.plan && c.plan.discount, motivo: c.plan && c.plan.reasons ? String(c.plan.reasons[0] || "").slice(0, 120) : "" }; }),
+          notas: (d.notes || []).slice(-6) });
+      } catch (e) {}
       if (firstPage && r && r.ok && r.data && (r.data.candidates || []).length) {
         try {
           const data = Object.assign({}, r.data, { candidates: r.data.candidates.map(historyLib.slimCandidate) });
@@ -2493,6 +2499,10 @@ const inverso = {
         out.leads = lr.data;
         out.searched = [lr.entry].concat(out.searched || []);
       }
+      try {
+        const fr = await require("../lib/feedback").filterOffers([full.asin, full.ean].concat(full.eans || []), out.matches);
+        if (fr.removed) { out.matches = fr.matches; out.cheapestVerified = null; }
+      } catch (e) {}
       return buildSourcesPayload(out, full, priceMax);
     },
     /* Solo fabricante/distribuidor, sin cascada de ofertas. */

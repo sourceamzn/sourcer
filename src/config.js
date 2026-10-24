@@ -27,6 +27,8 @@ const config = {
      clave se pega en el navegador (Conexiones) y viaja en X-API-Key. */
   allowedOrigins: clean(process.env.ALLOWED_ORIGINS) || "https://tools.bruneagroup.com",
   apiKeys: clean(process.env.API_KEYS).split(",").map(function (k) { return k.trim(); }).filter(Boolean),
+  /* Claves de solo lectura para la auditoria automatica (diario, consumo). */
+  auditKeys: clean(process.env.AUDIT_KEYS).split(",").map(function (k) { return k.trim(); }).filter(function (k) { return k.length >= 20; }),
   rateLimitPerMin: Math.max(0, parseInt(clean(process.env.RATE_LIMIT_PER_MIN) || "60", 10) || 0),
   beaconRatePerMin: Math.max(0, parseInt(clean(process.env.BEACON_RATE_PER_MIN) || "30", 10) || 0),
   beaconMaxBytes: Math.max(1024, parseInt(clean(process.env.BEACON_MAX_BYTES) || "16384", 10) || 16384),

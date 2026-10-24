@@ -31,7 +31,7 @@ app.use(express.json({ limit: "6mb" }));
 app.use(security.cors({ origins: function () { return config.allowedOrigins; } }));
 
 const apiLimit = security.rateLimit({ scope: "api", limit: function () { return config.rateLimitPerMin; } });
-const requireApiKey = security.apiKeyGuard({ keys: function () { return config.apiKeys; }, env: function () { return config.env; } });
+const requireApiKey = security.apiKeyGuard({ keys: function () { return config.apiKeys; }, readOnlyKeys: function () { return config.auditKeys; }, env: function () { return config.env; } });
 const beaconLimit = security.rateLimit({
   scope: "beacon",
   limit: function () { return config.beaconRatePerMin; },
@@ -65,6 +65,7 @@ app.use("/tarifas/cruces", apiLimit, requireApiKey, tarifCrossRoutes);
 app.use("/learn", apiLimit, requireApiKey, learnRoutes);
 app.use("/radar", apiLimit, requireApiKey, require("./routes/radar"));
 app.use("/usage", apiLimit, requireApiKey, require("./routes/usage"));
+app.use("/feedback", apiLimit, requireApiKey, require("./routes/feedback"));
 
 /* Inicializa el almacen del vigilante en segundo plano (no bloquea el arranque). */
 store.init().catch(function () {});

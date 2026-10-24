@@ -108,9 +108,12 @@ async function api(method,path,body){
   if(!r.ok||!j||j.ok===false)throw new Error((j&&j.reason)||("HTTP "+r.status));
   return j;
 }
+var J=null,MON=null;
 async function load(force){
   if(loading)return;loading=true;
   try{D=await api("GET","/usage"+(force?"?refresh=1":""));err="";}catch(e){err=String(e.message||e);}
+  try{J=(await api("GET","/feedback/journal/summary?days=7")).summary;}catch(e){J=null;}
+  try{MON=(await api("GET","/feedback/journal/months")).months||[];}catch(e){MON=null;}
   loading=false;render();
 }
 function setup(){
@@ -153,6 +156,33 @@ function valueHTML(){
     k("Respuestas",v.respuestas||0,fmt(v.tarifasRecibidas||0)+" con tarifa")+
     k("Coste por oportunidad",per(ops),"respuesta: "+per(v.respuestas||0))+
   '</div>';
+}
+var KIND={busqueda_producto:"Búsquedas de productos",busqueda_proveedor:"Búsquedas de proveedor",radar:"Pasadas del radar",tarifa_cruce:"Cruces de tarifa",decision:"Decisiones tuyas",outreach:"Correos (enviados / recibidos)",feedback:"Correcciones «Esto está mal»",feedback_deshecho:"Correcciones deshechas",error:"Errores",apify:"Fallos de Apify",ai:"Fallos de la IA"};
+function journalHTML(){
+  if(!J)return "";
+  var kinds=Object.keys(J.byKind||{}).sort(function(a,b){return J.byKind[b]-J.byKind[a];});
+  var fb=(J.feedback||[]).map(function(x){return '<div class="k">'+esc(({lead:"Proveedor",producto:"Producto",tarifa:"Tarifa",ia_respuesta:"IA"}[x[0].split(":")[0]]||x[0].split(":")[0])+" · "+String(x[0].split(":")[1]||"").replace(/_/g," "))+'</div><div class="val"><b>'+x[1]+'</b></div>';}).join("");
+  var er=(J.errors||[]).map(function(x){return '<div class="k" style="word-break:break-word">'+esc(x[0])+'</div><div class="val"><b>'+x[1]+'</b></div>';}).join("");
+  return '<div class="card chartcard"><div class="row" style="justify-content:space-between"><h3>Diario de pruebas · últimos 7 días</h3><div class="row"><span class="sub">'+(J.persistent?'Detalle 1 año · resumen mensual para siempre':'<span class="err">Sin base de datos: solo en memoria</span>')+'</span><button class="btn sm primary" id="jdl">Descargar diario (7 días)</button><button class="btn sm" id="jdl30">30 días</button></div></div>'+
+    '<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr))">'+
+    '<div><div class="al sub" style="font-weight:600;margin-bottom:4px">Qué ha pasado</div><div class="metrics">'+(kinds.length?kinds.map(function(k){return '<div class="k">'+esc(KIND[k]||k)+'</div><div class="val">'+J.byKind[k]+'</div>';}).join(""):'<div class="k">Nada todavía</div><div></div>')+'</div></div>'+
+    '<div><div class="al sub" style="font-weight:600;margin-bottom:4px">Correcciones más repetidas</div><div class="metrics">'+(fb||'<div class="k">Ninguna todavía</div><div></div>')+'</div></div>'+
+    '<div><div class="al sub" style="font-weight:600;margin-bottom:4px">Errores más repetidos</div><div class="metrics">'+(er||'<div class="k">Ninguno</div><div></div>')+'</div></div>'+
+    '</div><div class="sub">Descarga el diario cada semana y pásaselo a Claude para la revisión.</div></div>';
+}
+async function jdownload(days){
+  try{var j=await api("GET","/feedback/journal?days="+days);
+    var a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(j,null,1)],{type:"application/json"}));a.download="diario-sourcing-"+new Date().toISOString().slice(0,10)+"-"+days+"d.json";a.click();
+  }catch(e){alert(String(e.message||e).replace(/^(KEY|NET):/,""));}
+}
+function monthsHTML(){
+  if(!MON||!MON.length)return "";
+  var h=["Mes","Búsquedas de productos","Oportunidades vistas","Búsquedas de proveedor","Proveedores vistos","Decisiones","Correcciones","Errores","Tokens Keepa"];
+  return '<div class="card chartcard"><h3>Histórico por meses</h3><div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>'+h.map(function(x,i){return '<th style="text-align:'+(i?'right':'left')+';padding:6px 8px;border-bottom:1px solid var(--line);color:var(--muted);font-weight:600">'+x+'</th>';}).join("")+'</tr></thead><tbody>'+
+    MON.map(function(m){var by=m.byKind||{},dec=0;Object.keys(m.decisions||{}).forEach(function(k){dec+=m.decisions[k];});
+      var c=[m.month+(m.closed?"":" (en curso)"),m.busquedasProducto||0,m.aptosEnBusquedas||0,m.busquedasProveedor||0,m.proveedoresVistos||0,dec,by.feedback||0,by.error||0,(m.usage&&m.usage.keepa&&m.usage.keepa.tokens)||0];
+      return '<tr>'+c.map(function(v,i){return '<td style="text-align:'+(i?'right':'left')+';padding:6px 8px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums">'+fmt(v)+'</td>';}).join("")+'</tr>';}).join("")+
+    '</tbody></table></div></div>';
 }
 function chartHTML(){
   if(!D||!D.days)return "";
@@ -205,13 +235,15 @@ function render(){
     '<div class="kpi"><div class="l">Caché (ahorro)</div><div class="v">'+(D.cache&&D.cache.hitRate!=null?D.cache.hitRate+" %":"—")+'</div><div class="n">consultas servidas sin pagar</div></div></div>'+
     valueHTML()+
     (alerts.length?'<div class="alerts">'+alerts.map(function(a){return '<div class="alert '+(a.level==="bad"?"bad":"warn")+'">'+(a.level==="bad"?"●":"▲")+' <span>'+esc(a.text)+'</span></div>';}).join("")+'</div>':'')+
-    '<div class="grid">'+D.services.map(card).join("")+'</div>'+chartHTML()+
+    '<div class="grid">'+D.services.map(card).join("")+'</div>'+chartHTML()+journalHTML()+monthsHTML()+
     '<footer>Costes en euros (1 $ ≈ '+String(D.usdEur).replace(".",",")+' €). Keepa es tarifa fija; Apify sale de tu cuenta real; Brave e IA son estimaciones de la herramienta. Lo exacto, en el panel de cada servicio.</footer>';
   wire();drawChart();
 }
 function wire(){
   $("rf").onclick=function(){load(true);};
   $("cv").onclick=csv;
+  if($("jdl"))$("jdl").onclick=function(){jdownload(7);};
+  if($("jdl30"))$("jdl30").onclick=function(){jdownload(30);};
   $("th").onclick=function(){var dark=document.documentElement.getAttribute("data-theme")==="dark"||(!document.documentElement.getAttribute("data-theme")&&matchMedia("(prefers-color-scheme: dark)").matches);own.theme=dark?"light":"dark";document.documentElement.setAttribute("data-theme",own.theme);saveOwn();drawChart();};
   $("auto").onchange=function(){own.auto=this.checked;saveOwn();};
   var cs=$("csel");if(cs)cs.onchange=function(){chartSvc=cs.value;own.chartSvc=chartSvc;saveOwn();drawChart();};

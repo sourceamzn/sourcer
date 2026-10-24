@@ -35,6 +35,8 @@ function scoreOf(d) {
   if (d.rejected) s -= 30;
   if (d.discarded) s -= 10;
   if (d.blocked) s -= 100;
+  if (d.manual) s += 20;
+  if (d.good) s += 10;
   return s;
 }
 
@@ -64,7 +66,7 @@ async function syncContact(c) {
     d.rejected = ["rechazado", "descartado"].indexOf(st) !== -1;
     const brands = {};
     (c.products || []).forEach(function (p) { if (p && p.brand && norm(p.brand)) brands[norm(p.brand)] = p.brand; });
-    (d.marginBrands || []).forEach(function (b) { if (norm(b)) brands[norm(b)] = brands[norm(b)] || b; });
+    (d.marginBrands || []).concat(d.manualBrands || []).forEach(function (b) { if (norm(b)) brands[norm(b)] = brands[norm(b)] || b; });
     d.brands = Object.keys(brands).map(function (k) { return brands[k]; }).slice(0, 60);
     return await putDomain(d);
   } catch (e) { return null; }
@@ -124,6 +126,55 @@ async function forgetBrand(host, brand) {
   return putDomain(d);
 }
 
+/* «Esto esta mal» en un proveedor: su papel real (tienda, fabricante...). */
+async function setRole(host, role) {
+  host = hostOf(host);
+  if (!host) return null;
+  const d = (await getDomain(host)) || { host: host, title: host, url: "https://" + host };
+  const prev = d.roleOverride || null;
+  if (role) d.roleOverride = role; else delete d.roleOverride;
+  await putDomain(d);
+  return { prev: prev };
+}
+async function notBrand(host, brand, undo) {
+  host = hostOf(host);
+  const n = norm(brand);
+  if (!host || !n) return null;
+  const d = (await getDomain(host)) || { host: host, title: host, url: "https://" + host };
+  d.notBrands = (d.notBrands || []).filter(function (b) { return norm(b) !== n; });
+  if (!undo) d.notBrands.push(brand);
+  if (!undo) {
+    d.brands = (d.brands || []).filter(function (b) { return norm(b) !== n; });
+    d.forgotBrands = (d.forgotBrands || []).concat([n]).slice(-100);
+  } else d.forgotBrands = (d.forgotBrands || []).filter(function (b) { return b !== n; });
+  await putDomain(d);
+  return d;
+}
+
+/* «Lo encontre yo»: proveedor que la busqueda no saco. Pasa a ser conocido
+   para esa marca y sale primero la proxima vez. */
+async function manualFound(host, brand, title, url, undo) {
+  host = hostOf(host);
+  if (!host) return null;
+  const d = (await getDomain(host)) || { host: host, title: title || host, url: url || ("https://" + host), marginHits: 0 };
+  const n = norm(brand);
+  d.manualBrands = (d.manualBrands || []).filter(function (b) { return norm(b) !== n; });
+  if (!undo) { if (brand) d.manualBrands.push(brand); d.manual = true; if (title) d.title = title; if (url) d.url = url; }
+  else if (!d.manualBrands.length) d.manual = false;
+  const all = {};
+  (d.brands || []).concat(d.manualBrands || []).forEach(function (b) { if (norm(b)) all[norm(b)] = b; });
+  if (undo && brand) delete all[n];
+  d.brands = Object.keys(all).map(function (k) { return all[k]; }).slice(0, 60);
+  return putDomain(d);
+}
+async function goodMark(host, on) {
+  host = hostOf(host);
+  if (!host) return null;
+  const d = (await getDomain(host)) || { host: host, title: host, url: "https://" + host };
+  d.good = Boolean(on);
+  return putDomain(d);
+}
+
 async function all() { return (await docs.list(COLL)).map(function (d) { d.score = scoreOf(d); return d; }); }
 
 /* Lo que necesita una busqueda de proveedores para una o varias marcas. */
@@ -140,7 +191,7 @@ async function forSearch(brandList) {
     if (hit.length && d.score > 0) known.push({ d: d, brand: hit[0] });
   });
   known.sort(function (a, b) { return b.d.score - a.d.score; });
-  return { byHost: byHost, blocked: blocked, known: known.slice(0, 5) };
+  return { byHost: byHost, blocked: blocked, known: known.slice(0, 5), want: want };
 }
 
 function whyText(d, brand) {
@@ -148,6 +199,8 @@ function whyText(d, brand) {
   if (d.tariff) parts.push(d.marginHits ? ("su tarifa tiene " + d.marginHits + " producto(s) con margen") : "te mandó tarifa");
   else if (d.replied) parts.push("te respondió");
   else if (d.saved) parts.push("lo guardaste");
+  if (d.manual && !parts.length) parts.push("lo añadiste tú");
+  if (d.good) parts.push("lo marcaste como buen proveedor");
   if (brand) parts.unshift("ya lo usaste para " + brand);
   return parts.join(" · ");
 }
@@ -168,6 +221,15 @@ function apply(leads, learned, leadsLib) {
       l.score = (l.score || 0) + d.score;
       l.learned = { score: d.score, why: whyText(d, ""), status: d.status || "" };
       if (d.rejected) l.learned.why = "te dijo que no";
+      /* Correcciones del usuario («Esto esta mal»). */
+      if (d.roleOverride) {
+        l.role = d.roleOverride;
+        l.roleLabel = (leadsLib && leadsLib.ROLE_LABEL[d.roleOverride]) || l.roleLabel;
+        l.learned.why = ("lo corregiste: " + (l.roleLabel || d.roleOverride)) + (l.learned.why ? " · " + l.learned.why : "");
+        l.learned.corrected = true;
+      }
+      const nb = (d.notBrands || []).filter(function (b) { return learned.want && learned.want[norm(b)]; });
+      if (nb.length) { l.score -= 40; l.learned.why = "dijiste que no vende " + nb[0]; l.learned.notBrand = true; }
     }
     seen[h] = 1;
     out.push(l);
@@ -229,4 +291,4 @@ async function engineStats() {
   return { soloBrave: out.brave, soloGoogle: out.google, ambos: out.ambos, desde: hits.reduce(function (m, h) { return !m || (h.firstAt && h.firstAt < m) ? h.firstAt : m; }, "") };
 }
 
-module.exports = { engineHits, engineStats, syncContact, contactRemoved, tariffResult, block, unblock, forget, forgetBrand, all, forSearch, apply, scoreOf, norm, hostOf };
+module.exports = { manualFound, goodMark, setRole, notBrand, engineHits, engineStats, syncContact, contactRemoved, tariffResult, block, unblock, forget, forgetBrand, all, forSearch, apply, scoreOf, norm, hostOf };
